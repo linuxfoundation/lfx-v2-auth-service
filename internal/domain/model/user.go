@@ -14,6 +14,7 @@ import (
 type User struct {
 	Token        string        `json:"token" yaml:"token"`
 	UserID       string        `json:"user_id" yaml:"user_id"`
+	Sub          string        `json:"sub,omitempty" yaml:"sub,omitempty"`
 	Username     string        `json:"username" yaml:"username"`
 	PrimaryEmail string        `json:"primary_email" yaml:"primary_email"`
 	UserMetadata *UserMetadata `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
@@ -60,6 +61,7 @@ func (u *User) UserSanitize() {
 	// Sanitize basic user fields
 	u.Token = strings.TrimSpace(u.Token)
 	u.UserID = strings.TrimSpace(u.UserID)
+	u.Sub = strings.TrimSpace(u.Sub)
 	u.Username = strings.TrimSpace(u.Username)
 	u.PrimaryEmail = strings.TrimSpace(u.PrimaryEmail)
 
@@ -115,4 +117,23 @@ func (um *UserMetadata) userMetadataSanitize() {
 	if um.Zoneinfo != nil {
 		*um.Zoneinfo = strings.TrimSpace(*um.Zoneinfo)
 	}
+}
+
+// PrepareForMetadataLookup prepares the user for metadata lookup based on the input
+// Returns true if should use canonical lookup, false if should use search
+func (u *User) PrepareForMetadataLookup(input string) bool {
+	input = strings.TrimSpace(input)
+
+	if strings.Contains(input, "|") {
+		// Input contains "|", use as sub for canonical lookup
+		u.Sub = input
+		u.UserID = input // Auth0 uses user_id for the canonical lookup
+		u.Username = ""  // Clear username field
+		return true
+	}
+	// Input doesn't contain "|", use for search query
+	u.Sub = ""    // Clear sub field
+	u.UserID = "" // Clear user_id field
+	u.Username = input
+	return false
 }

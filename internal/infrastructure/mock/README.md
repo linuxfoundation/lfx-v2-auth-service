@@ -48,6 +48,7 @@ The data source is the embedded `users.yaml` file loaded using Go's `//go:embed`
 users:
   - token: "mock-token-zephyr-001"
     user_id: "user-001"
+    sub: "provider|user-001"
     username: "zephyr.stormwind"
     primary_email: "zephyr.stormwind@mockdomain.com"
     user_metadata:

@@ -127,7 +127,10 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 			"error", err,
 			"method", a.Method,
 			"description", a.Description)
-		return -1, fmt.Errorf("failed to %s: %w", a.Description, err)
+		if re, ok := err.(*RetryableError); ok {
+			return re.StatusCode, err
+		}
+		return -1, errors.NewUnexpected("API request failed", err)
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -136,7 +139,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 			"response_body", string(response.Body),
 			"method", a.Method,
 			"description", a.Description)
-		return response.StatusCode, fmt.Errorf("API returned status %d: %s", response.StatusCode, string(response.Body))
+		return response.StatusCode, errors.NewUnexpected("API returned error", fmt.Errorf("status code: %d", response.StatusCode))
 	}
 
 	// If caller doesn't need the body or there's no content, skip JSON decoding.

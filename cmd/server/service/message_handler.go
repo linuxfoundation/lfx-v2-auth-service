@@ -28,6 +28,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 	handlers := map[string]func(ctx context.Context, msg port.TransportMessenger) ([]byte, error){
 		constants.UserMetadataUpdateSubject: mhs.messageHandler.UpdateUser,
 		constants.UserEmailToUserSubject:    mhs.messageHandler.EmailToUsername,
+		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
 	}
 
 	handler, ok := handlers[subject]

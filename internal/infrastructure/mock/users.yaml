@@ -3,7 +3,8 @@
 ---
 users:
   - token: "mock-token-zephyr-001"
-    user_id: "user-001"
+    user_id: "auth0|zephyr001"
+    sub: "auth0|zephyr001"
     username: "zephyr.stormwind"
     primary_email: "zephyr.stormwind@mockdomain.com"
     user_metadata:
@@ -23,7 +24,8 @@ users:
       t_shirt_size: "M"
 
   - token: "mock-token-aurora-002"
-    user_id: "user-002"
+    user_id: "auth0|aurora002"
+    sub: "auth0|aurora002"
     username: "aurora.moonbeam"
     primary_email: "aurora.moonbeam@fantasycorp.io"
     user_metadata:
@@ -43,7 +45,8 @@ users:
       t_shirt_size: "L"
 
   - token: "mock-token-phoenix-003"
-    user_id: "user-003"
+    user_id: "auth0|phoenix003"
+    sub: "auth0|phoenix003"
     username: "phoenix.fireforge"
     primary_email: "phoenix.fireforge@legendarydev.net"
     user_metadata:

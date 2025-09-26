@@ -854,3 +854,256 @@ func TestMessageHandlerOrchestrator_Integration(t *testing.T) {
 		}
 	})
 }
+
+func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		mockGetUser    func(ctx context.Context, user *model.User) (*model.User, error)
+		mockSearchUser func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
+		expectedError  bool
+		expectedData   *model.UserMetadata
+		description    string
+	}{
+		{
+			name:  "canonical lookup success",
+			input: "auth0|123456789",
+			mockGetUser: func(ctx context.Context, user *model.User) (*model.User, error) {
+				// Verify the user was prepared correctly for canonical lookup
+				if user.Sub != "auth0|123456789" || user.UserID != "auth0|123456789" {
+					t.Errorf("User not prepared correctly for canonical lookup: Sub=%q, UserID=%q", user.Sub, user.UserID)
+				}
+				return &model.User{
+					UserID:   "auth0|123456789",
+					Username: "john.doe",
+					UserMetadata: &model.UserMetadata{
+						Name:     converters.StringPtr("John Doe"),
+						JobTitle: converters.StringPtr("Software Engineer"),
+					},
+				}, nil
+			},
+			expectedError: false,
+			expectedData: &model.UserMetadata{
+				Name:     converters.StringPtr("John Doe"),
+				JobTitle: converters.StringPtr("Software Engineer"),
+			},
+			description: "Should use GetUser for canonical lookup and return user metadata",
+		},
+		{
+			name:  "search lookup success",
+			input: "john.doe",
+			mockSearchUser: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+				// Verify the user was prepared correctly for search lookup
+				if user.Username != "john.doe" {
+					t.Errorf("User not prepared correctly for search lookup: Username=%q", user.Username)
+				}
+				// Verify the criteria is correct
+				if criteria != constants.CriteriaTypeUsername {
+					t.Errorf("Wrong criteria passed: got %q, expected %q", criteria, constants.CriteriaTypeUsername)
+				}
+				return &model.User{
+					UserID:   "auth0|987654321",
+					Username: "john.doe",
+					UserMetadata: &model.UserMetadata{
+						Name:         converters.StringPtr("John Doe"),
+						Organization: converters.StringPtr("Example Corp"),
+					},
+				}, nil
+			},
+			expectedError: false,
+			expectedData: &model.UserMetadata{
+				Name:         converters.StringPtr("John Doe"),
+				Organization: converters.StringPtr("Example Corp"),
+			},
+			description: "Should use SearchUser for search lookup and return user metadata",
+		},
+		{
+			name:  "canonical lookup user not found",
+			input: "auth0|nonexistent",
+			mockGetUser: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return nil, errors.NewNotFound("user not found")
+			},
+			expectedError: true,
+			expectedData:  nil,
+			description:   "Should return error when canonical lookup fails",
+		},
+		{
+			name:  "search lookup user not found",
+			input: "nonexistent.user",
+			mockSearchUser: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+				return nil, errors.NewNotFound("user not found by criteria")
+			},
+			expectedError: true,
+			expectedData:  nil,
+			description:   "Should return error when search lookup fails",
+		},
+		{
+			name:          "empty input",
+			input:         "",
+			expectedError: true,
+			expectedData:  nil,
+			description:   "Should return error for empty input",
+		},
+		{
+			name:          "whitespace only input",
+			input:         "   ",
+			expectedError: true,
+			expectedData:  nil,
+			description:   "Should return error for whitespace-only input",
+		},
+		{
+			name:  "canonical lookup with nil metadata",
+			input: "auth0|123456789",
+			mockGetUser: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserID:       "auth0|123456789",
+					Username:     "john.doe",
+					UserMetadata: nil, // No metadata
+				}, nil
+			},
+			expectedError: false,
+			expectedData:  nil,
+			description:   "Should handle users with no metadata gracefully",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mock user reader
+			mockReader := &mockUserServiceReader{
+				getUserFunc:    tt.mockGetUser,
+				searchUserFunc: tt.mockSearchUser,
+			}
+
+			// Create message handler orchestrator
+			orchestrator := &messageHandlerOrchestrator{
+				userReader: mockReader,
+			}
+
+			// Create mock transport messenger
+			msg := &mockTransportMessenger{
+				data: []byte(tt.input),
+			}
+
+			// Call GetUserMetadata
+			ctx := context.Background()
+			response, err := orchestrator.GetUserMetadata(ctx, msg)
+
+			// Check for unexpected errors
+			if err != nil {
+				t.Fatalf("GetUserMetadata returned unexpected error: %v", err)
+			}
+
+			// Parse response
+			var userResponse UserDataResponse
+			if err := json.Unmarshal(response, &userResponse); err != nil {
+				t.Fatalf("Failed to unmarshal response: %v", err)
+			}
+
+			// Check error expectation
+			if tt.expectedError {
+				if userResponse.Success {
+					t.Errorf("Expected error but got success response")
+				}
+				if userResponse.Error == "" {
+					t.Errorf("Expected error message but got empty string")
+				}
+			} else {
+				if !userResponse.Success {
+					t.Errorf("Expected success but got error: %s", userResponse.Error)
+				}
+				if userResponse.Error != "" {
+					t.Errorf("Expected no error but got: %s", userResponse.Error)
+				}
+
+				// Check data
+				if tt.expectedData == nil {
+					if userResponse.Data != nil {
+						t.Errorf("Expected nil data but got: %+v", userResponse.Data)
+					}
+				} else {
+					// Convert interface{} back to UserMetadata for comparison
+					dataBytes, err := json.Marshal(userResponse.Data)
+					if err != nil {
+						t.Fatalf("Failed to marshal response data: %v", err)
+					}
+					var actualMetadata model.UserMetadata
+					if err := json.Unmarshal(dataBytes, &actualMetadata); err != nil {
+						t.Fatalf("Failed to unmarshal response data: %v", err)
+					}
+
+					// Compare metadata fields
+					if !compareUserMetadata(&actualMetadata, tt.expectedData) {
+						t.Errorf("Metadata mismatch:\nActual: %+v\nExpected: %+v", actualMetadata, *tt.expectedData)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_GetUserMetadata_NoUserReader(t *testing.T) {
+	// Test when userReader is nil
+	orchestrator := &messageHandlerOrchestrator{
+		userReader: nil,
+	}
+
+	msg := &mockTransportMessenger{
+		data: []byte("auth0|123456789"),
+	}
+
+	ctx := context.Background()
+	response, err := orchestrator.GetUserMetadata(ctx, msg)
+
+	if err != nil {
+		t.Fatalf("GetUserMetadata returned unexpected error: %v", err)
+	}
+
+	var userResponse UserDataResponse
+	if err := json.Unmarshal(response, &userResponse); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if userResponse.Success {
+		t.Errorf("Expected error but got success")
+	}
+	if userResponse.Error != "user service unavailable" {
+		t.Errorf("Expected 'user service unavailable' error, got: %s", userResponse.Error)
+	}
+}
+
+// Helper function to compare UserMetadata structs
+func compareUserMetadata(actual, expected *model.UserMetadata) bool {
+	if actual == nil && expected == nil {
+		return true
+	}
+	if actual == nil || expected == nil {
+		return false
+	}
+
+	return compareStringPtr(actual.Name, expected.Name) &&
+		compareStringPtr(actual.JobTitle, expected.JobTitle) &&
+		compareStringPtr(actual.Organization, expected.Organization) &&
+		compareStringPtr(actual.Picture, expected.Picture) &&
+		compareStringPtr(actual.GivenName, expected.GivenName) &&
+		compareStringPtr(actual.FamilyName, expected.FamilyName) &&
+		compareStringPtr(actual.Country, expected.Country) &&
+		compareStringPtr(actual.StateProvince, expected.StateProvince) &&
+		compareStringPtr(actual.City, expected.City) &&
+		compareStringPtr(actual.Address, expected.Address) &&
+		compareStringPtr(actual.PostalCode, expected.PostalCode) &&
+		compareStringPtr(actual.PhoneNumber, expected.PhoneNumber) &&
+		compareStringPtr(actual.TShirtSize, expected.TShirtSize) &&
+		compareStringPtr(actual.Zoneinfo, expected.Zoneinfo)
+}
+
+// Helper function to compare string pointers
+func compareStringPtr(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}

@@ -13,13 +13,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -136,22 +137,22 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 		return nil, errors.NewValidation(fmt.Sprintf("invalid criteria type: %s", criteria))
 	}
 
-	param := func(criteriaType string) string {
+	param := func(criteriaType string) []any {
 		switch criteriaType {
 		case constants.CriteriaTypeEmail:
 			slog.DebugContext(ctx, "searching user",
 				"criteria", criteria,
 				"email", redaction.RedactEmail(user.PrimaryEmail),
 			)
-			return url.QueryEscape(strings.ToLower(strings.TrimSpace(user.PrimaryEmail)))
+			return []any{url.QueryEscape(strings.ToLower(strings.TrimSpace(user.PrimaryEmail)))}
 		case constants.CriteriaTypeUsername:
 			slog.DebugContext(ctx, "searching user",
 				"criteria", criteria,
 				"username", redaction.Redact(user.Username),
 			)
-			return url.QueryEscape(strings.TrimSpace(user.Username))
+			return []any{url.QueryEscape(strings.TrimSpace(user.Username))}
 		}
-		return ""
+		return []any{}
 	}
 
 	if user.Token == "" {
@@ -162,7 +163,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 		user.Token = m2mToken
 	}
 
-	endpointWithParam := fmt.Sprintf(endpoint, param(criteria))
+	endpointWithParam := fmt.Sprintf(endpoint, param(criteria)...)
 	url := fmt.Sprintf("https://%s/api/v2/%s", u.config.Domain, endpointWithParam)
 
 	apiRequest := httpclient.NewAPIRequest(
@@ -188,25 +189,51 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 		return nil, errors.NewNotFound("user not found")
 	}
 
-	for _, user := range users {
+	slog.DebugContext(ctx, "users found, checking if the user is the one with the correct identity",
+		"criteria", criteria,
+	)
+
+	for _, userResult := range users {
 		// identities.user_id:{{username}} AND identities.connection:Username-Password-Authentication
-		// It doesn't work like an AND, it works like an OR
+		// It doesn't work like an AND, it works like an IN clause
+		// (check if it contains the username and the connection, but they might not be in  the same identity)
 		// So it's necessary to check if the identity is the one we are looking for
-		for _, identity := range user.Identities {
+		for _, identity := range userResult.Identities {
 			if identity.Connection == usernameFilter {
+				// if the search is by username, we need to check if the identity is the one we are looking for
+				//
+				// At this point, we know that the user is found, but the validation is to
+				// make sure the username is from the Username-Password-Authentication connection
+				if criteria == constants.CriteriaTypeUsername && identity.UserID != user.Username {
+					slog.DebugContext(ctx, "user found, but it's not the correct identity",
+						"filter", usernameFilter,
+						"user_id", redaction.Redact(identity.UserID),
+					)
+					// if the connection is Password-Authentication and the user is not the one we are looking for,
+					// we need to return an error
+					return nil, errors.NewNotFound("user not found")
+				}
 				user.Username = identity.UserID
-				return user.ToUser(), nil
+				return userResult.ToUser(), nil
 			}
 		}
 	}
 
-	return nil, errors.NewNotFound("user not found by criteria")
+	return nil, errors.NewNotFound("user not found")
 
 }
 
 func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	slog.DebugContext(ctx, "getting user", "user_id", user.UserID)
+
+	if user.Token == "" {
+		m2mToken, errGetToken := u.config.M2MTokenManager.GetToken(ctx)
+		if errGetToken != nil {
+			return nil, errors.NewUnexpected("failed to get M2M token", errGetToken)
+		}
+		user.Token = m2mToken
+	}
 
 	// If we don't have a user ID, we can't fetch the user
 	if user.UserID == "" {
@@ -227,13 +254,7 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	)
 
 	// Parse the response to update the user object
-	var auth0User struct {
-		UserID       string              `json:"user_id"`
-		Username     string              `json:"username,omitempty"`
-		Email        string              `json:"email,omitempty"`
-		UserMetadata *model.UserMetadata `json:"user_metadata,omitempty"`
-	}
-
+	var auth0User *model.Auth0User
 	statusCode, errCall := apiRequest.Call(ctx, &auth0User)
 	if errCall != nil {
 		slog.ErrorContext(ctx, "failed to get user from Auth0",
@@ -241,22 +262,23 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 			"status_code", statusCode,
 			"user_id", user.UserID,
 		)
+		if statusCode == http.StatusNotFound {
+			return nil, errors.NewNotFound("user not found")
+		}
 		return nil, errors.NewUnexpected("failed to get user from Auth0", errCall)
 	}
 
-	// Update the user object with data from Auth0
-	if auth0User.Username != "" {
-		user.Username = auth0User.Username
-	}
-	if auth0User.Email != "" {
-		user.PrimaryEmail = auth0User.Email
-	}
-	if auth0User.UserMetadata != nil {
-		user.UserMetadata = auth0User.UserMetadata
+	if auth0User == nil {
+		slog.ErrorContext(ctx, "failed to get user from Auth0",
+			"status_code", statusCode,
+			"user_id", user.UserID,
+		)
+		return nil, errors.NewNotFound("user not found")
 	}
 
 	slog.DebugContext(ctx, "user retrieved successfully", "user_id", user.UserID)
-	return user, nil
+
+	return auth0User.ToUser(), nil
 }
 
 func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {

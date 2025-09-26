@@ -23,13 +23,25 @@ type Auth0Identity struct {
 	IsSocial   bool   `json:"isSocial"`
 }
 
-// Auth0UserMetadata represents the metadata of a user in Auth0
+// Auth0UserMetadata represents the metadata of a user in Auth0.
+//
+// It's the same as the domain User.UserMetadata, but it might be useful
+// to have it separated for Auth0 to handle it separately if needed.
 type Auth0UserMetadata struct {
-	Name       *string `json:"name"`
-	FamilyName *string `json:"family_name"`
-	GivenName  *string `json:"given_name"`
-	Picture    *string `json:"picture"`
-	JobTitle   *string `json:"job_title"`
+	Name          *string `json:"name"`
+	FamilyName    *string `json:"family_name"`
+	GivenName     *string `json:"given_name"`
+	Picture       *string `json:"picture"`
+	JobTitle      *string `json:"job_title"`
+	Organization  *string `json:"organization"`
+	Country       *string `json:"country"`
+	StateProvince *string `json:"state_province"`
+	City          *string `json:"city"`
+	Address       *string `json:"address"`
+	PostalCode    *string `json:"postal_code"`
+	PhoneNumber   *string `json:"phone_number"`
+	TShirtSize    *string `json:"t_shirt_size"`
+	Zoneinfo      *string `json:"zoneinfo"`
 }
 
 // ToUser converts an Auth0User to a User
@@ -37,11 +49,20 @@ func (u *Auth0User) ToUser() *User {
 	var meta *UserMetadata
 	if u.UserMetadata != nil {
 		meta = &UserMetadata{
-			Name:       u.UserMetadata.Name,
-			FamilyName: u.UserMetadata.FamilyName,
-			GivenName:  u.UserMetadata.GivenName,
-			Picture:    u.UserMetadata.Picture,
-			JobTitle:   u.UserMetadata.JobTitle,
+			Name:          u.UserMetadata.Name,
+			FamilyName:    u.UserMetadata.FamilyName,
+			GivenName:     u.UserMetadata.GivenName,
+			Picture:       u.UserMetadata.Picture,
+			JobTitle:      u.UserMetadata.JobTitle,
+			Organization:  u.UserMetadata.Organization,
+			Country:       u.UserMetadata.Country,
+			StateProvince: u.UserMetadata.StateProvince,
+			City:          u.UserMetadata.City,
+			Address:       u.UserMetadata.Address,
+			PostalCode:    u.UserMetadata.PostalCode,
+			PhoneNumber:   u.UserMetadata.PhoneNumber,
+			TShirtSize:    u.UserMetadata.TShirtSize,
+			Zoneinfo:      u.UserMetadata.Zoneinfo,
 		}
 	}
 	return &User{

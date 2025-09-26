@@ -15,4 +15,8 @@ const (
 	// UserMetadataUpdateSubject is the subject for the user metadata update event.
 	// The subject is of the form: lfx.auth-service.user_metadata.update
 	UserMetadataUpdateSubject = "lfx.auth-service.user_metadata.update"
+
+	// UserMetadataReadSubject is the subject for the user metadata read event.
+	// The subject is of the form: lfx.auth-service.user_metadata.read
+	UserMetadataReadSubject = "lfx.auth-service.user_metadata.read"
 )

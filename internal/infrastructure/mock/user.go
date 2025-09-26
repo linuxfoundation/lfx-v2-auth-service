@@ -47,14 +47,20 @@ func loadUsersFromYAML(ctx context.Context) ([]*model.User, error) {
 func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: getting user", "user", user)
 
-	// For mock implementation, we'll use either username or primary email as key
-	key := user.Username
+	// For mock implementation, we'll use user_id, sub, username, or primary email as key
+	key := user.UserID
+	if key == "" {
+		key = user.Sub
+	}
+	if key == "" {
+		key = user.Username
+	}
 	if key == "" {
 		key = user.PrimaryEmail
 	}
 
 	if key == "" {
-		return nil, fmt.Errorf("mock: user identifier (username or primary email) is required")
+		return nil, fmt.Errorf("mock: user identifier (user_id, sub, username, or primary email) is required")
 	}
 
 	// Check if user exists in mock storage
@@ -63,9 +69,9 @@ func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User
 		return existingUser, nil
 	}
 
-	// If not found, return the input user as default behavior
-	slog.InfoContext(ctx, "mock: user not found in storage, returning input user", "key", key)
-	return user, nil
+	// If not found, return error (consistent with Auth0 behavior)
+	slog.InfoContext(ctx, "mock: user not found in storage", "key", key)
+	return nil, fmt.Errorf("user not found")
 }
 
 func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
@@ -77,21 +83,34 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 		return existingUser, nil
 	}
 
-	// If not found by criteria, fall back to GetUser behavior
-	return u.GetUser(ctx, user)
+	// If not found by criteria, try GetUser behavior
+	result, err := u.GetUser(ctx, user)
+	if err != nil {
+		// Return a more specific search error
+		slog.InfoContext(ctx, "mock: user not found by search criteria", "criteria", criteria)
+		return nil, fmt.Errorf("user not found by criteria")
+	}
+
+	return result, nil
 }
 
 func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: updating user", "user", user)
 
-	// For mock implementation, we'll use either username or primary email as key
-	key := user.Username
+	// For mock implementation, we'll use user_id, sub, username, or primary email as key
+	key := user.UserID
+	if key == "" {
+		key = user.Sub
+	}
+	if key == "" {
+		key = user.Username
+	}
 	if key == "" {
 		key = user.PrimaryEmail
 	}
 
 	if key == "" {
-		return nil, fmt.Errorf("mock: user identifier (username or primary email) is required")
+		return nil, fmt.Errorf("mock: user identifier (user_id, sub, username, or primary email) is required")
 	}
 
 	// Get existing user from storage
@@ -112,6 +131,9 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 	}
 	if user.UserID != "" {
 		updatedUser.UserID = user.UserID
+	}
+	if user.Sub != "" {
+		updatedUser.Sub = user.Sub
 	}
 	if user.Username != "" {
 		updatedUser.Username = user.Username
@@ -197,12 +219,28 @@ func NewUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 
 	slog.InfoContext(ctx, "successfully loaded users from YAML file", "count", len(mockUsers))
 
-	// Add users to storage with both username and email as keys for lookup flexibility
+	// Add users to storage with multiple keys for lookup flexibility
 	for _, user := range mockUsers {
-		users[user.Username] = user
-		users[user.PrimaryEmail] = user
+		// Add by user_id (primary key)
+		if user.UserID != "" {
+			users[user.UserID] = user
+		}
+		// Add by sub if different from user_id
+		if user.Sub != "" && user.Sub != user.UserID {
+			users[user.Sub] = user
+		}
+		// Add by username
+		if user.Username != "" {
+			users[user.Username] = user
+		}
+		// Add by primary email
+		if user.PrimaryEmail != "" {
+			users[user.PrimaryEmail] = user
+		}
 
 		slog.InfoContext(ctx, "mock: loaded user",
+			"user_id", user.UserID,
+			"sub", user.Sub,
 			"username", user.Username,
 			"primary_email", user.PrimaryEmail,
 			"name", func() string {

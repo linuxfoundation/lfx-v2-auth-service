@@ -160,6 +160,7 @@ func QueueSubscriptions(ctx context.Context) error {
 	subjects := map[string]func(context.Context, port.TransportMessenger){
 		constants.UserMetadataUpdateSubject: messageHandlerService.HandleMessage,
 		constants.UserEmailToUserSubject:    messageHandlerService.HandleMessage,
+		constants.UserMetadataReadSubject:   messageHandlerService.HandleMessage,
 		// Add more subjects here as needed
 	}
 

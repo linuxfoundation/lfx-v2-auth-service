@@ -92,6 +92,117 @@ nats request lfx.auth-service.email_to_username zephyr.stormwind@mythicaltech.io
 
 ---
 
+### User Metadata Retrieval
+
+To retrieve user metadata, send a NATS request to the following subject:
+
+**Subject:** `lfx.auth-service.user_metadata.read`  
+**Pattern:** Request/Reply
+
+The service supports two lookup strategies based on the input format, providing both authoritative identification and convenient username-based searches.
+
+##### Input Format and Strategy Selection
+
+The service automatically determines the lookup strategy based on the input format:
+
+- **Canonical Lookup** (contains `|`): `<connection>|<provider_user_id>` - Subject identifier
+- **Search Lookup** (no `|`): `<username>` - Convenience lookup
+
+##### Canonical Lookup Strategy (Recommended)
+
+**Format:** `<connection>|<provider_user_id>`
+
+The canonical lookup is the **authoritative, standard way to identify a user**, regardless of which provider they come from.
+
+**Examples:** `auth0|123456789`, `google-oauth2|987654321`, `samlp|my-connection|user123`
+
+##### Search Lookup Strategy (Convenience)
+
+**Format:** `<username>`
+
+Username lookups are **convenience only** and help avoid connection collisions within the Username-Password-Authentication connection.
+
+**Examples:** `john.doe`, `jane.smith`, `developer123`
+
+##### Request Payload
+
+The request payload should be a plain text identifier (no JSON wrapping required):
+
+**Canonical Lookup:**
+```
+auth0|123456789
+```
+
+**Search Lookup:**
+```
+john.doe
+```
+
+##### Reply
+
+The service returns a structured reply with user metadata:
+
+**Success Reply:**
+```json
+{
+  "success": true,
+  "data": {
+    "name": "John Doe",
+    "given_name": "John",
+    "family_name": "Doe",
+    "job_title": "Software Engineer",
+    "organization": "Example Corp",
+    "country": "United States",
+    "state_province": "California",
+    "city": "San Francisco",
+    "address": "123 Main Street",
+    "postal_code": "94102",
+    "phone_number": "+1-555-0123",
+    "t_shirt_size": "L",
+    "picture": "https://example.com/avatar.jpg",
+    "zoneinfo": "America/Los_Angeles"
+  }
+}
+```
+
+**Error Reply (User Not Found):**
+```json
+{
+  "success": false,
+  "error": "user not found"
+}
+```
+
+**Error Reply (Invalid Input):**
+```json
+{
+  "success": false,
+  "error": "input is required"
+}
+```
+
+##### Examples using NATS CLI
+
+```bash
+# Canonical lookup (subject identifier)
+# Note: Use quotes to escape the pipe character in shell commands
+nats request lfx.auth-service.user_metadata.read "auth0|123456789"
+
+# Search lookup (convenience username lookup)
+nats request lfx.auth-service.user_metadata.read john.doe
+
+```
+
+**Important Notes:**
+- **Canonical lookups** are the preferred method for system-to-system communication
+- **Search lookups** are provided for convenience and user-facing interfaces
+- The pipe character (`|`) in canonical identifiers must be escaped with quotes in shell commands
+- Both strategies return the same metadata format on success
+- When using mock or authelia mode, the service simulates Auth0 behavior for development and testing
+- For detailed Auth0-specific behavior and limitations, see the [Auth0 Integration Documentation](internal/infrastructure/auth0/README.md)
+
+---
+
 ### User Update Operation
 
 To update a user profile, send a NATS request to the following subject:
