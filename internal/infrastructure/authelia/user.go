@@ -16,6 +16,8 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
+
+	"github.com/google/uuid"
 )
 
 // userReaderWriter implements UserReaderWriter with pluggable storage and ConfigMap sync
@@ -112,7 +114,11 @@ func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 		return nil, errors.NewValidation("user is required")
 	}
 
-	key := user.Sub
+	key := ""
+	if user.Sub != "" {
+		key = a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
+	}
+
 	if key == "" {
 		key = user.Username
 	}
@@ -126,6 +132,25 @@ func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 		return nil, err
 	}
 	return existingUser.User, nil
+}
+
+// MetadataLookup prepares the user for metadata lookup based on the input
+// Returns true if should use canonical lookup, false if should use search
+func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, user *model.User) bool {
+	input = strings.TrimSpace(input)
+
+	user.Username = input
+	if input != "" {
+		sub, err := uuid.Parse(input)
+		if err != nil {
+			return false
+		}
+		user.Sub = sub.String()
+		// user ID is used across the system as the unique identifier for the user
+		user.UserID = sub.String()
+		return true
+	}
+	return false
 }
 
 // UpdateUser updates a user only in storage with patch-like behavior, updating only changed fields

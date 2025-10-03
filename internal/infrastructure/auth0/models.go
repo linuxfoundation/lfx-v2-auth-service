@@ -1,7 +1,9 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-package model
+package auth0
+
+import "github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 
 // Auth0User represents a user in Auth0
 type Auth0User struct {
@@ -45,10 +47,10 @@ type Auth0UserMetadata struct {
 }
 
 // ToUser converts an Auth0User to a User
-func (u *Auth0User) ToUser() *User {
-	var meta *UserMetadata
+func (u *Auth0User) ToUser() *model.User {
+	var meta *model.UserMetadata
 	if u.UserMetadata != nil {
-		meta = &UserMetadata{
+		meta = &model.UserMetadata{
 			Name:          u.UserMetadata.Name,
 			FamilyName:    u.UserMetadata.FamilyName,
 			GivenName:     u.UserMetadata.GivenName,
@@ -65,7 +67,7 @@ func (u *Auth0User) ToUser() *User {
 			Zoneinfo:      u.UserMetadata.Zoneinfo,
 		}
 	}
-	return &User{
+	return &model.User{
 		UserID:       u.UserID,
 		Username:     u.Username,
 		PrimaryEmail: u.Email,

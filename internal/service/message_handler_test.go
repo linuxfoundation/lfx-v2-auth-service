@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
@@ -46,8 +47,9 @@ func (m *mockUserServiceWriter) UpdateUser(ctx context.Context, user *model.User
 
 // mockUserServiceReader is a mock implementation of UserServiceReader for testing
 type mockUserServiceReader struct {
-	getUserFunc    func(ctx context.Context, user *model.User) (*model.User, error)
-	searchUserFunc func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
+	getUserFunc        func(ctx context.Context, user *model.User) (*model.User, error)
+	searchUserFunc     func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
+	metadataLookupFunc func(ctx context.Context, input string, user *model.User) bool
 }
 
 func (m *mockUserServiceReader) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
@@ -62,6 +64,29 @@ func (m *mockUserServiceReader) SearchUser(ctx context.Context, user *model.User
 		return m.searchUserFunc(ctx, user, criteria)
 	}
 	return user, nil
+}
+
+func (m *mockUserServiceReader) MetadataLookup(ctx context.Context, input string, user *model.User) bool {
+	if m.metadataLookupFunc != nil {
+		return m.metadataLookupFunc(ctx, input, user)
+	}
+
+	// Default implementation: follow the same logic as the real implementations
+	input = strings.TrimSpace(input)
+
+	if strings.Contains(input, "|") {
+		// Input contains "|", use as sub for canonical lookup
+		user.Sub = input
+		user.UserID = input
+		user.Username = ""
+		return true
+	}
+
+	// Input doesn't contain "|", use for search query
+	user.Username = input
+	user.Sub = ""
+	user.UserID = ""
+	return false
 }
 
 func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {

@@ -120,7 +120,7 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 	)
 
 	user := &model.User{}
-	useCanonicalLookup := user.PrepareForMetadataLookup(input)
+	useCanonicalLookup := m.userReader.MetadataLookup(ctx, input, user)
 
 	var (
 		retrievedUser *model.User

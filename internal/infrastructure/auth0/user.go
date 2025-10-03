@@ -174,7 +174,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 		httpclient.WithDescription("search user"),
 	)
 
-	var users []model.Auth0User
+	var users []Auth0User
 
 	statusCode, errCall := apiRequest.Call(ctx, &users)
 	if errCall != nil {
@@ -264,7 +264,7 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	)
 
 	// Parse the response to update the user object
-	var auth0User *model.Auth0User
+	var auth0User *Auth0User
 	statusCode, errCall := apiRequest.Call(ctx, &auth0User)
 	if errCall != nil {
 		slog.ErrorContext(ctx, "failed to get user from Auth0",
@@ -289,6 +289,25 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	slog.DebugContext(ctx, "user retrieved successfully", "user_id", user.UserID)
 
 	return auth0User.ToUser(), nil
+}
+
+// MetadataLookup prepares the user for metadata lookup based on the input
+// Returns true if should use canonical lookup, false if should use search
+func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, user *model.User) bool {
+	input = strings.TrimSpace(input)
+
+	if strings.Contains(input, "|") {
+		// Input contains "|", use as sub for canonical lookup
+		user.Sub = input
+		user.UserID = input // Auth0 uses user_id for the canonical lookup
+		user.Username = ""  // Clear username field
+		return true
+	}
+	// Input doesn't contain "|", use for search query
+	user.Sub = ""    // Clear sub field
+	user.UserID = "" // Clear user_id field
+	user.Username = input
+	return false
 }
 
 func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {

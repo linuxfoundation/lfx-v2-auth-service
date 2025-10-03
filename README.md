@@ -261,8 +261,10 @@ nats request lfx.auth-service.user_metadata.read john.doe
 - **Search lookups** are provided for convenience and user-facing interfaces
 - The pipe character (`|`) in canonical identifiers must be escaped with quotes in shell commands
 - Both strategies return the same metadata format on success
+- The service supports **Auth0**, **Authelia**, and **mock** repositories based on configuration
 - When using mock or authelia mode, the service simulates Auth0 behavior for development and testing
 - For detailed Auth0-specific behavior and limitations, see the [Auth0 Integration Documentation](internal/infrastructure/auth0/README.md)
+- For detailed Authelia-specific behavior and SUB management, see the [Authelia Integration Documentation](internal/infrastructure/authelia/README.md)
 
 ---
 

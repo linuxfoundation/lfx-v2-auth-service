@@ -108,7 +108,9 @@ The Authelia integration requires the following configuration parameters:
 
 The Subject Identifier (SUB) in Authelia is a deterministic UUID that uniquely identifies each user within the system. Key characteristics:
 
-- **Deterministic Generation**: The SUB is a UUID that is consistently generated for each user by Authelia
+- **Deterministic Generation**: The SUB is a UUID that is deterministically generated from the username by Authelia
+- **No Provider Prefix**: Unlike Auth0 (which uses formats like `auth0|123456789`), Authelia SUBs are pure UUIDs without any provider prefix (e.g., `550e8400-e29b-41d4-a716-446655440000`)
+- **Username-Based**: The SUB is consistently derived from the username, ensuring the same username always produces the same SUB
 - **Token-Based Persistence**: To ensure consistent data retrieval from Authelia, the SUB is only persisted when a user is updated using a valid authentication token
 - **OIDC UserInfo Endpoint**: The SUB can be retrieved from Authelia's OIDC UserInfo endpoint at `/api/oidc/userinfo` using a valid token
 

@@ -809,6 +809,161 @@ func ptrValue(ptr *string) string {
 	return *ptr
 }
 
+// TestUserReaderWriter_MetadataLookup tests the MetadataLookup method for Auth0 implementation
+func TestUserReaderWriter_MetadataLookup(t *testing.T) {
+	ctx := context.Background()
+	writer := &userReaderWriter{}
+
+	tests := []struct {
+		name                 string
+		input                string
+		expectedCanonical    bool
+		expectedSub          string
+		expectedUserID       string
+		expectedUsername     string
+		expectedPrimaryEmail string
+	}{
+		{
+			name:                 "canonical lookup with pipe separator",
+			input:                "auth0|123456789",
+			expectedCanonical:    true,
+			expectedSub:          "auth0|123456789",
+			expectedUserID:       "auth0|123456789",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "canonical lookup with google oauth",
+			input:                "google-oauth2|987654321",
+			expectedCanonical:    true,
+			expectedSub:          "google-oauth2|987654321",
+			expectedUserID:       "google-oauth2|987654321",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "canonical lookup with github oauth",
+			input:                "github|456789123",
+			expectedCanonical:    true,
+			expectedSub:          "github|456789123",
+			expectedUserID:       "github|456789123",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "canonical lookup with saml enterprise",
+			input:                "samlp|enterprise|user123",
+			expectedCanonical:    true,
+			expectedSub:          "samlp|enterprise|user123",
+			expectedUserID:       "samlp|enterprise|user123",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "canonical lookup with linkedin oauth",
+			input:                "linkedin|789123456",
+			expectedCanonical:    true,
+			expectedSub:          "linkedin|789123456",
+			expectedUserID:       "linkedin|789123456",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "search lookup with username",
+			input:                "john.doe",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "john.doe",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "search lookup with username containing numbers",
+			input:                "developer123",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "developer123",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "search lookup with username containing dots and underscores",
+			input:                "jane_smith.dev",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "jane_smith.dev",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "empty input",
+			input:                "",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "whitespace only input",
+			input:                "   ",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "input with leading/trailing whitespace - canonical",
+			input:                "  auth0|123456789  ",
+			expectedCanonical:    true,
+			expectedSub:          "auth0|123456789",
+			expectedUserID:       "auth0|123456789",
+			expectedUsername:     "",
+			expectedPrimaryEmail: "",
+		},
+		{
+			name:                 "input with leading/trailing whitespace - search",
+			input:                "  john.doe  ",
+			expectedCanonical:    false,
+			expectedSub:          "",
+			expectedUserID:       "",
+			expectedUsername:     "john.doe",
+			expectedPrimaryEmail: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user := &model.User{}
+
+			isCanonical := writer.MetadataLookup(ctx, tt.input, user)
+
+			// Check canonical vs search lookup decision
+			if isCanonical != tt.expectedCanonical {
+				t.Errorf("MetadataLookup() canonical = %v, expected %v", isCanonical, tt.expectedCanonical)
+			}
+
+			// Check user fields are set correctly
+			if user.Sub != tt.expectedSub {
+				t.Errorf("MetadataLookup() Sub = %q, expected %q", user.Sub, tt.expectedSub)
+			}
+
+			if user.UserID != tt.expectedUserID {
+				t.Errorf("MetadataLookup() UserID = %q, expected %q", user.UserID, tt.expectedUserID)
+			}
+
+			if user.Username != tt.expectedUsername {
+				t.Errorf("MetadataLookup() Username = %q, expected %q", user.Username, tt.expectedUsername)
+			}
+
+			if user.PrimaryEmail != tt.expectedPrimaryEmail {
+				t.Errorf("MetadataLookup() PrimaryEmail = %q, expected %q", user.PrimaryEmail, tt.expectedPrimaryEmail)
+			}
+		})
+	}
+}
+
 // Helper function to check if a string contains a substring
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
