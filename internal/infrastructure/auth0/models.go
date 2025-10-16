@@ -12,22 +12,30 @@ import (
 
 // Auth0User represents a user in Auth0
 type Auth0User struct {
-	UserID        string             `json:"user_id"`
-	Username      string             `json:"username"`
-	Email         string             `json:"email"`
-	EmailVerified bool               `json:"email_verified"`
-	FamilyName    string             `json:"family_name"`
-	GivenName     string             `json:"given_name"`
-	Identities    []Auth0Identity    `json:"identities"`
-	UserMetadata  *Auth0UserMetadata `json:"user_metadata"`
+	UserID         string             `json:"user_id"`
+	Username       string             `json:"username"`
+	Email          string             `json:"email"`
+	EmailVerified  bool               `json:"email_verified"`
+	FamilyName     string             `json:"family_name"`
+	GivenName      string             `json:"given_name"`
+	Identities     []Auth0Identity    `json:"identities"`
+	AlternateEmail []Auth0ProfileData `json:"alternate_email,omitempty"`
+	UserMetadata   *Auth0UserMetadata `json:"user_metadata"`
 }
 
 // Auth0Identity represents an identity in Auth0
 type Auth0Identity struct {
-	Connection string `json:"connection"`
-	UserID     any    `json:"user_id"`
-	Provider   string `json:"provider"`
-	IsSocial   bool   `json:"isSocial"`
+	Connection  string            `json:"connection"`
+	UserID      any               `json:"user_id"`
+	Provider    string            `json:"provider"`
+	IsSocial    bool              `json:"isSocial"`
+	ProfileData *Auth0ProfileData `json:"profileData"`
+}
+
+// Auth0ProfileData represents the profile data of a user in Auth0.
+type Auth0ProfileData struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
 }
 
 // Auth0UserMetadata represents the metadata of a user in Auth0.
@@ -72,11 +80,22 @@ func (u *Auth0User) ToUser() *model.User {
 			Zoneinfo:      u.UserMetadata.Zoneinfo,
 		}
 	}
+
+	var alternateEmails []model.AlternateEmail
+	for _, alternateEmail := range u.AlternateEmail {
+		alternateEmail := model.AlternateEmail{
+			Email:         alternateEmail.Email,
+			EmailVerified: alternateEmail.EmailVerified,
+		}
+		alternateEmails = append(alternateEmails, alternateEmail)
+	}
+
 	return &model.User{
-		UserID:       u.UserID,
-		Username:     u.Username,
-		PrimaryEmail: u.Email,
-		UserMetadata: meta,
+		UserID:         u.UserID,
+		Username:       u.Username,
+		PrimaryEmail:   u.Email,
+		AlternateEmail: alternateEmails,
+		UserMetadata:   meta,
 	}
 }
 
@@ -108,4 +127,21 @@ func (e *ErrorResponse) ErrorMessage(errorMessage string) string {
 // NewErrorResponse creates a new ErrorResponse
 func NewErrorResponse() *ErrorResponse {
 	return &ErrorResponse{}
+}
+
+// PasswordlessStartResponse represents the response from Auth0 passwordless start endpoint
+type PasswordlessStartResponse struct {
+	ID            string `json:"_id"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+// TokenResponse represents the response from Auth0 token endpoint
+type TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	IDToken      string `json:"id_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope"`
 }

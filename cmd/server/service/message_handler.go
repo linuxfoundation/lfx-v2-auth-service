@@ -26,10 +26,15 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 	slog.DebugContext(ctx, "handling NATS message")
 
 	handlers := map[string]func(ctx context.Context, msg port.TransportMessenger) ([]byte, error){
+		// user read/write operations
 		constants.UserMetadataUpdateSubject: mhs.messageHandler.UpdateUser,
-		constants.UserEmailToUserSubject:    mhs.messageHandler.EmailToUsername,
-		constants.UserEmailToSubSubject:     mhs.messageHandler.EmailToSub,
 		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
+		// lookup operations
+		constants.UserEmailToUserSubject: mhs.messageHandler.EmailToUsername,
+		constants.UserEmailToSubSubject:  mhs.messageHandler.EmailToSub,
+		// email linking operations
+		constants.EmailLinkingSendVerificationSubject: mhs.messageHandler.StartEmailLinking,
+		constants.EmailLinkingVerifySubject:           mhs.messageHandler.VerifyEmailLinking,
 	}
 
 	handler, ok := handlers[subject]

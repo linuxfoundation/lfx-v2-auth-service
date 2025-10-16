@@ -14,6 +14,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 	"gopkg.in/yaml.v3"
 )
 
@@ -202,6 +203,19 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 	slog.InfoContext(ctx, "mock: user updated in storage with PATCH semantics", "key", key)
 
 	return &updatedUser, nil
+}
+
+func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
+	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
+	return nil
+}
+
+func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.User, error) {
+	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
+	// For mock implementation, return a basic user object
+	return &model.User{
+		PrimaryEmail: email.Email,
+	}, nil
 }
 
 func (u *userWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {

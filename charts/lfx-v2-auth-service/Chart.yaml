@@ -5,5 +5,5 @@ apiVersion: v2
 name: lfx-v2-auth-service
 description: LFX Platform V2 Auth Service chart
 type: application
-version: 0.2.7
+version: 0.3.0
 appVersion: "latest"

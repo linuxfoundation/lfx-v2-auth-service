@@ -27,6 +27,7 @@ type TokenManager struct {
 	httpClient  *http.Client
 	tokenSource oauth2.TokenSource
 	config      m2mConfig
+	authConfig  *authentication.Authentication
 }
 
 // m2mConfig holds the configuration for Auth0 M2M authentication
@@ -212,5 +213,6 @@ func NewM2MTokenManager(ctx context.Context, config Config) (*TokenManager, erro
 		httpClient:  httpClient,
 		tokenSource: reuseTokenSource,
 		config:      m2mConfig,
+		authConfig:  authConfig,
 	}, nil
 }

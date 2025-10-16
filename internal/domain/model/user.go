@@ -17,12 +17,18 @@ import (
 
 // User represents a user in the system
 type User struct {
-	Token        string        `json:"token" yaml:"token"`
-	UserID       string        `json:"user_id" yaml:"user_id"`
-	Sub          string        `json:"sub,omitempty" yaml:"sub,omitempty"`
-	Username     string        `json:"username" yaml:"username"`
-	PrimaryEmail string        `json:"primary_email" yaml:"primary_email"`
-	UserMetadata *UserMetadata `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
+	Token          string           `json:"token" yaml:"token"`
+	UserID         string           `json:"user_id" yaml:"user_id"`
+	Sub            string           `json:"sub,omitempty" yaml:"sub,omitempty"`
+	Username       string           `json:"username" yaml:"username"`
+	PrimaryEmail   string           `json:"primary_email" yaml:"primary_email"`
+	AlternateEmail []AlternateEmail `json:"alternate_email,omitempty" yaml:"alternate_email,omitempty"`
+	UserMetadata   *UserMetadata    `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
+}
+
+type AlternateEmail struct {
+	Email         string `json:"email" yaml:"email"`
+	EmailVerified bool   `json:"email_verified" yaml:"email_verified"`
 }
 
 // UserMetadata represents the metadata of a user
