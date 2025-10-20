@@ -145,3 +145,9 @@ type TokenResponse struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Scope        string `json:"scope"`
 }
+
+// LinkIdentityPayload represents the payload for linking an identity to a user
+type LinkIdentityPayload struct {
+	// LinkWith is the ID token obtained from the passwordless authentication flow
+	LinkWith string `json:"link_with"`
+}

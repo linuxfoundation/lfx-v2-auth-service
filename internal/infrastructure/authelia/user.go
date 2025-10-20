@@ -273,6 +273,10 @@ func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	return nil, errors.NewValidation("alternate email verification is not supported for Authelia yet")
 }
 
+func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+	return errors.NewValidation("link identity is not supported for Authelia yet")
+}
+
 // NewUserReaderWriter creates a new Authelia User repository
 func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClient *nats.NATSClient) (port.UserReaderWriter, error) {
 	// Set defaults in case of not set

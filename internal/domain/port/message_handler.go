@@ -32,7 +32,13 @@ type UserWriteHandler interface {
 // UserLinkHandler defines the behavior of the user link/alternate email domain handlers
 type UserLinkHandler interface {
 	EmailLinkingHandler
+	IdentityLinkingHandler
 	// it will handle social account linking, etc
+}
+
+// IdentityLinkingHandler defines the behavior of the identity linking domain handlers
+type IdentityLinkingHandler interface {
+	LinkIdentity(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // EmailLinkingHandler defines the behavior of the email linking domain handlers

@@ -31,4 +31,8 @@ const (
 	// EmailLinkingVerifySubject is the subject for the email linking verify event.
 	// The subject is of the form: lfx.auth-service.email_linking.verify
 	EmailLinkingVerifySubject = "lfx.auth-service.email_linking.verify"
+
+	// UserIdentityLinkSubject is the subject for the user identity linking event.
+	// The subject is of the form: lfx.auth-service.user_identity.link
+	UserIdentityLinkSubject = "lfx.auth-service.user_identity.link"
 )

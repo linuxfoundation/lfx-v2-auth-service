@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	userUpdateRequiredScope = "update:current_user_metadata"
-	userReadRequiredScope   = "read:current_user"
+	userUpdateRequiredScope         = "update:current_user_metadata"
+	userUpdateIdentityRequiredScope = "update:current_user_identities"
+	userReadRequiredScope           = "read:current_user"
 )
 
 // Config holds the configuration for Auth0 Management API
@@ -39,10 +40,11 @@ type userUpdateRequest struct {
 }
 
 type userReaderWriter struct {
-	config           Config
-	emailLinkingFlow *EmailLinkingFlow
-	httpClient       *httpclient.Client
-	errorResponse    *ErrorResponse
+	config              Config
+	identityLinkingFlow *identityLinkingFlow
+	emailLinkingFlow    *emailLinkingFlow
+	httpClient          *httpclient.Client
+	errorResponse       *ErrorResponse
 }
 
 func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
@@ -332,6 +334,63 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	return user, nil
 }
 
+func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+
+	if u.identityLinkingFlow == nil {
+		return errors.NewUnexpected("email linking flow not configured")
+	}
+
+	if request == nil {
+		return errors.NewValidation("link identity request is required")
+	}
+
+	if request.User.AuthToken == "" {
+		return errors.NewValidation("user_token is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errors.NewValidation("link_with is required")
+	}
+
+	// Verify JWT token to extract user_id from the 'sub' claim
+	// and validate it has the required scope
+	if u.config.JWTVerificationConfig == nil {
+		return errors.NewValidation("JWT verification configuration is required")
+	}
+
+	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, request.User.AuthToken, userUpdateIdentityRequiredScope)
+	if errJwtVerify != nil {
+		slog.ErrorContext(ctx, "jwt verify failed for link identity", "error", errJwtVerify)
+		return errJwtVerify
+	}
+
+	// Extract the user_id from the 'sub' claim
+	userID := claims.Subject
+	if userID == "" {
+		return errors.NewValidation("user_id could not be extracted from management_api_token")
+	}
+
+	slog.DebugContext(ctx, "linking identity to user",
+		"user_id", redaction.Redact(userID),
+	)
+
+	errLinkIdentity := u.identityLinkingFlow.LinkIdentityToUser(
+		ctx,
+		userID,
+		request.User.AuthToken,
+		request.LinkWith.IdentityToken,
+	)
+	if errLinkIdentity != nil {
+		return errLinkIdentity
+	}
+
+	slog.DebugContext(ctx, "identity linked successfully via user reader writer",
+		"user_id", redaction.Redact(userID),
+	)
+
+	return nil
+}
+
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
 func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth0Config Config) (port.UserReaderWriter, error) {
 
@@ -358,12 +417,14 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		auth0Config.JWTVerificationConfig = jwtConfig
 	}
 
-	emailLinkingFlow := NewEmailLinkingFlow(auth0Config.M2MTokenManager.authConfig)
+	emailLinkingFlow := newEmailLinkingFlow(auth0Config.M2MTokenManager.authConfig)
+	identityLinkingFlow := NewIdentityLinkingFlow(auth0Config.Domain, httpClient)
 
 	return &userReaderWriter{
-		config:           auth0Config,
-		emailLinkingFlow: emailLinkingFlow,
-		httpClient:       httpClient,
-		errorResponse:    NewErrorResponse(),
+		config:              auth0Config,
+		identityLinkingFlow: identityLinkingFlow,
+		emailLinkingFlow:    emailLinkingFlow,
+		httpClient:          httpClient,
+		errorResponse:       NewErrorResponse(),
 	}, nil
 }

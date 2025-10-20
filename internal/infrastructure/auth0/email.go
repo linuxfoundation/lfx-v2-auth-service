@@ -14,8 +14,8 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
-// EmailLinkingFlow is the flow for email linking
-type EmailLinkingFlow struct {
+// emailLinkingFlow is the flow for email linking
+type emailLinkingFlow struct {
 	flow passwordlessFlow
 }
 
@@ -44,7 +44,7 @@ func (a *auth0PasswordlessFlow) LoginWithEmail(ctx context.Context, request pass
 
 // StartPasswordlessFlow initiates a passwordless authentication flow by sending an OTP to the user's email
 // This is used in the alternate email linking flow to send a verification code to the alternate email address.
-func (e *EmailLinkingFlow) StartPasswordlessFlow(ctx context.Context, email string) error {
+func (e *emailLinkingFlow) StartPasswordlessFlow(ctx context.Context, email string) error {
 
 	if e == nil || e.flow == nil {
 		return errors.NewUnexpected("passwordless flow not configured")
@@ -76,7 +76,7 @@ func (e *EmailLinkingFlow) StartPasswordlessFlow(ctx context.Context, email stri
 // ExchangeOTPForToken exchanges a passwordless OTP for tokens using private key JWT authentication
 // This is used for the alternate email linking flow where a user verifies their
 // alternate email address by entering a one-time password (OTP) sent to their email.
-func (e *EmailLinkingFlow) ExchangeOTPForToken(ctx context.Context, email, otp string) (*TokenResponse, error) {
+func (e *emailLinkingFlow) ExchangeOTPForToken(ctx context.Context, email, otp string) (*TokenResponse, error) {
 	// Use SDK's passwordless LoginWithEmail method
 	request := passwordless.LoginWithEmailRequest{
 		Email: email,
@@ -109,9 +109,9 @@ func (e *EmailLinkingFlow) ExchangeOTPForToken(ctx context.Context, email, otp s
 	}, nil
 }
 
-// NewEmailLinkingFlow creates a new EmailLinkingFlow with the provided configuration
-func NewEmailLinkingFlow(authConfig *authentication.Authentication) *EmailLinkingFlow {
-	return &EmailLinkingFlow{
+// newEmailLinkingFlow creates a new emailLinkingFlow with the provided configuration
+func newEmailLinkingFlow(authConfig *authentication.Authentication) *emailLinkingFlow {
+	return &emailLinkingFlow{
 		flow: &auth0PasswordlessFlow{
 			authConfig: authConfig,
 		},

@@ -27,9 +27,10 @@ type UserDataResponse struct {
 
 // messageHandlerOrchestrator orchestrates the message handling process
 type messageHandlerOrchestrator struct {
-	userWriter   port.UserWriter
-	userReader   port.UserReader
-	emailHandler port.EmailHandler
+	userWriter     port.UserWriter
+	userReader     port.UserReader
+	emailHandler   port.EmailHandler
+	identityLinker port.IdentityLinker
 }
 
 // messageHandlerOrchestratorOption defines a function type for setting options
@@ -329,6 +330,40 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 	response := UserDataResponse{
 		Success: true,
 		Data:    map[string]any{"token": user.Token},
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		errorResponseJSON := m.errorResponse("failed to marshal response")
+		return errorResponseJSON, nil
+	}
+
+	return responseJSON, nil
+}
+
+// LinkIdentity links a verified email identity to a user account
+func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.identityLinker == nil {
+		return m.errorResponse("user service unavailable"), nil
+	}
+
+	linkRequest := &model.LinkIdentity{}
+	err := json.Unmarshal(msg.Data(), linkRequest)
+	if err != nil {
+		responseJSON := m.errorResponse("failed to unmarshal link identity request")
+		return responseJSON, nil
+	}
+
+	errLinkIdentity := m.identityLinker.LinkIdentity(ctx, linkRequest)
+	if errLinkIdentity != nil {
+		return m.errorResponse(errLinkIdentity.Error()), nil
+	}
+
+	// Return success response
+	response := UserDataResponse{
+		Success: true,
+		Message: "identity linked successfully",
 	}
 
 	responseJSON, err := json.Marshal(response)

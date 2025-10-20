@@ -218,6 +218,11 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	}, nil
 }
 
+func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+	slog.DebugContext(ctx, "mock: linking identity")
+	return errors.NewValidation("link identity not implemented for mock")
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 

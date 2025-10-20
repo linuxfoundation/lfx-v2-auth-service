@@ -14,6 +14,7 @@ type UserReaderWriter interface {
 	UserReader
 	UserWriter
 	EmailHandler
+	IdentityLinker
 }
 
 // UserReader defines the behavior of the user reader
@@ -26,6 +27,11 @@ type UserReader interface {
 // UserWriter defines the behavior of the user writer
 type UserWriter interface {
 	UpdateUser(ctx context.Context, user *model.User) (*model.User, error)
+}
+
+// IdentityLinker defines the behavior of the identity linker
+type IdentityLinker interface {
+	LinkIdentity(ctx context.Context, request *model.LinkIdentity) error
 }
 
 // EmailHandler defines the behavior of the email handler

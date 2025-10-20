@@ -132,7 +132,7 @@ func TestEmailLinkingFlow_StartPasswordlessFlow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFlow := tt.mockSetup()
-			emailFlow := &EmailLinkingFlow{
+			emailFlow := &emailLinkingFlow{
 				flow: mockFlow,
 			}
 
@@ -338,7 +338,7 @@ func TestEmailLinkingFlow_ExchangeOTPForToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFlow := tt.mockSetup()
-			emailFlow := &EmailLinkingFlow{
+			emailFlow := &emailLinkingFlow{
 				flow: mockFlow,
 			}
 
@@ -363,7 +363,7 @@ func TestEmailLinkingFlow_ExchangeOTPForToken(t *testing.T) {
 func TestNewEmailLinkingFlow(t *testing.T) {
 	t.Run("creates EmailLinkingFlow with auth0PasswordlessFlow", func(t *testing.T) {
 		// Create a nil auth config for testing (in real usage, this would be properly configured)
-		flow := NewEmailLinkingFlow(nil)
+		flow := newEmailLinkingFlow(nil)
 
 		assert.NotNil(t, flow)
 		assert.NotNil(t, flow.flow)
@@ -431,7 +431,7 @@ func TestEmailLinkingFlow_Integration(t *testing.T) {
 			},
 		}
 
-		emailFlow := &EmailLinkingFlow{flow: mockFlow}
+		emailFlow := &emailLinkingFlow{flow: mockFlow}
 
 		// Step 1: Start passwordless flow
 		err := emailFlow.StartPasswordlessFlow(ctx, email)
@@ -451,7 +451,7 @@ func TestEmailLinkingFlow_Integration(t *testing.T) {
 			},
 		}
 
-		emailFlow := &EmailLinkingFlow{flow: mockFlow}
+		emailFlow := &emailLinkingFlow{flow: mockFlow}
 		err := emailFlow.StartPasswordlessFlow(ctx, "test@example.com")
 		require.Error(t, err)
 	})
@@ -463,7 +463,7 @@ func TestEmailLinkingFlow_Integration(t *testing.T) {
 			},
 		}
 
-		emailFlow := &EmailLinkingFlow{flow: mockFlow}
+		emailFlow := &emailLinkingFlow{flow: mockFlow}
 		_, err := emailFlow.ExchangeOTPForToken(ctx, "test@example.com", "wrong-otp")
 		require.Error(t, err)
 	})
