@@ -8,4 +8,6 @@ const (
 	CriteriaTypeEmail = "email"
 	// CriteriaTypeUsername is the type of criteria for username
 	CriteriaTypeUsername = "username"
+	// CriteriaTypeAlternateEmail is the type of criteria for alternate email
+	CriteriaTypeAlternateEmail = "alternate_email"
 )

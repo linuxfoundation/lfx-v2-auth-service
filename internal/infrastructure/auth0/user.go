@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
-	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
@@ -21,18 +19,9 @@ import (
 )
 
 const (
-	userUpdateRequiredScope = "update:current_user_metadata"
-	userReadRequiredScope   = "read:current_user"
-
-	usernameFilter = "Username-Password-Authentication"
-)
-
-var (
-	// criteriaEndpointMapping is a map of criteria types and their corresponding API endpoints
-	criteriaEndpointMapping = map[string]string{
-		constants.CriteriaTypeEmail:    "users-by-email?email=%s",
-		constants.CriteriaTypeUsername: `users?q=identities.user_id:%s&search_engine=v3`,
-	}
+	userUpdateRequiredScope         = "update:current_user_metadata"
+	userUpdateIdentityRequiredScope = "update:current_user_identities"
+	userReadRequiredScope           = "read:current_user"
 )
 
 // Config holds the configuration for Auth0 Management API
@@ -51,35 +40,22 @@ type userUpdateRequest struct {
 }
 
 type userReaderWriter struct {
-	config        Config
-	httpClient    *httpclient.Client
-	errorResponse *ErrorResponse
+	config              Config
+	identityLinkingFlow *identityLinkingFlow
+	emailLinkingFlow    *emailLinkingFlow
+	httpClient          *httpclient.Client
+	errorResponse       *ErrorResponse
 }
 
 func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 
-	endpoint, ok := criteriaEndpointMapping[criteria]
-	if !ok {
+	filterer := newUserFilterer(criteria, user)
+	if filterer == nil {
 		return nil, errors.NewValidation(fmt.Sprintf("invalid criteria type: %s", criteria))
 	}
 
-	param := func(criteriaType string) []any {
-		switch criteriaType {
-		case constants.CriteriaTypeEmail:
-			slog.DebugContext(ctx, "searching user",
-				"criteria", criteria,
-				"email", redaction.RedactEmail(user.PrimaryEmail),
-			)
-			return []any{url.QueryEscape(strings.ToLower(strings.TrimSpace(user.PrimaryEmail)))}
-		case constants.CriteriaTypeUsername:
-			slog.DebugContext(ctx, "searching user",
-				"criteria", criteria,
-				"username", redaction.Redact(user.Username),
-			)
-			return []any{url.QueryEscape(strings.TrimSpace(user.Username))}
-		}
-		return []any{}
-	}
+	endpoint := filterer.Endpoint(ctx)
+	args := filterer.Args(ctx)
 
 	if user.Token == "" {
 		slog.DebugContext(ctx, "getting M2M token",
@@ -93,7 +69,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 		user.Token = m2mToken
 	}
 
-	endpointWithParam := fmt.Sprintf(endpoint, param(criteria)...)
+	endpointWithParam := fmt.Sprintf(endpoint, args...)
 	url := fmt.Sprintf("https://%s/api/v2/%s", u.config.Domain, endpointWithParam)
 
 	apiRequest := httpclient.NewAPIRequest(
@@ -124,43 +100,20 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 	)
 
 	for _, userResult := range users {
-		// identities.user_id:{{username}} AND identities.connection:Username-Password-Authentication
+		// identities.user_id:{{username}} AND identities.connection:Username-Password-Authentication (and other connections)
 		// It doesn't work like an AND, it works like an IN clause
 		// (check if it contains the username and the connection, but they might not be in  the same identity)
 		// So it's necessary to check if the identity is the one we are looking for
-		for _, identity := range userResult.Identities {
-			if identity.Connection == usernameFilter {
-				// if the search is by username, we need to check if the identity is the one we are looking for
-				//
-				// At this point, we know that the user is found, but the validation is to
-				// make sure the username is from the Username-Password-Authentication connection
-
-				userID, ok := identity.UserID.(string)
-				if !ok {
-					slog.DebugContext(ctx, "user found, but it's not the correct identity",
-						"filter", usernameFilter,
-						"user_id", redaction.Redact(fmt.Sprintf("%v", identity.UserID)),
-					)
-					continue
-				}
-
-				if criteria == constants.CriteriaTypeUsername && userID != user.Username {
-					slog.DebugContext(ctx, "user found, but it's not the correct identity",
-						"filter", usernameFilter,
-						"user_id", redaction.Redact(userID),
-					)
-					// if the connection is Password-Authentication and the user is not the one we are looking for,
-					// we need to return an error
-					return nil, errors.NewNotFound("user not found")
-				}
-				user.Username = userID
-				return userResult.ToUser(), nil
-			}
+		found, err := filterer.Filter(ctx, &userResult)
+		if err != nil {
+			return nil, err
 		}
+		if !found {
+			continue
+		}
+		return userResult.ToUser(), nil
 	}
-
 	return nil, errors.NewNotFound("user not found")
-
 }
 
 func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
@@ -343,6 +296,109 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	return updatedUser, nil
 }
 
+func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
+
+	if u.emailLinkingFlow == nil {
+		return errors.NewUnexpected("email linking flow not configured")
+	}
+
+	errStartPasswordlessFlow := u.emailLinkingFlow.StartPasswordlessFlow(ctx, alternateEmail)
+	if errStartPasswordlessFlow != nil {
+		return errStartPasswordlessFlow
+	}
+
+	slog.DebugContext(ctx, "send verification alternate email successfully")
+
+	return nil
+}
+
+func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
+
+	if u.emailLinkingFlow == nil {
+		return nil, errors.NewUnexpected("email linking flow not configured")
+	}
+
+	if email.Email == "" || email.OTP == "" {
+		return nil, errors.NewValidation("email and OTP are required")
+	}
+
+	tokenResp, errExchangeOTPForToken := u.emailLinkingFlow.ExchangeOTPForToken(ctx, email.Email, email.OTP)
+	if errExchangeOTPForToken != nil {
+		return nil, errExchangeOTPForToken
+	}
+
+	authResponse := &model.AuthResponse{
+		AccessToken: tokenResp.AccessToken,
+		IDToken:     tokenResp.IDToken,
+		Scope:       tokenResp.Scope,
+		ExpiresIn:   int(tokenResp.ExpiresIn),
+		TokenType:   tokenResp.TokenType,
+	}
+
+	slog.DebugContext(ctx, "alternate email verified successfully",
+		"email", redaction.Redact(email.Email),
+	)
+
+	return authResponse, nil
+}
+
+func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+
+	if u.identityLinkingFlow == nil {
+		return errors.NewUnexpected("email linking flow not configured")
+	}
+
+	if request == nil {
+		return errors.NewValidation("link identity request is required")
+	}
+
+	if request.User.AuthToken == "" {
+		return errors.NewValidation("user_token is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errors.NewValidation("link_with is required")
+	}
+
+	// Verify JWT token to extract user_id from the 'sub' claim
+	// and validate it has the required scope
+	if u.config.JWTVerificationConfig == nil {
+		return errors.NewValidation("JWT verification configuration is required")
+	}
+
+	claims, errJwtVerifyAuthToken := u.config.JWTVerificationConfig.JWTVerify(ctx, request.User.AuthToken, userUpdateIdentityRequiredScope)
+	if errJwtVerifyAuthToken != nil {
+		slog.ErrorContext(ctx, "jwt verify failed for link identity", "error", errJwtVerifyAuthToken)
+		return errJwtVerifyAuthToken
+	}
+
+	// Extract the user_id from the 'sub' claim
+	userID := claims.Subject
+	if userID == "" {
+		return errors.NewValidation("user_id could not be extracted from management_api_token")
+	}
+
+	slog.DebugContext(ctx, "linking identity to user",
+		"user_id", redaction.Redact(userID),
+	)
+
+	errLinkIdentity := u.identityLinkingFlow.LinkIdentityToUser(
+		ctx,
+		userID,
+		request.User.AuthToken,
+		request.LinkWith.IdentityToken,
+	)
+	if errLinkIdentity != nil {
+		return errLinkIdentity
+	}
+
+	slog.DebugContext(ctx, "identity linked successfully via user reader writer",
+		"user_id", redaction.Redact(userID),
+	)
+
+	return nil
+}
+
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
 func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth0Config Config) (port.UserReaderWriter, error) {
 
@@ -369,9 +425,23 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		auth0Config.JWTVerificationConfig = jwtConfig
 	}
 
+	// Create regular web auth config for email linking flow (passwordless)
+	regularWebAuthConfig, err := NewRegularWebAuthConfig(ctx, auth0Config.Domain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create regular web auth config: %w", err)
+	}
+
+	// linking flow for email linking (passwordless)
+	emailLinkingFlow := newEmailLinkingFlow(regularWebAuthConfig)
+
+	// linking flow for identity linking (passwordless)
+	identityLinkingFlow := newIdentityLinkingFlow(auth0Config.Domain, httpClient)
+
 	return &userReaderWriter{
-		config:        auth0Config,
-		httpClient:    httpClient,
-		errorResponse: NewErrorResponse(),
+		config:              auth0Config,
+		identityLinkingFlow: identityLinkingFlow,
+		emailLinkingFlow:    emailLinkingFlow,
+		httpClient:          httpClient,
+		errorResponse:       NewErrorResponse(),
 	}, nil
 }

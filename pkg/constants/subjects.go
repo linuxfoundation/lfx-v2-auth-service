@@ -23,4 +23,16 @@ const (
 	// UserMetadataReadSubject is the subject for the user metadata read event.
 	// The subject is of the form: lfx.auth-service.user_metadata.read
 	UserMetadataReadSubject = "lfx.auth-service.user_metadata.read"
+
+	// EmailLinkingSendVerificationSubject is the subject for the email linking start event.
+	// The subject is of the form: lfx.auth-service.email_linking.send_verification
+	EmailLinkingSendVerificationSubject = "lfx.auth-service.email_linking.send_verification"
+
+	// EmailLinkingVerifySubject is the subject for the email linking verify event.
+	// The subject is of the form: lfx.auth-service.email_linking.verify
+	EmailLinkingVerifySubject = "lfx.auth-service.email_linking.verify"
+
+	// UserIdentityLinkSubject is the subject for the user identity linking event.
+	// The subject is of the form: lfx.auth-service.user_identity.link
+	UserIdentityLinkSubject = "lfx.auth-service.user_identity.link"
 )

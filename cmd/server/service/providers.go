@@ -191,6 +191,12 @@ func QueueSubscriptions(ctx context.Context) error {
 			service.WithUserReaderForMessageHandler(
 				userReaderWriter,
 			),
+			service.WithEmailHandlerForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithIdentityLinkerForMessageHandler(
+				userReaderWriter,
+			),
 		),
 	}
 
@@ -202,10 +208,13 @@ func QueueSubscriptions(ctx context.Context) error {
 
 	// Start subscriptions for each subject
 	subjects := map[string]func(context.Context, port.TransportMessenger){
-		constants.UserMetadataUpdateSubject: messageHandlerService.HandleMessage,
-		constants.UserEmailToUserSubject:    messageHandlerService.HandleMessage,
-		constants.UserEmailToSubSubject:     messageHandlerService.HandleMessage,
-		constants.UserMetadataReadSubject:   messageHandlerService.HandleMessage,
+		constants.UserMetadataUpdateSubject:           messageHandlerService.HandleMessage,
+		constants.UserEmailToUserSubject:              messageHandlerService.HandleMessage,
+		constants.UserEmailToSubSubject:               messageHandlerService.HandleMessage,
+		constants.UserMetadataReadSubject:             messageHandlerService.HandleMessage,
+		constants.EmailLinkingSendVerificationSubject: messageHandlerService.HandleMessage,
+		constants.EmailLinkingVerifySubject:           messageHandlerService.HandleMessage,
+		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		// Add more subjects here as needed
 	}
 

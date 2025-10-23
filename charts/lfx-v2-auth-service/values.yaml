@@ -38,7 +38,7 @@ nats:
     # maxValueSize is the maximum size of a value in the KV bucket
     maxValueSize: 1048576  # 1MB (sufficient for user data)
     # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 52428800  # 50MB (generous for ~100 users)
+    maxBytes: 10485760  # 10MB (sufficient for local dev testing)
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
@@ -84,6 +84,12 @@ app:
     AUTH0_PRIVATE_BASE64_KEY:
       value: null
     AUTH0_AUDIENCE:
+      value: null
+    # Auth0 Regular Web Client configuration (for passwordless flows)
+    ## Required when using passwordless email linking flow
+    AUTH0_REGULAR_WEB_CLIENT_ID:
+      value: null
+    AUTH0_REGULAR_WEB_CLIENT_SECRET:
       value: null
 
     # Authelia configuration
