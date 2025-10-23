@@ -19,4 +19,3 @@ spec:
   maxBytes: {{ .Values.nats.authelia_users_kv_bucket.maxBytes }}
   compression: {{ .Values.nats.authelia_users_kv_bucket.compression }}
 {{- end }}
-
