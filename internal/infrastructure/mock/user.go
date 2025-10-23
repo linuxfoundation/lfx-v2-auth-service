@@ -210,12 +210,10 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 	return nil
 }
 
-func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.User, error) {
+func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
 	// For mock implementation, return a basic user object
-	return &model.User{
-		PrimaryEmail: email.Email,
-	}, nil
+	return nil, nil
 }
 
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {

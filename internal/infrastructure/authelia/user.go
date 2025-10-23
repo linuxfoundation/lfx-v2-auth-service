@@ -268,7 +268,7 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return errors.NewValidation("send verification alternate email is not supported for Authelia yet")
 }
 
-func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.User, error) {
+func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "verifying alternate email", "email", redaction.Redact(email.Email))
 	return nil, errors.NewValidation("alternate email verification is not supported for Authelia yet")
 }

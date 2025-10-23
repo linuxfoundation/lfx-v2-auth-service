@@ -129,6 +129,10 @@ The Auth0 integration can be configured using environment variables:
   - **Required when using Auth0 repository type**
 - `AUTH0_AUDIENCE`: Auth0 API audience/identifier for the Management API
   - **Required when using Auth0 repository type**
+- `AUTH0_REGULAR_WEB_CLIENT_ID`: Auth0 Regular Web Application client ID for passwordless flows
+  - **Required when using passwordless email linking flow**
+- `AUTH0_REGULAR_WEB_CLIENT_SECRET`: Auth0 Regular Web Application client secret for passwordless flows
+  - **Required when using passwordless email linking flow**
 
 ## Releases
 

@@ -37,5 +37,5 @@ type IdentityLinker interface {
 // EmailHandler defines the behavior of the email handler
 type EmailHandler interface {
 	SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error
-	VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.User, error)
+	VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error)
 }

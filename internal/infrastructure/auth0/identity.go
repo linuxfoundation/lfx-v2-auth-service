@@ -77,8 +77,8 @@ func (ilf *identityLinkingFlow) LinkIdentityToUser(ctx context.Context, userID, 
 	return nil
 }
 
-// NewIdentityLinkingFlow creates a new IdentityLinkingFlow with the provided configuration
-func NewIdentityLinkingFlow(domain string, httpClient *httpclient.Client) *identityLinkingFlow {
+// newIdentityLinkingFlow creates a new IdentityLinkingFlow with the provided configuration
+func newIdentityLinkingFlow(domain string, httpClient *httpclient.Client) *identityLinkingFlow {
 	return &identityLinkingFlow{
 		domain:     domain,
 		httpClient: httpClient,

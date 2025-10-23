@@ -57,6 +57,13 @@ func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) messageHa
 	}
 }
 
+// WithIdentityLinkerForMessageHandler sets the identity linker for the message handler orchestrator
+func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) messageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.identityLinker = identityLinker
+	}
+}
+
 func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	response := UserDataResponse{
 		Success: false,
@@ -321,15 +328,15 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse(errExists.Error()), nil
 	}
 
-	user, err := m.emailHandler.VerifyAlternateEmail(ctx, email)
-	if err != nil {
-		return m.errorResponse(err.Error()), nil
+	authResponse, errVerifyAlternateEmail := m.emailHandler.VerifyAlternateEmail(ctx, email)
+	if errVerifyAlternateEmail != nil {
+		return m.errorResponse(errVerifyAlternateEmail.Error()), nil
 	}
 
 	// Return success response with user metadata
 	response := UserDataResponse{
 		Success: true,
-		Data:    map[string]any{"token": user.Token},
+		Data:    authResponse,
 	}
 
 	responseJSON, err := json.Marshal(response)

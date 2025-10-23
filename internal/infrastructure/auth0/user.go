@@ -308,7 +308,7 @@ func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return nil
 }
 
-func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.User, error) {
+func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 
 	if u.emailLinkingFlow == nil {
 		return nil, errors.NewUnexpected("email linking flow not configured")
@@ -323,15 +323,19 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 		return nil, errExchangeOTPForToken
 	}
 
-	user := &model.User{
-		Token: tokenResp.IDToken,
+	authResponse := &model.AuthResponse{
+		AccessToken: tokenResp.AccessToken,
+		IDToken:     tokenResp.IDToken,
+		Scope:       tokenResp.Scope,
+		ExpiresIn:   int(tokenResp.ExpiresIn),
+		TokenType:   tokenResp.TokenType,
 	}
 
 	slog.DebugContext(ctx, "alternate email verified successfully",
 		"email", redaction.Redact(email.Email),
 	)
 
-	return user, nil
+	return authResponse, nil
 }
 
 func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
@@ -358,10 +362,10 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 		return errors.NewValidation("JWT verification configuration is required")
 	}
 
-	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, request.User.AuthToken, userUpdateIdentityRequiredScope)
-	if errJwtVerify != nil {
-		slog.ErrorContext(ctx, "jwt verify failed for link identity", "error", errJwtVerify)
-		return errJwtVerify
+	claims, errJwtVerifyAuthToken := u.config.JWTVerificationConfig.JWTVerify(ctx, request.User.AuthToken, userUpdateIdentityRequiredScope)
+	if errJwtVerifyAuthToken != nil {
+		slog.ErrorContext(ctx, "jwt verify failed for link identity", "error", errJwtVerifyAuthToken)
+		return errJwtVerifyAuthToken
 	}
 
 	// Extract the user_id from the 'sub' claim
@@ -417,8 +421,17 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		auth0Config.JWTVerificationConfig = jwtConfig
 	}
 
-	emailLinkingFlow := newEmailLinkingFlow(auth0Config.M2MTokenManager.authConfig)
-	identityLinkingFlow := NewIdentityLinkingFlow(auth0Config.Domain, httpClient)
+	// Create regular web auth config for email linking flow (passwordless)
+	regularWebAuthConfig, err := NewRegularWebAuthConfig(ctx, auth0Config.Domain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create regular web auth config: %w", err)
+	}
+
+	// linking flow for email linking (passwordless)
+	emailLinkingFlow := newEmailLinkingFlow(regularWebAuthConfig)
+
+	// linking flow for identity linking (passwordless)
+	identityLinkingFlow := newIdentityLinkingFlow(auth0Config.Domain, httpClient)
 
 	return &userReaderWriter{
 		config:              auth0Config,

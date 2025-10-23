@@ -216,3 +216,34 @@ func NewM2MTokenManager(ctx context.Context, config Config) (*TokenManager, erro
 		authConfig:  authConfig,
 	}, nil
 }
+
+// NewRegularWebAuthConfig creates an Auth0 authentication client for regular web flows (passwordless)
+// using client ID and client secret instead of private key JWT
+func NewRegularWebAuthConfig(ctx context.Context, domain string) (*authentication.Authentication, error) {
+	clientID := os.Getenv(constants.Auth0RegularWebClientIDEnvKey)
+	if clientID == "" {
+		return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_ID is required for email linking flow")
+	}
+
+	clientSecret := os.Getenv(constants.Auth0RegularWebClientSecretEnvKey)
+	if clientSecret == "" {
+		return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_SECRET is required for email linking flow")
+	}
+
+	// Create Auth0 authentication client with client secret
+	authConfig, err := authentication.New(
+		ctx,
+		domain,
+		authentication.WithClientID(clientID),
+		authentication.WithClientSecret(clientSecret),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Auth0 regular web client: %w", err)
+	}
+
+	slog.DebugContext(ctx, "regular web Auth0 authentication client created successfully",
+		"client_id", clientID,
+		"domain", domain)
+
+	return authConfig, nil
+}

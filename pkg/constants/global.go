@@ -20,6 +20,9 @@ const (
 	// UserRepositoryTypeAuth0 is the value for the Auth0 user repository type
 	UserRepositoryTypeAuth0 = "auth0"
 
+)
+
+const (
 	// Authelia configuration
 	// AutheliaConfigMapNameEnvKey is the environment variable key for the ConfigMap name
 	AutheliaConfigMapNameEnvKey = "AUTHELIA_CONFIGMAP_NAME"
@@ -36,6 +39,10 @@ const (
 	// AutheliaOIDCUserInfoURLEnvKey is the environment variable key for the OIDC userinfo URL
 	AutheliaOIDCUserInfoURLEnvKey = "AUTHELIA_OIDC_USERINFO_URL"
 
+)
+
+
+const (
 	// Auth0 Management API configuration
 	// Auth0TenantEnvKey is the environment variable key for the Auth0 tenant
 	Auth0TenantEnvKey = "AUTH0_TENANT"
@@ -52,4 +59,11 @@ const (
 
 	// Auth0AudienceEnvKey is the environment variable key for the Auth0 audience
 	Auth0AudienceEnvKey = "AUTH0_AUDIENCE"
+
+	// Auth0 Regular Web Client configuration (for passwordless flows)
+	// Auth0RegularWebClientIDEnvKey is the environment variable key for the regular web Auth0 client ID
+	Auth0RegularWebClientIDEnvKey = "AUTH0_REGULAR_WEB_CLIENT_ID"
+
+	// Auth0RegularWebClientSecretEnvKey is the environment variable key for the regular web Auth0 client secret
+	Auth0RegularWebClientSecretEnvKey = "AUTH0_REGULAR_WEB_CLIENT_SECRET"
 )

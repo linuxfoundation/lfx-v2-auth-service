@@ -194,6 +194,9 @@ func QueueSubscriptions(ctx context.Context) error {
 			service.WithEmailHandlerForMessageHandler(
 				userReaderWriter,
 			),
+			service.WithIdentityLinkerForMessageHandler(
+				userReaderWriter,
+			),
 		),
 	}
 
