@@ -77,6 +77,11 @@ func (e *emailLinkingFlow) StartPasswordlessFlow(ctx context.Context, email stri
 // This is used for the alternate email linking flow where a user verifies their
 // alternate email address by entering a one-time password (OTP) sent to their email.
 func (e *emailLinkingFlow) ExchangeOTPForToken(ctx context.Context, email, otp string) (*TokenResponse, error) {
+
+	if e == nil || e.flow == nil {
+		return nil, errors.NewUnexpected("passwordless flow not configured")
+	}
+
 	// Use SDK's passwordless LoginWithEmail method
 	request := passwordless.LoginWithEmailRequest{
 		Email: email,

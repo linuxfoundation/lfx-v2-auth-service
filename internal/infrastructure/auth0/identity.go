@@ -24,7 +24,7 @@ type identityLinkingFlow struct {
 // with the user's JWT token (with update:current_user_identities scope), not the service's credentials.
 func (ilf *identityLinkingFlow) LinkIdentityToUser(ctx context.Context, userID, userToken, linkWith string) error {
 	if ilf == nil || ilf.httpClient == nil {
-		return errors.NewUnexpected("email linking flow not configured")
+		return errors.NewUnexpected("identity linking flow not configured")
 	}
 
 	if userToken == "" {

@@ -19,7 +19,6 @@ const (
 
 	// UserRepositoryTypeAuth0 is the value for the Auth0 user repository type
 	UserRepositoryTypeAuth0 = "auth0"
-
 )
 
 const (
@@ -38,9 +37,7 @@ const (
 
 	// AutheliaOIDCUserInfoURLEnvKey is the environment variable key for the OIDC userinfo URL
 	AutheliaOIDCUserInfoURLEnvKey = "AUTHELIA_OIDC_USERINFO_URL"
-
 )
-
 
 const (
 	// Auth0 Management API configuration

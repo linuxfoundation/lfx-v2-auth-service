@@ -298,6 +298,10 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 
 func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 
+	if u.emailLinkingFlow == nil {
+		return errors.NewUnexpected("email linking flow not configured")
+	}
+
 	errStartPasswordlessFlow := u.emailLinkingFlow.StartPasswordlessFlow(ctx, alternateEmail)
 	if errStartPasswordlessFlow != nil {
 		return errStartPasswordlessFlow
