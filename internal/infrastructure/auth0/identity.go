@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
@@ -25,6 +26,10 @@ type identityLinkingFlow struct {
 func (ilf *identityLinkingFlow) LinkIdentityToUser(ctx context.Context, userID, userToken, linkWith string) error {
 	if ilf == nil || ilf.httpClient == nil {
 		return errors.NewUnexpected("identity linking flow not configured")
+	}
+
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
 	}
 
 	if userToken == "" {
