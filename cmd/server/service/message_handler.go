@@ -29,6 +29,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		// user read/write operations
 		constants.UserMetadataUpdateSubject: mhs.messageHandler.UpdateUser,
 		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
+		constants.UserEmailReadSubject:      mhs.messageHandler.GetUserEmails,
 		// lookup operations
 		constants.UserEmailToUserSubject: mhs.messageHandler.EmailToUsername,
 		constants.UserEmailToSubSubject:  mhs.messageHandler.EmailToSub,

@@ -132,15 +132,14 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 	return []byte(user.UserID), nil
 }
 
-// GetUserMetadata retrieves user metadata based on the input strategy
-func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
-		return m.errorResponse("user service unavailable"), nil
+		return nil, errs.NewUnexpected("user service unavailable")
 	}
 
 	input := strings.TrimSpace(string(msg.Data()))
 	if input == "" {
-		return m.errorResponse("input is required"), nil
+		return nil, errs.NewValidation("input is required")
 	}
 
 	slog.DebugContext(ctx, "get user metadata",
@@ -153,7 +152,7 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 			"error", errMetadataLookup,
 			"input", redaction.Redact(input),
 		)
-		return m.errorResponse(errMetadataLookup.Error()), nil
+		return nil, errMetadataLookup
 	}
 
 	search := func() (*model.User, error) {
@@ -163,11 +162,17 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 		return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
 	}
 
-	userRetrieved, errGetUser := search()
+	return search()
+}
+
+// GetUserMetadata retrieves user metadata based on the input strategy
+func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	userRetrieved, errGetUser := m.getUserByInput(ctx, msg)
 	if errGetUser != nil {
 		slog.ErrorContext(ctx, "error getting user metadata",
 			"error", errGetUser,
-			"input", redaction.Redact(input),
+			"input", redaction.Redact(string(msg.Data())),
 		)
 		return m.errorResponse(errGetUser.Error()), nil
 	}
@@ -176,6 +181,32 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 	response := UserDataResponse{
 		Success: true,
 		Data:    userRetrieved.UserMetadata,
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		errorResponseJSON := m.errorResponse("failed to marshal response")
+		return errorResponseJSON, nil
+	}
+
+	return responseJSON, nil
+}
+
+// GetUserEmails retrieves the user emails based on the input strategy
+func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	user, errGetUser := m.getUserByInput(ctx, msg)
+	if errGetUser != nil {
+		slog.ErrorContext(ctx, "error getting user emails",
+			"error", errGetUser,
+			"input", redaction.Redact(string(msg.Data())),
+		)
+		return m.errorResponse(errGetUser.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Data:    map[string]any{"primary_email": user.PrimaryEmail, "alternate_emails": user.AlternateEmails},
 	}
 
 	responseJSON, err := json.Marshal(response)
@@ -244,7 +275,7 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 		if errSearch != nil && !errors.As(errSearch, &notFound) {
 			return errSearch
 		}
-		if user != nil && user.UserID != "" {
+		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
 
 			if strings.EqualFold(user.PrimaryEmail, email) {

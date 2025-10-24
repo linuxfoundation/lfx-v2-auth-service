@@ -135,6 +135,32 @@ func (n *natsUserStorage) ListUsers(ctx context.Context) (map[string]*AutheliaUs
 	return users, nil
 }
 
+func (n *natsUserStorage) setLookupKeys(ctx context.Context, user *AutheliaUser) error {
+	if user.Email != "" {
+		_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "email", user.BuildEmailIndexKey(ctx)), []byte(user.Username))
+		if errPutLookup != nil {
+			return errs.NewUnexpected("failed to set lookup key in NATS KV", errPutLookup)
+		}
+	}
+
+	if len(user.AlternateEmails) > 0 {
+		for _, alternateEmail := range user.AlternateEmails {
+			_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "email", user.BuildAlternateEmailIndexKey(ctx, alternateEmail.Email)), []byte(user.Username))
+			if errPutLookup != nil {
+				return errs.NewUnexpected("failed to set alternate email lookup key in NATS KV", errPutLookup)
+			}
+		}
+	}
+
+	if user.Sub != "" {
+		_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx)), []byte(user.Username))
+		if errPutLookup != nil {
+			return errs.NewUnexpected("failed to set sub lookup key in NATS KV", errPutLookup)
+		}
+	}
+	return nil
+}
+
 func (n *natsUserStorage) SetUser(ctx context.Context, user *AutheliaUser) (any, error) {
 
 	// Update timestamp
@@ -160,18 +186,9 @@ func (n *natsUserStorage) SetUser(ctx context.Context, user *AutheliaUser) (any,
 	}
 
 	// lookup keys
-	if user.Email != "" {
-		user.PrimaryEmail = user.Email
-		_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "email", user.BuildEmailIndexKey(ctx)), []byte(user.Username))
-		if errPutLookup != nil {
-			return nil, errs.NewUnexpected("failed to set lookup key in NATS KV", errPutLookup)
-		}
-	}
-	if user.Sub != "" {
-		_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx)), []byte(user.Username))
-		if errPutLookup != nil {
-			return nil, errs.NewUnexpected("failed to set lookup key in NATS KV", errPutLookup)
-		}
+	errSetLookupKeys := n.setLookupKeys(ctx, user)
+	if errSetLookupKeys != nil {
+		return nil, errs.NewUnexpected("failed to set lookup keys in NATS KV", errSetLookupKeys)
 	}
 
 	return user, nil
@@ -201,12 +218,10 @@ func (n *natsUserStorage) UpdateUserWithRevision(ctx context.Context, user *Auth
 	}
 
 	// lookup keys - these are not subject to revision control as they're separate keys
-	if user.Email != "" {
-		user.PrimaryEmail = user.Email
-		_, errPutLookup := n.kvStore[constants.KVBucketNameAutheliaUsers].Put(ctx, n.BuildLookupKey(ctx, "email", user.BuildEmailIndexKey(ctx)), []byte(user.Username))
-		if errPutLookup != nil {
-			return errs.NewUnexpected("failed to set lookup key in NATS KV", errPutLookup)
-		}
+	// lookup keys
+	errSetLookupKeys := n.setLookupKeys(ctx, user)
+	if errSetLookupKeys != nil {
+		return errs.NewUnexpected("failed to set lookup keys in NATS KV", errSetLookupKeys)
 	}
 
 	return nil

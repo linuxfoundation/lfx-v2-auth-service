@@ -17,15 +17,19 @@ The request payload must be a JSON object containing the user's JWT token and th
 
 ```json
 {
-  "user_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "link_with": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  },
+  "link_with": {
+    "identity_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
 }
 ```
 
 ### Required Fields
 
-- `user_token`: A JWT access token for the Auth0 Management API with the `update:current_user_identities` scope. The `user_id` will be automatically extracted from the `sub` claim of this token.
-- `link_with`: The ID token obtained from the email verification process that contains the verified email identity
+- `user.auth_token`: A JWT access token for the Auth0 Management API with the `update:current_user_identities` scope. The `user_id` will be automatically extracted from the `sub` claim of this token.
+- `link_with.identity_token`: The ID token obtained from the email verification process that contains the verified email identity
 
 ### Reply
 
@@ -60,8 +64,12 @@ The service links the verified email identity to the user account without changi
 ```bash
 # Link the verified email identity to the user account
 nats request lfx.auth-service.user_identity.link '{
-  "user_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "link_with": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  },
+  "link_with": {
+    "identity_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
 }'
 
 # Expected response: {"success":true,"message":"identity linked successfully"}
@@ -69,12 +77,12 @@ nats request lfx.auth-service.user_identity.link '{
 
 ### Important Notes
 
-- The SSR application must provide the user's JWT token (`user_token`) with the `update:current_user_identities` scope
+- The SSR application must provide the user's JWT token (`user.auth_token`) with the `update:current_user_identities` scope
 - The Auth Service automatically extracts the `user_id` from the `sub` claim of the user's token
 - The Auth Service verifies the JWT token signature and validates the required scope before processing
 - The Auth Service uses the **user's token** (not the service's M2M credentials) to call the Auth0 Management API
 - This ensures the operation is performed with the user's permissions and does not change their current global session
-- The `link_with` field contains the ID token from the email verification process with the verified email information that will be linked to the user account
+- The `link_with.identity_token` field contains the ID token from the email verification process with the verified email information that will be linked to the user account
 - This feature is **only supported for Auth0**. Authelia and mock implementations do not support this functionality yet.
 
 ### Complete Flow
