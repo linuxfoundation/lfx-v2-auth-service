@@ -62,7 +62,7 @@ nats:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
     # ttl is the time-to-live for entries in the bucket (5 minutes for OTPs)
-    ttl: 5m 
+    ttl: 5m
 
 # serviceAccount is the configuration for the Kubernetes service account
 ## This will be used only if the USER_REPOSITORY_TYPE is authelia

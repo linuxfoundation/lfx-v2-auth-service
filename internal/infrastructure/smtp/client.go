@@ -34,19 +34,19 @@ type client struct {
 func (c *client) sendEmail(ctx context.Context, from, to string, emailBytes []byte) error {
 
 	// Connect to SMTP server
-	addr := fmt.Sprintf("%s:%s", c.config.Host, c.config.Port)
+	addr := fmt.Sprintf("%s:%s", c.Host, c.Port)
 
 	var auth smtp.Auth
-	if c.config.Username != "" && c.config.Password != "" {
-		auth = smtp.PlainAuth("", c.config.Username, c.config.Password, c.config.Host)
+	if c.Username != "" && c.Password != "" {
+		auth = smtp.PlainAuth("", c.Username, c.Password, c.Host)
 	}
 
 	err := smtp.SendMail(addr, auth, from, []string{to}, emailBytes)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to send email via SMTP",
 			"error", err,
-			"host", c.config.Host,
-			"port", c.config.Port,
+			"host", c.Host,
+			"port", c.Port,
 		)
 		return errors.NewUnexpected("failed to send email", err)
 	}
