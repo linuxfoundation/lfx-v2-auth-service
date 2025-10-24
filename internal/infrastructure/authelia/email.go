@@ -46,11 +46,8 @@ func (a *autheliaPasswordlessFlow) SendEmail(ctx context.Context, email string) 
 		return "", errors.NewUnexpected("failed to send email", errSendEmail)
 	}
 
-	// Note: this is not a production flow, so the otp is not sensitive
-	// We're logging the otp here to help with debugging and testing
 	slog.InfoContext(ctx, "passwordless flow email sent",
 		"email", redaction.RedactEmail(email),
-		"otp", otp,
 	)
 
 	return otp, nil

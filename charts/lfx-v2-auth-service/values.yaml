@@ -49,7 +49,7 @@ nats:
     # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
     # set it to false if you want the bucket to be deleted when the chart is uninstalled
     keep: true
-    # name is the name of the KV bucket for storing projects
+    # name is the name of the KV bucket for storing email OTP codes
     name: authelia-email-otp
     # history is the number of history entries to keep for the KV bucket
     history: 1

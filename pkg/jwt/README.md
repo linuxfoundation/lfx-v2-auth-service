@@ -27,7 +27,7 @@ import (
 token, err := jwt.GenerateSimpleTestIdentityToken("user@example.com", time.Hour)
 ```
 
-** WARNING:** Default test methods use a singleton test key and are **only for testing**. Never use in production!
+**WARNING:** Default test methods use a singleton test key and are **only for testing**. Never use in production!
 
 ## Generating Identity Tokens
 

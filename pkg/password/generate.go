@@ -32,7 +32,7 @@ func AlphaNum(length int) (string, error) {
 	return string(result), nil
 }
 
-// OnlyNumbers generates a random alphanumeric string of the specified length
+// OnlyNumbers generates a random numeric string of the specified length
 func OnlyNumbers(length int) (string, error) {
 	if length <= 0 {
 		return "", errors.NewValidation("length must be positive")

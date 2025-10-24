@@ -386,6 +386,10 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		return m.errorResponse("user service unavailable"), nil
 	}
 
+	if m.userReader == nil {
+		return m.errorResponse("user service unavailable"), nil
+	}
+
 	linkRequest := &model.LinkIdentity{}
 	err := json.Unmarshal(msg.Data(), linkRequest)
 	if err != nil {

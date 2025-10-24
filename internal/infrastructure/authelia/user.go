@@ -90,7 +90,7 @@ func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 					"criteria", criteria,
 					"alternate_email", redaction.RedactEmail(alternateEmail.Email),
 				)
-				return a.storage.BuildLookupKey(ctx, "email", user.BuildEmailIndexKey(ctx))
+				return a.storage.BuildLookupKey(ctx, "email", user.BuildAlternateEmailIndexKey(ctx, alternateEmail.Email))
 			}
 			return ""
 		case constants.CriteriaTypeUsername:

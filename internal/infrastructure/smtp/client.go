@@ -20,7 +20,7 @@ type config struct {
 	Host string
 	// Port is the SMTP server port (e.g., 1025 for Mailpit)
 	Port string
-	// FromEmail is the sender email address
+	// Username is the SMTP username for authentication
 	Username string
 	// Password is the SMTP password (optional)
 	Password string

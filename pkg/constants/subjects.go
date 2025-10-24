@@ -34,8 +34,8 @@ const (
 	// The subject is of the form: lfx.auth-service.user_metadata.read
 	UserMetadataReadSubject = "lfx.auth-service.user_metadata.read"
 
-	// UserEmaiReadSubject is the subject for the user email read event.
-	// The subject is of the form: lfx.auth-service.user_email.read
+	// UserEmailReadSubject is the subject for the user email read event.
+	// The subject is of the form: lfx.auth-service.user_emails.read
 	UserEmailReadSubject = "lfx.auth-service.user_emails.read"
 )
 
