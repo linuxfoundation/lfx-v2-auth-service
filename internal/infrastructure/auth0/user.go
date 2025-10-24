@@ -352,6 +352,10 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 		return errors.NewValidation("link identity request is required")
 	}
 
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
 	if request.User.AuthToken == "" {
 		return errors.NewValidation("user_token is required")
 	}
@@ -360,31 +364,13 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 		return errors.NewValidation("link_with is required")
 	}
 
-	// Verify JWT token to extract user_id from the 'sub' claim
-	// and validate it has the required scope
-	if u.config.JWTVerificationConfig == nil {
-		return errors.NewValidation("JWT verification configuration is required")
-	}
-
-	claims, errJwtVerifyAuthToken := u.config.JWTVerificationConfig.JWTVerify(ctx, request.User.AuthToken, userUpdateIdentityRequiredScope)
-	if errJwtVerifyAuthToken != nil {
-		slog.ErrorContext(ctx, "jwt verify failed for link identity", "error", errJwtVerifyAuthToken)
-		return errJwtVerifyAuthToken
-	}
-
-	// Extract the user_id from the 'sub' claim
-	userID := claims.Subject
-	if userID == "" {
-		return errors.NewValidation("user_id could not be extracted from management_api_token")
-	}
-
 	slog.DebugContext(ctx, "linking identity to user",
-		"user_id", redaction.Redact(userID),
+		"user_id", redaction.Redact(request.User.UserID),
 	)
 
 	errLinkIdentity := u.identityLinkingFlow.LinkIdentityToUser(
 		ctx,
-		userID,
+		request.User.UserID,
 		request.User.AuthToken,
 		request.LinkWith.IdentityToken,
 	)
@@ -393,7 +379,7 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	}
 
 	slog.DebugContext(ctx, "identity linked successfully via user reader writer",
-		"user_id", redaction.Redact(userID),
+		"user_id", redaction.Redact(request.User.UserID),
 	)
 
 	return nil

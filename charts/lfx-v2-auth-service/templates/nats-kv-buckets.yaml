@@ -1,5 +1,7 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
+
+# The following buckets are only for the authelia flow
 ---
 {{- if and .Values.nats.authelia_users_kv_bucket.creation (eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia") }}
 apiVersion: jetstream.nats.io/v1beta2
@@ -18,4 +20,24 @@ spec:
   maxValueSize: {{ .Values.nats.authelia_users_kv_bucket.maxValueSize }}
   maxBytes: {{ .Values.nats.authelia_users_kv_bucket.maxBytes }}
   compression: {{ .Values.nats.authelia_users_kv_bucket.compression }}
+{{- end }}
+---
+{{- if and .Values.nats.authelia_email_otp_kv_bucket.creation (eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia") }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.authelia_email_otp_kv_bucket.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.nats.authelia_email_otp_kv_bucket.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.authelia_email_otp_kv_bucket.name }}
+  history: {{ .Values.nats.authelia_email_otp_kv_bucket.history }}
+  storage: {{ .Values.nats.authelia_email_otp_kv_bucket.storage }}
+  maxValueSize: {{ .Values.nats.authelia_email_otp_kv_bucket.maxValueSize }}
+  maxBytes: {{ .Values.nats.authelia_email_otp_kv_bucket.maxBytes }}
+  compression: {{ .Values.nats.authelia_email_otp_kv_bucket.compression }}
+  ttl: {{ .Values.nats.authelia_email_otp_kv_bucket.ttl }}
 {{- end }}

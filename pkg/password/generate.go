@@ -32,6 +32,26 @@ func AlphaNum(length int) (string, error) {
 	return string(result), nil
 }
 
+// OnlyNumbers generates a random alphanumeric string of the specified length
+func OnlyNumbers(length int) (string, error) {
+	if length <= 0 {
+		return "", errors.NewValidation("length must be positive")
+	}
+
+	const charset = "0123456789"
+	result := make([]byte, length)
+
+	for i := range result {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", err
+		}
+		result[i] = charset[num.Int64()]
+	}
+
+	return string(result), nil
+}
+
 // GeneratePasswordPair generates a random password and returns both plain text and bcrypt hash
 func GeneratePasswordPair(length int) (plainPassword, bcryptHash string, err error) {
 	// Generate random password of specified length

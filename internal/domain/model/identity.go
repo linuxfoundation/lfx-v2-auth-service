@@ -7,6 +7,8 @@ package model
 type LinkIdentity struct {
 	// User contains the authenticated user's information needed to authorize the linking action.
 	User struct {
+		// UserID is the ID of the user to be linked.
+		UserID string `json:"user_id"`
 		// AuthToken is the JWT token with the proper scope to link an identity to a user account.
 		AuthToken string `json:"auth_token"`
 	} `json:"user"`

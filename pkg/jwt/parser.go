@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 // Claims represents the parsed JWT claims with commonly used fields
 type Claims struct {
 	Subject   string         `json:"sub"`
+	Email     string         `json:"email,omitempty"`
 	ExpiresAt *time.Time     `json:"exp,omitempty"`
 	IssuedAt  *time.Time     `json:"iat,omitempty"`
 	NotBefore *time.Time     `json:"nbf,omitempty"`
@@ -215,6 +217,13 @@ func extractClaimsFromJWT(token jwt.Token) (*Claims, error) {
 		claims.Audience = audience[0] // Take the first audience
 	}
 
+	// Extract email from private claims
+	if email, ok := token.Get("email"); ok {
+		if emailStr, ok := email.(string); ok {
+			claims.Email = emailStr
+		}
+	}
+
 	// Extract scope from private claims
 	if scope, ok := token.Get("scope"); ok {
 		if scopeStr, ok := scope.(string); ok {
@@ -239,9 +248,7 @@ func extractClaimsFromJWT(token jwt.Token) (*Claims, error) {
 	}
 
 	// Store all raw claims
-	for key, value := range token.PrivateClaims() {
-		claims.Raw[key] = value
-	}
+	maps.Copy(claims.Raw, token.PrivateClaims())
 
 	return claims, nil
 }

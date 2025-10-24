@@ -87,7 +87,7 @@ func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria
 		PrimaryEmail: email,
 	}
 	if criteria == constants.CriteriaTypeAlternateEmail {
-		user.AlternateEmail = []model.AlternateEmail{{Email: email}}
+		user.AlternateEmails = []model.Email{{Email: email}}
 	}
 
 	// SearchUser is used to find “root” user emails, not linked email
@@ -251,8 +251,8 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 				return errs.NewValidation("email already linked")
 			}
 
-			for _, alternateEmail := range user.AlternateEmail {
-				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.EmailVerified {
+			for _, alternateEmail := range user.AlternateEmails {
+				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.Verified {
 					return errs.NewValidation("email already linked")
 				}
 			}
@@ -361,6 +361,12 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		responseJSON := m.errorResponse("failed to unmarshal link identity request")
 		return responseJSON, nil
 	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	linkRequest.User.UserID = user.UserID
 
 	errLinkIdentity := m.identityLinker.LinkIdentity(ctx, linkRequest)
 	if errLinkIdentity != nil {

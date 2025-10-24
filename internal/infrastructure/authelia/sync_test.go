@@ -56,6 +56,33 @@ func (m *mockStorageReaderWriter) SetUser(ctx context.Context, user *AutheliaUse
 	return "success", nil
 }
 
+func (m *mockStorageReaderWriter) GetUserWithRevision(ctx context.Context, key string) (*AutheliaUser, uint64, error) {
+	user, err := m.GetUser(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	return user, 1, nil // Return revision 1 for testing
+}
+
+func (m *mockStorageReaderWriter) UpdateUserWithRevision(ctx context.Context, user *AutheliaUser, revision uint64) error {
+	if m.setErr != nil {
+		return m.setErr
+	}
+	if m.users == nil {
+		m.users = make(map[string]*AutheliaUser)
+	}
+	m.users[user.Username] = user
+	return nil
+}
+
+func (m *mockStorageReaderWriter) CreateVerificationCode(ctx context.Context, email, otp string) error {
+	return nil
+}
+
+func (m *mockStorageReaderWriter) GetVerificationCode(ctx context.Context, email string) (string, error) {
+	return "123456", nil
+}
+
 type mockOrchestrator struct {
 	users               map[string]any
 	loadErr             error

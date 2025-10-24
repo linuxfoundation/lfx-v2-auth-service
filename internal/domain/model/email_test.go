@@ -77,117 +77,117 @@ func TestEmail_IsValidEmail(t *testing.T) {
 		{
 			name: "valid email with quoted display name",
 			email: &Email{
-				Email:         "\"John Doe\" <john@example.com>",
-				EmailVerified: true,
-				OTP:           "",
+				Email:    "\"John Doe\" <john@example.com>",
+				Verified: true,
+				OTP:      "",
 			},
 			expected: true,
 		},
 		{
 			name: "empty email",
 			email: &Email{
-				Email:         "",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email with only spaces",
 			email: &Email{
-				Email:         "   ",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "   ",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email missing @",
 			email: &Email{
-				Email:         "userexample.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "userexample.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email missing domain",
 			email: &Email{
-				Email:         "user@",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user@",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email missing local part",
 			email: &Email{
-				Email:         "@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email with double @",
 			email: &Email{
-				Email:         "user@@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user@@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email with spaces in the middle",
 			email: &Email{
-				Email:         "user name@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user name@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email with invalid characters",
 			email: &Email{
-				Email:         "user<>@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user<>@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email with missing TLD",
 			email: &Email{
-				Email:         "user@example",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user@example",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: true, // RFC 5322 allows this
 		},
 		{
 			name: "email with consecutive dots in local part",
 			email: &Email{
-				Email:         "user..name@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user..name@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email starting with dot",
 			email: &Email{
-				Email:         ".user@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    ".user@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
 		{
 			name: "email ending with dot",
 			email: &Email{
-				Email:         "user.@example.com",
-				EmailVerified: false,
-				OTP:           "",
+				Email:    "user.@example.com",
+				Verified: false,
+				OTP:      "",
 			},
 			expected: false,
 		},
@@ -240,6 +240,120 @@ func TestEmail_IsValidEmail(t *testing.T) {
 			result := tt.email.IsValidEmail()
 			if result != tt.expected {
 				t.Errorf("IsValidEmail() = %v, expected %v for email %q", result, tt.expected, tt.email.Email)
+			}
+		})
+	}
+}
+
+func TestEmailMessage_IsValid(t *testing.T) {
+	tests := []struct {
+		name     string
+		message  *EmailMessage
+		expected bool
+	}{
+		{
+			name: "valid message with all fields",
+			message: &EmailMessage{
+				From:     "sender@example.com",
+				FromName: "Sender Name",
+				To:       "recipient@example.com",
+				Subject:  "Test Subject",
+				Body:     "Test Body",
+				IsHTML:   false,
+			},
+			expected: true,
+		},
+		{
+			name: "valid message without from fields",
+			message: &EmailMessage{
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+				IsHTML:  true,
+			},
+			expected: true,
+		},
+		{
+			name: "valid message without FromName",
+			message: &EmailMessage{
+				From:    "sender@example.com",
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+			},
+			expected: true,
+		},
+		{
+			name: "invalid message - missing To",
+			message: &EmailMessage{
+				From:    "sender@example.com",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+			},
+			expected: false,
+		},
+		{
+			name: "invalid message - missing Subject",
+			message: &EmailMessage{
+				To:   "recipient@example.com",
+				Body: "Test Body",
+			},
+			expected: false,
+		},
+		{
+			name: "invalid message - missing Body",
+			message: &EmailMessage{
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+			},
+			expected: false,
+		},
+		{
+			name: "invalid message - invalid To email",
+			message: &EmailMessage{
+				To:      "invalid-email",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+			},
+			expected: false,
+		},
+		{
+			name: "invalid message - invalid From email",
+			message: &EmailMessage{
+				From:    "invalid-email",
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+			},
+			expected: false,
+		},
+		{
+			name: "valid message - empty From",
+			message: &EmailMessage{
+				From:    "",
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+				Body:    "Test Body",
+			},
+			expected: true,
+		},
+		{
+			name: "valid message with HTML",
+			message: &EmailMessage{
+				To:      "recipient@example.com",
+				Subject: "Test Subject",
+				Body:    "<html><body>Test</body></html>",
+				IsHTML:  true,
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.message.IsValid()
+			if result != tt.expected {
+				t.Errorf("IsValid() = %v, expected %v for message: %+v", result, tt.expected, tt.message)
 			}
 		})
 	}

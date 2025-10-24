@@ -8,6 +8,9 @@ const (
 	// KVBucketNameAutheliaUsers is the name of the KV bucket for authelia users.
 	KVBucketNameAutheliaUsers = "authelia-users"
 
+	// KVBucketNameAutheliaEmailOTP is the name of the KV bucket for authelia email OTPs.
+	KVBucketNameAutheliaEmailOTP = "authelia-email-otp"
+
 	// KVLookupPrefixAuthelia is the prefix for lookup keys in the KV store.
 	KVLookupPrefixAuthelia = "lookup/authelia-users/%s"
 )
