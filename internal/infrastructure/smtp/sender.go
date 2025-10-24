@@ -56,8 +56,8 @@ func (s *Sender) SendEmail(ctx context.Context, message *model.EmailMessage) err
 	}
 
 	slog.DebugContext(ctx, "email sent successfully via SMTP",
-		"host", s.client.config.Host,
-		"port", s.client.config.Port,
+		"host", s.client.Host,
+		"port", s.client.Port,
 		"to", message.To,
 		"subject", message.Subject,
 	)
