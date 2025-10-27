@@ -224,7 +224,7 @@ func NewRegularWebAuthConfig(ctx context.Context, domain string) (*authenticatio
 	if clientID == "" {
 		return nil, nil
 		// TODO - implement the AUTH0 flow, including secrets
-		//return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_ID is required for email linking flow")
+		// return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_ID is required for email linking flow")
 	}
 
 	clientSecret := os.Getenv(constants.Auth0RegularWebClientSecretEnvKey)
