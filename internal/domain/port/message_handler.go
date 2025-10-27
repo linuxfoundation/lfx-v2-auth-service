@@ -13,13 +13,19 @@ type MessageHandler interface {
 // UserHandler defines the behavior of the user domain handlers
 type UserHandler interface {
 	UserWriteHandler
-	UserReadHandler
+	UserReaderHandler
+	UserLookupHandler
 	UserLinkHandler
 }
 
 // UserReadHandler defines the behavior of the user read/lookup domain handlers
-type UserReadHandler interface {
+type UserReaderHandler interface {
 	GetUserMetadata(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	GetUserEmails(ctx context.Context, msg TransportMessenger) ([]byte, error)
+}
+
+// UserLookupHandler defines the behavior of the user lookup domain handlers
+type UserLookupHandler interface {
 	EmailToUsername(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	EmailToSub(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }

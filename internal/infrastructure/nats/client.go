@@ -163,6 +163,7 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 	// Check if Authelia is enabled by checking the environment variable directly
 	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuthelia {
 		buckets = append(buckets, constants.KVBucketNameAutheliaUsers)
+		buckets = append(buckets, constants.KVBucketNameAutheliaEmailOTP)
 	}
 
 	for _, bucketName := range buckets {

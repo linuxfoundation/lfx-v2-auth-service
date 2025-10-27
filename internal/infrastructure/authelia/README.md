@@ -179,6 +179,115 @@ This process ensures that:
 - User data consistency is maintained across the system
 - The canonical user identifier is properly established for future lookups
 
+## Alternate Email Linking with OTP Verification
+
+The Authelia integration supports linking alternate email addresses to user accounts through a secure OTP (One-Time Password) verification flow. This feature enables users to add and verify additional email addresses without requiring a full authentication flow.
+
+### OTP Flow Architecture
+
+The OTP verification system uses a dedicated NATS Key-Value bucket with TTL (Time-To-Live) for secure and temporary storage of verification codes. This ensures that:
+
+- OTP codes are automatically expired after a configured time period (default: 5 minutes)
+- No manual cleanup is required - NATS handles expiration automatically
+- Storage is isolated from user data in a separate KV bucket
+- Verification codes are ephemeral and cannot be reused after expiration
+
+### OTP Verification Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant AuthService
+    participant SMTP
+    participant NATSKV as NATS KV<br/>(authelia-email-otp)
+    participant Storage as NATS KV<br/>(authelia-users)
+
+    Note over User,Storage: Step 1: Send Verification Code
+    
+    User->>AuthService: Send verification (alternate email)
+    AuthService->>AuthService: Check email not already linked
+    AuthService->>AuthService: Generate 6-digit OTP
+    AuthService->>SMTP: Send OTP email
+    SMTP-->>User: Email with OTP code
+    
+    AuthService->>NATSKV: Store OTP with TTL<br/>Key: email<br/>Value: OTP code<br/>TTL: 5 minutes
+    NATSKV-->>AuthService: Success
+    AuthService-->>User: Verification sent
+
+    Note over User,Storage: Step 2: Verify OTP Code
+    
+    User->>AuthService: Verify OTP (email + code)
+    AuthService->>AuthService: Check email not already linked
+    AuthService->>NATSKV: Get OTP by email key
+    
+    alt OTP Found and Valid
+        NATSKV-->>AuthService: OTP code
+        AuthService->>AuthService: Compare submitted vs stored OTP
+        alt OTP Matches
+            AuthService->>AuthService: Generate identity tokens<br/>(ID token + Access token)
+            AuthService-->>User: Success + tokens
+        else OTP Mismatch
+            AuthService-->>User: Error: Invalid code
+        end
+    else OTP Not Found or Expired
+        NATSKV-->>AuthService: KeyNotFound error
+        AuthService-->>User: Error: Code expired
+    end
+
+    Note over User,Storage: Step 3: Link Identity to User
+    
+    User->>AuthService: Link identity (user token + identity token)
+    AuthService->>AuthService: Parse identity token<br/>Extract email from claims
+    AuthService->>Storage: Get user with revision
+    Storage-->>AuthService: User data + revision
+    AuthService->>AuthService: Add email to AlternateEmails
+    AuthService->>Storage: Update user with revision<br/>(optimistic locking)
+    Storage-->>AuthService: Success
+    AuthService-->>User: Identity linked
+```
+
+### OTP Storage Implementation
+
+**NATS KV Bucket Configuration:**
+- **Bucket Name**: `authelia-email-otp` (`constants.KVBucketNameAutheliaEmailOTP`)
+- **TTL**: 5 minutes (configurable at bucket creation)
+- **Key Format**: Email address (used as alternate email index key)
+- **Value Format**: 6-digit numeric OTP code (stored as plain string)
+- **Auto-Expiration**: NATS automatically removes expired entries after TTL
+
+### Token Generation After Verification
+
+Upon successful OTP verification, the system generates two tokens:
+
+**ID Token:**
+- Contains verified email as subject claim (`sub: "email|{email}"`)
+- Used for identity linking operation
+- Validity: 60 minutes
+- Format: JWT with custom claims
+
+**Access Token:**
+- Standard OAuth2 access token
+- Same validity period as ID token
+- Used for authenticated operations
+
+### Integration with Identity Linking
+
+The OTP verification flow integrates with the identity linking system:
+
+1. **Verification Phase**: User verifies email ownership via OTP → receives identity token
+2. **Linking Phase**: User links identity token to account → email added to `AlternateEmails` array
+3. **Storage Update**: User record updated with optimistic locking to prevent race conditions
+
+For complete flow details, see the [Email Verification Documentation](../../../docs/email_verification.md).
+
+### NATS Subjects
+
+The OTP verification flow exposes the following NATS subjects:
+
+- `lfx.auth-service.email_linking.send_verification` - Initiates OTP verification flow
+- `lfx.auth-service.email_linking.verify` - Validates OTP and returns identity token
+- `lfx.auth-service.user_identity.link` - Links verified identity to user account
+
 ## Security Considerations
 
 - User passwords are automatically generated and stored as bcrypt hashes in ConfigMaps

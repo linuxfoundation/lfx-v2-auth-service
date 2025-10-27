@@ -39,13 +39,14 @@ type AutheliaUser struct {
 // AutheliaUserStorage represents the storage format for Authelia users
 // This struct excludes sensitive fields like token, user_id, and primary_email
 type AutheliaUserStorage struct {
-	Username     string              `json:"username"`
-	Sub          string              `json:"sub"`                     // sub for Authelia
-	Email        string              `json:"email"`                   // email for Authelia
-	DisplayName  string              `json:"displayname"`             // display name for Authelia
-	UserMetadata *model.UserMetadata `json:"user_metadata,omitempty"` // user metadata from domain model
-	CreatedAt    time.Time           `json:"created_at"`              // creation timestamp
-	UpdatedAt    time.Time           `json:"updated_at"`              // update timestamp
+	Username       string              `json:"username"`
+	Sub            string              `json:"sub"`                       // sub for Authelia
+	Email          string              `json:"email"`                     // email for Authelia
+	DisplayName    string              `json:"displayname"`               // display name for Authelia
+	UserMetadata   *model.UserMetadata `json:"user_metadata,omitempty"`   // user metadata from domain model
+	AlternateEmail []model.Email       `json:"alternate_email,omitempty"` // alternate email for Authelia
+	CreatedAt      time.Time           `json:"created_at"`                // creation timestamp
+	UpdatedAt      time.Time           `json:"updated_at"`                // update timestamp
 }
 
 // SetUsername sets the username for the user
@@ -59,23 +60,26 @@ func (a *AutheliaUser) SetUsername(username string) {
 // ToStorage converts AutheliaUser to AutheliaUserStorage for storage operations
 func (a *AutheliaUser) ToStorage() *AutheliaUserStorage {
 	var (
-		username     string
-		userMetadata *model.UserMetadata
+		username       string
+		userMetadata   *model.UserMetadata
+		alternateEmail []model.Email
 	)
 
 	if a.User != nil {
 		username = a.Username
 		userMetadata = a.UserMetadata
+		alternateEmail = a.AlternateEmails
 	}
 
 	return &AutheliaUserStorage{
-		Username:     username,
-		Sub:          a.Sub,
-		Email:        a.Email,
-		DisplayName:  a.DisplayName,
-		UserMetadata: userMetadata,
-		CreatedAt:    a.CreatedAt,
-		UpdatedAt:    a.UpdatedAt,
+		Username:       username,
+		Sub:            a.Sub,
+		Email:          a.Email,
+		DisplayName:    a.DisplayName,
+		UserMetadata:   userMetadata,
+		AlternateEmail: alternateEmail,
+		CreatedAt:      a.CreatedAt,
+		UpdatedAt:      a.UpdatedAt,
 	}
 }
 
@@ -86,9 +90,12 @@ func (a *AutheliaUser) FromStorage(storage *AutheliaUserStorage) {
 	}
 	a.Username = storage.Username
 	a.UserMetadata = storage.UserMetadata
+	a.PrimaryEmail = storage.Email
+	a.AlternateEmails = storage.AlternateEmail
 	// for consistency in naming across implementations,
 	// we use the unique identifier as the user_id
 	a.UserID = storage.Sub
+	a.Sub = storage.Sub
 	a.Email = storage.Email
 	a.DisplayName = storage.DisplayName
 	a.CreatedAt = storage.CreatedAt

@@ -121,16 +121,16 @@ func (a *alternateEmailFilter) Endpoint(ctx context.Context) string {
 }
 
 func (a *alternateEmailFilter) Args(ctx context.Context) []any {
-	if len(a.user.AlternateEmail) == 0 {
+	if len(a.user.AlternateEmails) == 0 {
 		return []any{}
 	}
-	return []any{url.QueryEscape(a.user.AlternateEmail[0].Email)}
+	return []any{url.QueryEscape(a.user.AlternateEmails[0].Email)}
 }
 
 func (a *alternateEmailFilter) Filter(ctx context.Context, auth0User *Auth0User) (bool, error) {
 	for _, identity := range auth0User.Identities {
 		if identity.Connection == emailAuthenticationFilter {
-			for _, alternateEmail := range a.user.AlternateEmail {
+			for _, alternateEmail := range a.user.AlternateEmails {
 				if identity.ProfileData != nil &&
 					strings.EqualFold(alternateEmail.Email, identity.ProfileData.Email) {
 					slog.DebugContext(ctx, "user found, and it's the correct identity",

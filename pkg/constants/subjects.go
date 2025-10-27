@@ -7,6 +7,11 @@ const (
 	// AuthServiceQueue is the queue for the auth service.
 	// The queue is of the form: lfx.auth-service.queue
 	AuthServiceQueue = "lfx.auth-service.queue"
+)
+
+const (
+
+	// Lookup subjects
 
 	// UserEmailToUserSubject is the subject for the user email to username event.
 	// The subject is of the form: lfx.auth-service.email_to_username
@@ -15,6 +20,11 @@ const (
 	// UserEmailToSubSubject is the subject for the user email to sub event.
 	// The subject is of the form: lfx.auth-service.email_to_sub
 	UserEmailToSubSubject = "lfx.auth-service.email_to_sub"
+)
+
+const (
+
+	// User read/write subjects
 
 	// UserMetadataUpdateSubject is the subject for the user metadata update event.
 	// The subject is of the form: lfx.auth-service.user_metadata.update
@@ -23,6 +33,15 @@ const (
 	// UserMetadataReadSubject is the subject for the user metadata read event.
 	// The subject is of the form: lfx.auth-service.user_metadata.read
 	UserMetadataReadSubject = "lfx.auth-service.user_metadata.read"
+
+	// UserEmailReadSubject is the subject for the user email read event.
+	// The subject is of the form: lfx.auth-service.user_emails.read
+	UserEmailReadSubject = "lfx.auth-service.user_emails.read"
+)
+
+const (
+
+	// Email and Identity linking subjects
 
 	// EmailLinkingSendVerificationSubject is the subject for the email linking start event.
 	// The subject is of the form: lfx.auth-service.email_linking.send_verification

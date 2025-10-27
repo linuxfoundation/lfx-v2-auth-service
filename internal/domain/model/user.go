@@ -17,18 +17,13 @@ import (
 
 // User represents a user in the system
 type User struct {
-	Token          string           `json:"token" yaml:"token"`
-	UserID         string           `json:"user_id" yaml:"user_id"`
-	Sub            string           `json:"sub,omitempty" yaml:"sub,omitempty"`
-	Username       string           `json:"username" yaml:"username"`
-	PrimaryEmail   string           `json:"primary_email" yaml:"primary_email"`
-	AlternateEmail []AlternateEmail `json:"alternate_email,omitempty" yaml:"alternate_email,omitempty"`
-	UserMetadata   *UserMetadata    `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
-}
-
-type AlternateEmail struct {
-	Email         string `json:"email" yaml:"email"`
-	EmailVerified bool   `json:"email_verified" yaml:"email_verified"`
+	Token           string        `json:"token" yaml:"token"`
+	UserID          string        `json:"user_id" yaml:"user_id"`
+	Sub             string        `json:"sub,omitempty" yaml:"sub,omitempty"`
+	Username        string        `json:"username" yaml:"username"`
+	PrimaryEmail    string        `json:"primary_email" yaml:"primary_email"`
+	AlternateEmails []Email       `json:"alternate_emails,omitempty" yaml:"alternate_emails,omitempty"`
+	UserMetadata    *UserMetadata `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
 }
 
 // UserMetadata represents the metadata of a user
@@ -106,6 +101,15 @@ func (u User) BuildEmailIndexKey(ctx context.Context) string {
 		return ""
 	}
 	return u.buildIndexKey(ctx, "email", data)
+}
+
+// BuildAlternateEmailIndexKey builds the index key for the alternate email
+func (u User) BuildAlternateEmailIndexKey(ctx context.Context, alternateEmail string) string {
+	data := strings.TrimSpace(strings.ToLower(alternateEmail))
+	if data == "" {
+		return ""
+	}
+	return u.buildIndexKey(ctx, "alternate-email", data)
 }
 
 // BuildSubIndexKey builds the index key for the sub

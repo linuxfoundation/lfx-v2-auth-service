@@ -18,8 +18,8 @@ func Test_newUserFilterer(t *testing.T) {
 	user := &model.User{
 		Username:     "testuser",
 		PrimaryEmail: "test@example.com",
-		AlternateEmail: []model.AlternateEmail{
-			{Email: "alt@example.com", EmailVerified: true},
+		AlternateEmails: []model.Email{
+			{Email: "alt@example.com", Verified: true},
 		},
 	}
 
@@ -396,7 +396,7 @@ func Test_emailFilter_Filter(t *testing.T) {
 func Test_alternateEmailFilter_Endpoint(t *testing.T) {
 	ctx := context.Background()
 	user := &model.User{
-		AlternateEmail: []model.AlternateEmail{
+		AlternateEmails: []model.Email{
 			{Email: "alt@example.com"},
 		},
 	}
@@ -413,43 +413,43 @@ func Test_alternateEmailFilter_Args(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		alternateEmail []model.AlternateEmail
-		wantLen        int
-		wantFirst      string
+		name            string
+		alternateEmails []model.Email
+		wantLen         int
+		wantFirst       string
 	}{
 		{
 			name: "returns escaped alternate email",
-			alternateEmail: []model.AlternateEmail{
-				{Email: "alt@example.com", EmailVerified: true},
+			alternateEmails: []model.Email{
+				{Email: "alt@example.com", Verified: true},
 			},
 			wantLen:   1,
 			wantFirst: "alt%40example.com",
 		},
 		{
 			name: "returns first email when multiple exist",
-			alternateEmail: []model.AlternateEmail{
-				{Email: "first@example.com", EmailVerified: true},
-				{Email: "second@example.com", EmailVerified: false},
+			alternateEmails: []model.Email{
+				{Email: "first@example.com", Verified: true},
+				{Email: "second@example.com", Verified: false},
 			},
 			wantLen:   1,
 			wantFirst: "first%40example.com",
 		},
 		{
-			name:           "returns empty array when no alternate emails",
-			alternateEmail: []model.AlternateEmail{},
-			wantLen:        0,
+			name:            "returns empty array when no alternate emails",
+			alternateEmails: []model.Email{},
+			wantLen:         0,
 		},
 		{
-			name:           "returns empty array when alternate email is nil",
-			alternateEmail: nil,
-			wantLen:        0,
+			name:            "returns empty array when alternate email is nil",
+			alternateEmails: nil,
+			wantLen:         0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			user := &model.User{AlternateEmail: tt.alternateEmail}
+			user := &model.User{AlternateEmails: tt.alternateEmails}
 			filter := &alternateEmailFilter{user: user}
 
 			args := filter.Args(ctx)
@@ -475,8 +475,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "matches when alternate email and connection match",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: true},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: true},
 				},
 			},
 			auth0User: &Auth0User{
@@ -496,8 +496,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "no match when connection type is different",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: true},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: true},
 				},
 			},
 			auth0User: &Auth0User{
@@ -517,8 +517,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "no match when email doesn't match",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: true},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: true},
 				},
 			},
 			auth0User: &Auth0User{
@@ -538,9 +538,9 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "matches with multiple alternate emails",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt1@example.com", EmailVerified: true},
-					{Email: "alt2@example.com", EmailVerified: false},
+				AlternateEmails: []model.Email{
+					{Email: "alt1@example.com", Verified: true},
+					{Email: "alt2@example.com", Verified: false},
 				},
 			},
 			auth0User: &Auth0User{
@@ -560,8 +560,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "checks multiple identities and finds match",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: true},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: true},
 				},
 			},
 			auth0User: &Auth0User{
@@ -587,8 +587,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "no match when identities array is empty",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: true},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: true},
 				},
 			},
 			auth0User: &Auth0User{
@@ -600,7 +600,7 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "no match when user has no alternate emails",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{},
+				AlternateEmails: []model.Email{},
 			},
 			auth0User: &Auth0User{
 				Identities: []Auth0Identity{
@@ -619,8 +619,8 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		{
 			name: "appends alternate email when match found",
 			user: &model.User{
-				AlternateEmail: []model.AlternateEmail{
-					{Email: "alt@example.com", EmailVerified: false},
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com", Verified: false},
 				},
 			},
 			auth0User: &Auth0User{

@@ -9,34 +9,37 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
-	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // userReaderWriter implements UserReaderWriter with pluggable storage and ConfigMap sync
 type userReaderWriter struct {
-	oidcUserInfoURL string
-	sync            *sync
-	storage         internalStorageReaderWriter
-	orchestrator    internalOrchestrator
-	httpClient      *httpclient.Client
+	oidcUserInfoURL  string
+	sync             *sync
+	storage          internalStorageReaderWriter
+	orchestrator     internalOrchestrator
+	emailLinkingFlow passwordlessFlow
+	httpClient       *httpclient.Client
 }
 
 // fetchOIDCUserInfo fetches user information from the OIDC userinfo endpoint
 func (a *userReaderWriter) fetchOIDCUserInfo(ctx context.Context, token string) (*OIDCUserInfo, error) {
 	if strings.TrimSpace(token) == "" {
-		return nil, errors.NewValidation("token is required")
+		return nil, errs.NewValidation("token is required")
 	}
 
 	if strings.TrimSpace(a.oidcUserInfoURL) == "" {
-		return nil, errors.NewValidation("OIDC userinfo URL is not configured")
+		return nil, errs.NewValidation("OIDC userinfo URL is not configured")
 	}
 
 	// Create API request using the standard pattern
@@ -66,7 +69,7 @@ func (a *userReaderWriter) fetchOIDCUserInfo(ctx context.Context, token string) 
 func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 
 	if user == nil {
-		return nil, errors.NewValidation("user is required")
+		return nil, errs.NewValidation("user is required")
 	}
 
 	param := func(criteriaType string) string {
@@ -80,6 +83,16 @@ func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 				return ""
 			}
 			return a.storage.BuildLookupKey(ctx, "email", user.BuildEmailIndexKey(ctx))
+		case constants.CriteriaTypeAlternateEmail:
+			// only the first alternate email is supported
+			for _, alternateEmail := range user.AlternateEmails {
+				slog.DebugContext(ctx, "searching user",
+					"criteria", criteria,
+					"alternate_email", redaction.RedactEmail(alternateEmail.Email),
+				)
+				return a.storage.BuildLookupKey(ctx, "email", user.BuildAlternateEmailIndexKey(ctx, alternateEmail.Email))
+			}
+			return ""
 		case constants.CriteriaTypeUsername:
 			slog.DebugContext(ctx, "searching user",
 				"criteria", criteria,
@@ -92,7 +105,7 @@ func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 
 	key := param(criteria)
 	if key == "" {
-		return nil, errors.NewValidation("invalid criteria type")
+		return nil, errs.NewValidation("invalid criteria type")
 	}
 
 	existingUser, err := a.storage.GetUser(ctx, key)
@@ -111,7 +124,7 @@ func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	if user == nil {
-		return nil, errors.NewValidation("user is required")
+		return nil, errs.NewValidation("user is required")
 	}
 
 	key := ""
@@ -139,7 +152,7 @@ func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
 
 	if input == "" {
-		return nil, errors.NewValidation("input is required")
+		return nil, errs.NewValidation("input is required")
 	}
 
 	slog.DebugContext(ctx, "metadata lookup", "input", redaction.Redact(input))
@@ -182,7 +195,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string) (*m
 // UpdateUser updates a user only in storage with patch-like behavior, updating only changed fields
 func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 	if user == nil {
-		return nil, errors.NewValidation("user is required")
+		return nil, errs.NewValidation("user is required")
 	}
 
 	if user.Token != "" {
@@ -208,7 +221,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	}
 
 	if user.Sub == "" && user.Username == "" {
-		return nil, errors.NewValidation("username or sub is required")
+		return nil, errs.NewValidation("username or sub is required")
 	}
 
 	// First, get the existing user from storage to preserve Authelia-specific fields
@@ -222,7 +235,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 			"error", err,
 			"key", existingAutheliaUser.Username,
 		)
-		return nil, errors.NewUnexpected("failed to get existing user from storage", err)
+		return nil, errs.NewUnexpected("failed to get existing user from storage", err)
 	}
 
 	// Update Sub field if provided from OIDC userinfo
@@ -253,7 +266,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 				"username", user.Username,
 				"error", err,
 			)
-			return nil, errors.NewUnexpected("failed to update user in storage", err)
+			return nil, errs.NewUnexpected("failed to update user in storage", err)
 		}
 	}
 
@@ -264,17 +277,173 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 }
 
 func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
-	slog.DebugContext(ctx, "sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
-	return errors.NewValidation("send verification alternate email is not supported for Authelia yet")
+	slog.DebugContext(ctx, "sending alternate email verification",
+		"alternate_email", redaction.RedactEmail(alternateEmail),
+	)
+
+	if alternateEmail == "" {
+		return errs.NewValidation("alternate email is required")
+	}
+
+	otp, errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail)
+	if errSendEmail != nil {
+		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
+		return errs.NewUnexpected("failed to send email", errSendEmail)
+	}
+
+	user := &model.User{}
+	key := user.BuildAlternateEmailIndexKey(ctx, alternateEmail)
+	errCreateVerificationCode := a.storage.CreateVerificationCode(ctx, key, otp)
+	if errCreateVerificationCode != nil {
+		slog.ErrorContext(ctx, "failed to create verification code", "error", errCreateVerificationCode)
+		return errs.NewUnexpected("failed to create verification code", errCreateVerificationCode)
+	}
+
+	slog.DebugContext(ctx, "alternate email verification initiated successfully",
+		"email", redaction.RedactEmail(alternateEmail),
+	)
+
+	return nil
 }
 
 func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
-	slog.DebugContext(ctx, "verifying alternate email", "email", redaction.Redact(email.Email))
-	return nil, errors.NewValidation("alternate email verification is not supported for Authelia yet")
+
+	if email.Email == "" || email.OTP == "" {
+		return nil, errs.NewValidation("email and OTP are required")
+	}
+
+	user := &model.User{}
+
+	key := user.BuildAlternateEmailIndexKey(ctx, email.Email)
+	otp, errGetVerificationCode := a.storage.GetVerificationCode(ctx, key)
+	if errGetVerificationCode != nil {
+		return nil, errGetVerificationCode
+	}
+
+	if otp != email.OTP {
+		return nil, errs.NewValidation("invalid verification code")
+	}
+
+	expiresIn := 60 * time.Minute
+
+	// Generate identity token with custom sub claim in format "email|provider"
+	idToken, errGenerateIDToken := jwt.GenerateSimpleTestIdentityTokenWithSubject(
+		email.Email,
+		fmt.Sprintf("email|%s", email.Email),
+		expiresIn,
+	)
+	if errGenerateIDToken != nil {
+		return nil, errs.NewUnexpected("failed to generate ID token", errGenerateIDToken)
+	}
+
+	accessToken, errGenerateAccessToken := jwt.GenerateSimpleTestAccessToken(email.Email, expiresIn)
+	if errGenerateAccessToken != nil {
+		return nil, errs.NewUnexpected("failed to generate access token", errGenerateAccessToken)
+	}
+
+	return &model.AuthResponse{
+		IDToken:     idToken,
+		AccessToken: accessToken,
+		ExpiresIn:   int(expiresIn.Seconds()),
+		TokenType:   "Bearer",
+	}, nil
 }
 
 func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
-	return errors.NewValidation("link identity is not supported for Authelia yet")
+	if request == nil {
+		return errs.NewValidation("request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errs.NewValidation("user ID is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errs.NewValidation("identity token is required")
+	}
+
+	// Parse the identity token to extract the email (from sub claim)
+	opts := &jwt.ParseOptions{
+		RequireExpiration: false, // The token might be expired but we still want the email
+		AllowBearerPrefix: true,
+		RequireSubject:    true,
+	}
+
+	claims, err := jwt.ParseUnverified(ctx, request.LinkWith.IdentityToken, opts)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to parse identity token",
+			"error", err,
+		)
+		return errs.NewValidation("invalid identity token")
+	}
+
+	// Extract email
+	email := claims.Email
+	if email == "" {
+		return errs.NewValidation("identity token does not contain an email")
+	}
+
+	slog.DebugContext(ctx, "linking identity",
+		"user_id", redaction.Redact(request.User.UserID),
+		"email", redaction.RedactEmail(email),
+	)
+
+	// Converting the sub to use the lookup key
+	user := &model.User{
+		Sub: request.User.UserID,
+	}
+	key := a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
+
+	// Get the user with revision for optimistic locking
+	existingUser, revision, err := a.storage.GetUserWithRevision(ctx, key)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to get user for linking identity",
+			"user_id", redaction.Redact(request.User.UserID),
+			"error", err,
+		)
+		return err
+	}
+
+	// Check if the email already exists in the alternate email list
+	emailExists := false
+	for _, altEmail := range existingUser.AlternateEmails {
+		if strings.EqualFold(altEmail.Email, email) {
+			emailExists = true
+			slog.InfoContext(ctx, "email already exists in alternate email list",
+				"user_id", redaction.Redact(request.User.UserID),
+				"email", redaction.RedactEmail(email),
+			)
+			break
+		}
+	}
+
+	// If email doesn't exist, add it to the list
+	if !emailExists {
+		if existingUser.AlternateEmails == nil {
+			existingUser.AlternateEmails = []model.Email{}
+		}
+		existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
+			Email:    email,
+			Verified: true, // The email is verified because it came from a verified identity token
+		})
+
+		// Update the user with optimistic locking
+		err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to update user with alternate email",
+				"user_id", redaction.Redact(request.User.UserID),
+				"error", err,
+			)
+			return err
+		}
+
+		slog.InfoContext(ctx, "successfully linked alternate email to user",
+			"user_id", redaction.Redact(request.User.UserID),
+			"email", redaction.RedactEmail(email),
+		)
+	}
+
+	return nil
 }
 
 // NewUserReaderWriter creates a new Authelia User repository
@@ -282,9 +451,10 @@ func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClie
 	// Set defaults in case of not set
 
 	u := &userReaderWriter{
-		sync:            &sync{},
-		oidcUserInfoURL: config["oidc-userinfo-url"],
-		httpClient:      httpclient.NewClient(httpclient.DefaultConfig()),
+		sync:             &sync{},
+		oidcUserInfoURL:  config["oidc-userinfo-url"],
+		emailLinkingFlow: newEmailLinkingFlow(),
+		httpClient:       httpclient.NewClient(httpclient.DefaultConfig()),
 	}
 
 	// Initialize storage using NATS KV store
