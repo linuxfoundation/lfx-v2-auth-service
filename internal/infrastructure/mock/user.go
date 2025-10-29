@@ -9,18 +9,31 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/password"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 	"gopkg.in/yaml.v3"
 )
 
+// otpEntry stores OTP data with expiration time
+type otpEntry struct {
+	otp       string
+	expiresAt time.Time
+}
+
 type userWriter struct {
 	// In-memory storage for mock users
 	users map[string]*model.User
+	// In-memory storage for OTPs (email -> OTP)
+	otps map[string]*otpEntry
+	// Mutex for thread-safe OTP operations
+	otpMutex sync.RWMutex
 }
 
 //go:embed users.yaml
@@ -75,7 +88,7 @@ func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User
 
 	// If not found, return error (consistent with Auth0 behavior)
 	slog.InfoContext(ctx, "mock: user not found in storage", "key", key)
-	return nil, fmt.Errorf("user not found")
+	return nil, errors.NewNotFound("user not found")
 }
 
 func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
@@ -92,7 +105,7 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	if err != nil {
 		// Return a more specific search error
 		slog.InfoContext(ctx, "mock: user not found by search criteria", "criteria", criteria)
-		return nil, fmt.Errorf("user not found by criteria")
+		return nil, errors.NewNotFound("user not found by criteria")
 	}
 
 	return result, nil
@@ -207,18 +220,201 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 
 func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
+
+	// Validate email format
+	email := &model.Email{Email: alternateEmail}
+	if !email.IsValidEmail() {
+		return errors.NewValidation("invalid email format")
+	}
+
+	// Check if email is already registered as primary or alternate email
+	normalizedEmail := strings.ToLower(strings.TrimSpace(alternateEmail))
+	for _, user := range u.users {
+		// Check primary email
+		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
+			return errors.NewValidation("alternate email already linked")
+		}
+		// Check alternate emails
+		for _, altEmail := range user.AlternateEmails {
+			if strings.ToLower(altEmail.Email) == normalizedEmail {
+				return errors.NewValidation("alternate email already linked")
+			}
+		}
+	}
+
+	// Generate a 6-digit OTP
+	otp, err := password.OnlyNumbers(6)
+	if err != nil {
+		return errors.NewUnexpected("failed to generate OTP", err)
+	}
+
+	// Store OTP with 5-minute expiration
+	u.otpMutex.Lock()
+	u.otps[normalizedEmail] = &otpEntry{
+		otp:       otp,
+		expiresAt: time.Now().Add(5 * time.Minute),
+	}
+	u.otpMutex.Unlock()
+
+	slog.InfoContext(ctx, "mock: OTP generated for email verification",
+		"email", redaction.Redact(alternateEmail),
+		"otp", otp,
+		"expires_in", "5m",
+	)
+
 	return nil
 }
 
 func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
-	// For mock implementation, return a basic user object
-	return nil, nil
+
+	if email.Email == "" || email.OTP == "" {
+		return nil, errors.NewValidation("email and OTP are required")
+	}
+
+	// Validate email format
+	if !email.IsValidEmail() {
+		return nil, errors.NewValidation("invalid email format")
+	}
+
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email.Email))
+
+	// Check if email is already linked (re-check to prevent race conditions)
+	for _, user := range u.users {
+		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
+			return nil, errors.NewValidation("alternate email already linked")
+		}
+		for _, altEmail := range user.AlternateEmails {
+			if strings.ToLower(altEmail.Email) == normalizedEmail {
+				return nil, errors.NewValidation("alternate email already linked")
+			}
+		}
+	}
+
+	// Verify OTP
+	u.otpMutex.RLock()
+	entry, exists := u.otps[normalizedEmail]
+	u.otpMutex.RUnlock()
+
+	if !exists {
+		return nil, errors.NewValidation("OTP not found or expired")
+	}
+
+	// Check if OTP is expired
+	if time.Now().After(entry.expiresAt) {
+		// Clean up expired OTP
+		u.otpMutex.Lock()
+		delete(u.otps, normalizedEmail)
+		u.otpMutex.Unlock()
+		return nil, errors.NewValidation("OTP expired")
+	}
+
+	// Verify OTP matches
+	if entry.otp != email.OTP {
+		return nil, errors.NewValidation("invalid OTP")
+	}
+
+	// OTP is valid, clean it up
+	u.otpMutex.Lock()
+	delete(u.otps, normalizedEmail)
+	u.otpMutex.Unlock()
+
+	// Generate an identity token for the verified email
+	idToken, err := jwt.GenerateSimpleTestIdentityToken(email.Email, 1*time.Hour)
+	if err != nil {
+		return nil, errors.NewUnexpected("failed to generate identity token", err)
+	}
+
+	slog.InfoContext(ctx, "mock: email verified successfully",
+		"email", redaction.Redact(email.Email),
+	)
+
+	// Return auth response with identity token
+	return &model.AuthResponse{
+		IDToken:   idToken,
+		TokenType: "Bearer",
+		ExpiresIn: 3600, // 1 hour
+	}, nil
 }
 
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "mock: linking identity")
-	return errors.NewValidation("link identity not implemented for mock")
+
+	if request == nil {
+		return errors.NewValidation("link identity request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errors.NewValidation("identity_token is required")
+	}
+
+	// Extract email from the identity token
+	email, err := jwt.ExtractEmail(ctx, request.LinkWith.IdentityToken)
+	if err != nil {
+		return errors.NewValidation("failed to extract email from identity token")
+	}
+
+	if email == "" {
+		return errors.NewValidation("identity token does not contain email claim")
+	}
+
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+
+	slog.InfoContext(ctx, "mock: linking email to user",
+		"user_id", redaction.Redact(request.User.UserID),
+		"email", redaction.Redact(email),
+	)
+
+	// Find the user by user_id
+	user, exists := u.users[request.User.UserID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	// Check if email is already the primary email
+	if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
+		return errors.NewValidation("email is already the primary email")
+	}
+
+	// Check if email is already in alternate emails
+	for _, altEmail := range user.AlternateEmails {
+		if strings.ToLower(altEmail.Email) == normalizedEmail {
+			return errors.NewValidation("email is already linked as alternate email")
+		}
+	}
+
+	// Check if this email is linked to any other user
+	for _, otherUser := range u.users {
+		if otherUser.UserID == user.UserID {
+			continue
+		}
+		if strings.ToLower(otherUser.PrimaryEmail) == normalizedEmail {
+			return errors.NewValidation("email is already linked to another user")
+		}
+		for _, altEmail := range otherUser.AlternateEmails {
+			if strings.ToLower(altEmail.Email) == normalizedEmail {
+				return errors.NewValidation("email is already linked to another user")
+			}
+		}
+	}
+
+	// Add email to alternate emails
+	user.AlternateEmails = append(user.AlternateEmails, model.Email{
+		Email:    email,
+		Verified: true,
+	})
+
+	slog.InfoContext(ctx, "mock: identity linked successfully",
+		"user_id", redaction.Redact(request.User.UserID),
+		"email", redaction.Redact(email),
+		"total_alternate_emails", len(user.AlternateEmails),
+	)
+
+	return nil
 }
 
 func (u *userWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
@@ -288,17 +484,18 @@ func (u *userWriter) extractSubFromJWT(ctx context.Context, tokenString string) 
 // NewUserReaderWriter creates a new mock UserReaderWriter with YAML file as the data source
 func NewUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 	users := make(map[string]*model.User)
+	otps := make(map[string]*otpEntry)
 
 	// Load users from embedded YAML file
 	mockUsers, err := loadUsersFromYAML(ctx)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to load users from YAML file", "error", err)
-		return &userWriter{users: users} // Return empty store if YAML fails
+		return &userWriter{users: users, otps: otps} // Return empty store if YAML fails
 	}
 
 	if len(mockUsers) == 0 {
 		slog.WarnContext(ctx, "no users found in YAML file")
-		return &userWriter{users: users} // Return empty store if no users
+		return &userWriter{users: users, otps: otps} // Return empty store if no users
 	}
 
 	slog.InfoContext(ctx, "successfully loaded users from YAML file", "count", len(mockUsers))
@@ -339,6 +536,8 @@ func NewUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 	slog.InfoContext(ctx, "mock: initialized user store", "total_users", len(mockUsers), "total_keys", len(users))
 
 	return &userWriter{
-		users: users,
+		users:    users,
+		otps:     otps,
+		otpMutex: sync.RWMutex{},
 	}
 }

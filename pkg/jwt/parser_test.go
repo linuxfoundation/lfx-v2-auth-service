@@ -195,6 +195,118 @@ func TestExtractSubject(t *testing.T) {
 	})
 }
 
+func TestExtractEmail(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("valid token with email", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email": "user@example.com",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		email, err := ExtractEmail(ctx, tokenString)
+		require.NoError(t, err)
+		assert.Equal(t, "user@example.com", email)
+	})
+
+	t.Run("valid token with email and other claims", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email": "john.doe@company.com",
+			"sub":   "auth0|123456789",
+			"iss":   "https://test.auth0.com/",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		email, err := ExtractEmail(ctx, tokenString)
+		require.NoError(t, err)
+		assert.Equal(t, "john.doe@company.com", email)
+	})
+
+	t.Run("token with Bearer prefix", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email": "bearer-test@example.com",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		bearerToken := "Bearer " + tokenString
+		email, err := ExtractEmail(ctx, bearerToken)
+		require.NoError(t, err)
+		assert.Equal(t, "bearer-test@example.com", email)
+	})
+
+	t.Run("missing email claim", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"sub": "user123",
+			"iss": "test-issuer",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		_, err = ExtractEmail(ctx, tokenString)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "missing or invalid 'email' claim")
+	})
+
+	t.Run("empty email claim", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email": "",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		_, err = ExtractEmail(ctx, tokenString)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "missing or invalid 'email' claim")
+	})
+
+	t.Run("whitespace-only email claim", func(t *testing.T) {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email": "   ",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		_, err = ExtractEmail(ctx, tokenString)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "missing or invalid 'email' claim")
+	})
+
+	t.Run("invalid token format", func(t *testing.T) {
+		_, err := ExtractEmail(ctx, "invalid.token")
+		assert.Error(t, err)
+	})
+
+	t.Run("empty token", func(t *testing.T) {
+		_, err := ExtractEmail(ctx, "")
+		assert.Error(t, err)
+	})
+
+	t.Run("identity token with verified email", func(t *testing.T) {
+		// Simulates an identity token from email verification flow
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"email":          "verified@example.com",
+			"email_verified": true,
+			"sub":            "passwordless|654321",
+		})
+
+		tokenString, err := token.SignedString([]byte("secret"))
+		require.NoError(t, err)
+
+		email, err := ExtractEmail(ctx, tokenString)
+		require.NoError(t, err)
+		assert.Equal(t, "verified@example.com", email)
+	})
+}
+
 func TestClaimsHelpers(t *testing.T) {
 	claims := &Claims{
 		Subject: "user123",
