@@ -487,10 +487,8 @@ func TestSendVerificationAlternateEmail(t *testing.T) {
 				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
 					t.Errorf("SendVerificationAlternateEmail() error = %q, expected %q", err.Error(), tt.errorMsg)
 				}
-			} else {
-				if err != nil {
-					t.Errorf("SendVerificationAlternateEmail() unexpected error: %v", err)
-				}
+			} else if err != nil {
+				t.Errorf("SendVerificationAlternateEmail() unexpected error: %v", err)
 			}
 		})
 	}
