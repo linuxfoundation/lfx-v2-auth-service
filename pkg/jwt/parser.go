@@ -274,6 +274,27 @@ func ExtractSubject(ctx context.Context, tokenString string) (string, error) {
 	return claims.Subject, nil
 }
 
+// ExtractEmail is a convenience function that extracts only the 'email' claim from a JWT token
+func ExtractEmail(ctx context.Context, tokenString string) (string, error) {
+	opts := &ParseOptions{
+		RequireExpiration: false,
+		AllowBearerPrefix: true,
+		RequireSubject:    false,
+	}
+
+	claims, err := ParseUnverified(ctx, tokenString, opts)
+	if err != nil {
+		return "", err
+	}
+
+	if strings.TrimSpace(claims.Email) == "" {
+		return "", errors.NewValidation("missing or invalid 'email' claim in token")
+	}
+
+	slog.DebugContext(ctx, "extracted email from JWT", "email", claims.Email)
+	return claims.Email, nil
+}
+
 // validateSubject checks if the token has a valid subject
 func validateSubject(claims *Claims) error {
 	if strings.TrimSpace(claims.Subject) == "" {
