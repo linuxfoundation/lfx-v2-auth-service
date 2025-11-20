@@ -7,7 +7,7 @@ metadata:
   name: {{ .Chart.Name }}
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
@@ -38,6 +38,10 @@ spec:
           ports:
             - containerPort: {{ .Values.service.port }}
               name: web
+          {{- if .Values.resources }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /livez
