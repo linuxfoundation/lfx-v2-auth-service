@@ -36,18 +36,18 @@ sequenceDiagram
     
     Browser->>SSR: User enters code from email<br/>in LFX One
     
-    Note over SSR: SSR already has<br/>access_token2 from Flow C<br/>(Management API token)
-    
-    SSR->>NATS: E3: Publish verification request<br/>with code + access_token2
+    Note over SSR: SSR already has<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
+
+    SSR->>NATS: E3: Publish verification request<br/>with code + access_token_mgmt_self
     NATS->>AuthSvc: Deliver request
-    
+
     AuthSvc->>Auth0: E4: POST /oauth2/token<br/>[passwordless grant]<br/>w/ "LFX One Passwordless" client credentials<br/>username=new_email@example.com<br/>otp=verification_code<br/>[NO audience]
-    
-    Auth0-->>AuthSvc: E5: access_token_4 for<br/>/userinfo (IGNORE) +<br/>id_token_4
 
-    AuthSvc->>AuthSvc: E6: Validate email from<br/>id_token_4 matches<br/>the requested email
+    Auth0-->>AuthSvc: E5: access_token_pwdless<br/>for /userinfo (IGNORE) +<br/>id_token_pwdless
 
-    AuthSvc->>Auth0Mgmt: E7: Link email identity<br/>using access_token2<br/>w/ id_token_4 claims
+    AuthSvc->>AuthSvc: E6: Validate email from<br/>id_token_pwdless matches<br/>the requested email
+
+    AuthSvc->>Auth0Mgmt: E7: Link email identity<br/>using access_token_mgmt_self<br/>w/ id_token_pwdless claims
     
     Auth0Mgmt-->>AuthSvc: Identity linked successfully
     AuthSvc->>NATS: Publish response

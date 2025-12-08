@@ -28,15 +28,15 @@ sequenceDiagram
 
     SSR->>Auth0: C3: POST /oauth2/token<br/>[authorization_code grant]<br/>w/ "LFX One Profile" client credentials<br/>+ auth_code<br/>aud=auth0_mgmt
 
-    Auth0-->>SSR: C4: id_token (IGNORE) +<br/>access_token2
+    Auth0-->>SSR: C4: id_token_mgmt (IGNORE) +<br/>access_token_mgmt_self
 
-    SSR->>SSR: C5: Validate that<br/>id_token (from Flow B).sub<br/>== access_token2.sub
+    SSR->>SSR: C5: Validate that<br/>id_token_user (from Flow B).sub<br/>== access_token_mgmt_self.sub
 
-    SSR->>NATS: C6: Publish update request<br/>with access_token2
+    SSR->>NATS: C6: Publish update request<br/>with access_token_mgmt_self
     Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
     NATS->>AuthSvc: Deliver request
 
-    AuthSvc->>Auth0Mgmt: Update user profile<br/>using access_token2<br/>(user can only update self)
+    AuthSvc->>Auth0Mgmt: Update user profile<br/>using access_token_mgmt_self<br/>(user can only update self)
 
     Auth0Mgmt-->>AuthSvc: Updated profile data
     AuthSvc->>NATS: Publish response

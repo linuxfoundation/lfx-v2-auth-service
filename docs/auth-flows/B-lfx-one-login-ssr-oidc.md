@@ -26,15 +26,15 @@ sequenceDiagram
     
     SSR->>Auth0: B3: POST /oauth2/token<br/>[authorization_code grant]<br/>w/ SSR client credentials<br/>+ auth_code<br/>aud=lfxv2
     
-    Auth0-->>SSR: B4: id_token + access_token1<br/>(for LFX v2 API audience)
-    
+    Auth0-->>SSR: B4: id_token_user + access_token_lfxv2<br/>(for LFX v2 API audience)
+
     Note over SSR: SSR stores tokens in session
-    
-    SSR->>LFXv2: B5: API request with<br/>access_token1
-    
+
+    SSR->>LFXv2: B5: API request with<br/>access_token_lfxv2
+
     LFXv2-->>SSR: API response
-    
+
     SSR-->>User: Render authenticated page
-    
-    Note over User,LFXv2: access_token1 is used for all LFX v2 API calls
+
+    Note over User,LFXv2: access_token_lfxv2 is used for all LFX v2 API calls
 ```

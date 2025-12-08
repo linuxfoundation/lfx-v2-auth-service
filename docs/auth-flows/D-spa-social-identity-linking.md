@@ -30,17 +30,17 @@ sequenceDiagram
     
     Popup->>Auth0: D3: POST /oauth2/token<br/>[authorization_code grant]<br/>w/ "LFX One Profile" client credentials<br/>+ auth_code<br/>[NO audience]
     
-    Auth0-->>Popup: D4: access_token_3 for<br/>/userinfo (IGNORE) +<br/>id_token_3
+    Auth0-->>Popup: D4: access_token_social<br/>for /userinfo (IGNORE) +<br/>id_token_social
 
-    Popup->>Browser: D5: Post message with<br/>id_token_3<br/>(webmessage/postMessage)
+    Popup->>Browser: D5: Post message with<br/>id_token_social<br/>(webmessage/postMessage)
 
-    Note over Browser: Browser uses<br/>access_token2 from Flow C<br/>(Management API token)
-    
-    Browser->>NATS: D6: Publish link request<br/>with access_token2 + id_token_3
+    Note over Browser: Browser uses<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
+
+    Browser->>NATS: D6: Publish link request<br/>with access_token_mgmt_self + id_token_social
     Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
     NATS->>AuthSvc: Deliver request
-    
-    AuthSvc->>Auth0Mgmt: Link social identity<br/>using access_token2<br/>w/ id_token_3 claims
+
+    AuthSvc->>Auth0Mgmt: Link social identity<br/>using access_token_mgmt_self<br/>w/ id_token_social claims
     
     Auth0Mgmt-->>AuthSvc: Identity linked successfully
     AuthSvc->>NATS: Publish response
