@@ -193,6 +193,6 @@ nats request lfx.auth-service.email_linking.verify '{
 - OTP codes are time-sensitive and available for a valid time period
 - The service prevents linking an email that is already verified and linked to another user
 - The returned token (ID token) can be used to link the verified email to the user account using the identity linking operation (see [Identity Linking Documentation](identity_linking.md))
-- For detailed Auth0-specific implementation details and technical information about the passwordless flow, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+- For detailed Auth0-specific implementation details and technical information about the passwordless flow, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 

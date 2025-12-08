@@ -108,8 +108,8 @@ nats request lfx.auth-service.user_metadata.read "john.doe"
 - The service automatically detects input type and applies the appropriate lookup strategy
 - JWT tokens are validated for signature and expiration before extracting subject information
 - The target identity provider is determined by the `USER_REPOSITORY_TYPE` environment variable
-- For detailed Auth0-specific behavior and limitations, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
-- For detailed Authelia-specific behavior and SUB management, see: [`../internal/infrastructure/authelia/README.md`](../internal/infrastructure/authelia/README.md)
+- For detailed Auth0-specific behavior and limitations, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
+- For detailed Authelia-specific behavior and SUB management, see: [`../../internal/infrastructure/authelia/README.md`](../../internal/infrastructure/authelia/README.md)
 
 ---
 
