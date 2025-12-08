@@ -64,9 +64,6 @@ All Auth0 Management API calls are abstracted through the Auth Service, which co
 - Simplified client-side code
 - Better security (Management API credentials stay in Auth Service)
 
-### Token Validation
-Flow C includes a critical validation step (C5) where the SSR validates that the `id_token_user` from Flow B and the `access_token_mgmt_self` from Flow C have the same subject (`sub` claim), ensuring the user requesting profile updates is the authenticated user.
-
 ## Flow Dependencies
 
 - **Flow C, D, E** all depend on **Flow B** (user must be logged in first)
