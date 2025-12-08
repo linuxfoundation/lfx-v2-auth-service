@@ -17,7 +17,7 @@ The authentication architecture uses multiple Auth0 clients and flows to support
 |------|-------------|-------------|----------|---------|
 | [Flow A](A-auth-service-m2m-profile-lookup.md) | Auth Service M2M | Auth Service M2M | `auth0_mgmt` | Read user profiles and check email-to-username mappings |
 | [Flow B](B-lfx-one-login-ssr-oidc.md) | LFX One Login (SSR OIDC) | LFX One | `lfxv2` | Authenticate users and obtain access tokens for LFX v2 API |
-| [Flow C](C-auth-service-m2m-profile-update.md) | Self-Service Profile Updates | LFX One Profile | `auth0_mgmt` | Allow users to update their own profiles via Management API |
+| [Flow C](C-spa-profile-update-oidc.md) | Self-Service Profile Updates | LFX One Profile | `auth0_mgmt` | Allow users to update their own profiles via Management API |
 | [Flow D](D-spa-social-identity-linking.md) | Social Identity Linking | LFX One Profile | None | Link social identities (Google, GitHub, etc.) to user accounts |
 | [Flow E](E-passwordless-email-linking.md) | Email Identity Linking | LFX One Passwordless | None | Link additional email addresses using passwordless OTP verification |
 
