@@ -16,15 +16,15 @@ sequenceDiagram
     
     User->>SSR: Initiate login
     
-    SSR->>Auth0: B1: GET /authorize<br/>w/ SSR client<br/>response_type=code<br/>aud=lfxv2<br/>redirect_uri=SSR_callback
-    
+    SSR->>Auth0: B1: GET /authorize<br/>w/ "LFX One" client<br/>response_type=code<br/>aud=lfxv2<br/>redirect_uri=SSR_callback
+
     Auth0->>User: Present login page/<br/>authentication challenge
-    
+
     User->>Auth0: Enter credentials/<br/>authenticate
-    
+
     Auth0->>SSR: B2: Redirect with auth_code
-    
-    SSR->>Auth0: B3: POST /oauth2/token<br/>[authorization_code grant]<br/>w/ SSR client credentials<br/>+ auth_code<br/>aud=lfxv2
+
+    SSR->>Auth0: B3: POST /oauth2/token<br/>[authorization_code grant]<br/>w/ "LFX One" client credentials<br/>+ auth_code<br/>aud=lfxv2
     
     Auth0-->>SSR: B4: id_token_user + access_token_lfxv2<br/>(for LFX v2 API audience)
 

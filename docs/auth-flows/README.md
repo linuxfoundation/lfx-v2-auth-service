@@ -6,34 +6,34 @@ This directory contains sequence diagrams documenting the authentication flows u
 
 The authentication architecture uses multiple Auth0 clients and flows to support different use cases:
 
-- **SSR Client**: Used for server-side rendering authentication with LFX v2 API access
-- **LFX One Profile Client**: Used for social account linking and self-service Auth0 access (user profile updates)
-- **LFX One Passwordless Client**: Used for passwordless email linking flow via Auth Service. This client supports the OTP grant type and may use different validation in the postLogin action.
-- **Auth Service M2M Client**: Machine-to-machine client used by Auth Service for reading user profiles
+- **LFX One Client**: Regular web application used for server-side rendering authentication with LFX v2 API access
+- **LFX One Profile Client**: Single Page Application (SPA) used for social account linking and self-service Auth0 access (user profile updates)
+- **LFX One Passwordless Client**: Regular web application used for passwordless email linking flow via Auth Service. This client supports the OTP grant type and may use different validation in the postLogin action.
+- **LFX V2 Auth Service Client**: Machine-to-machine client used by Auth Service for reading user profiles
 
 ## Authentication Flows
 
 | Flow | Description | Client Used | Audience | Purpose |
 |------|-------------|-------------|----------|---------|
 | [Flow A](A-auth-service-m2m-profile-lookup.md) | Auth Service M2M | Auth Service M2M | `auth0_mgmt` | Read user profiles and check email-to-username mappings |
-| [Flow B](B-lfx-one-login-ssr-oidc.md) | LFX One Login (SSR OIDC) | SSR Client | `lfxv2` | Authenticate users and obtain access tokens for LFX v2 API |
+| [Flow B](B-lfx-one-login-ssr-oidc.md) | LFX One Login (SSR OIDC) | LFX One | `lfxv2` | Authenticate users and obtain access tokens for LFX v2 API |
 | [Flow C](C-auth-service-m2m-profile-update.md) | Self-Service Profile Updates | LFX One Profile | `auth0_mgmt` | Allow users to update their own profiles via Management API |
 | [Flow D](D-spa-social-identity-linking.md) | Social Identity Linking | LFX One Profile | None | Link social identities (Google, GitHub, etc.) to user accounts |
 | [Flow E](E-passwordless-email-linking.md) | Email Identity Linking | LFX One Passwordless | None | Link additional email addresses using passwordless OTP verification |
 
 ## Client Descriptions
 
-### SSR Client
-The main server-side rendering client used for user authentication. This client obtains access tokens with the `lfxv2` audience for accessing the LFX v2 API (Traefik/Heimdall).
+### LFX One Client
+The main server-side rendering client used for user authentication. This is a regular web application client that implements the authorization code flow with grant types `authorization_code` and `refresh_token` (plus `password-realm` in dev environments for Cypress testing). It obtains access tokens with the `lfxv2` audience for accessing the LFX v2 API (Traefik/Heimdall). This client is used exclusively in Flow B for the initial user login.
 
 ### LFX One Profile Client
-This client is used for social account linking and self-service Auth0 access. It allows users to update their own profiles through the Auth0 Management API with restricted permissions (users can only modify their own data).
+This client is used for social account linking and self-service Auth0 access. This is a **Single Page Application (SPA)** client (`app_type: spa`) that uses the authorization code flow with PKCE and public client authentication (no client secret). It implements the popup/webmessage flow for social identity linking and allows users to update their own profiles through the Auth0 Management API with restricted permissions (users can only modify their own data). Used in Flows C and D.
 
 ### LFX One Passwordless Client
-A specialized client used for the passwordless email linking flow, primarily by the Auth Service. This client supports the OTP grant type and may use different validation logic in the postLogin action compared to other clients.
+A specialized client used for the passwordless email linking flow, primarily by the Auth Service. This is a **regular web application** client (`app_type: regular_web`) that uses the passwordless OTP grant type (`http://auth0.com/oauth/grant-type/passwordless/otp`). This client is specifically designed for email verification flows and may use different validation logic in the postLogin action compared to other clients. Used exclusively in Flow E.
 
-### Auth Service M2M Client
-A machine-to-machine client with `read:users` permissions (but **not** `update:users`) used by the Auth Service to read user profiles and check email mappings.
+### LFX V2 Auth Service M2M Client
+A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the client credentials grant type. This client has restricted permissions with only `read:users` scope (but **not** `update:users`) for the Auth0 Management API. It is used exclusively by the Auth Service to perform read-only operations such as profile lookups and checking email-to-username mappings. Used exclusively in Flow A.
 
 ## Token Overview
 
