@@ -1,7 +1,7 @@
-# Flow C: Self-Service Profile Update via SPA OIDC for Management API audience ('self' Auth0 access)
+# Flow C: Self-Service Profile Update via Regular Web Client
 
 ## Description
-OpenID Connect (OIDC) flow for the Auth0 Management API audience, allowing users to manage their own profiles (“self” Auth0 access). This flow shares the same client used by Flow D’s SPA client.
+Flow for the Auth0 Management API audience, allowing users to manage their own profiles ("self" Auth0 access). This flow uses the LFX One Profile Client (regular web application) and implements a dual authentication pattern where users first authenticate with the main LFX One client, then obtain additional access tokens for Management API access.
 
 ## Sequence Diagram
 
@@ -14,7 +14,7 @@ sequenceDiagram
     participant Auth0 as Auth0 Authentication API
     participant Auth0Mgmt as Auth0 Management API
 
-    Note over User,Auth0Mgmt: Flow C: 2nd OIDC flow for Management API audience<br/>("self" Auth0 access)
+    Note over User,Auth0Mgmt: Flow C: Secondary authentication flow for Management API audience<br/>("self" Auth0 access)
 
     User->>SSR: Request to update own profile
 

@@ -7,8 +7,7 @@ This directory contains sequence diagrams documenting the authentication flows u
 The authentication architecture uses multiple Auth0 clients and flows to support different use cases:
 
 - **LFX One Client**: Regular web application used for server-side rendering authentication with LFX v2 API access
-- **LFX One Profile Client**: Single Page Application (SPA) used for social account linking and self-service Auth0 access (user profile updates)
-- **LFX One Passwordless Client**: Regular web application used for passwordless email linking flow via Auth Service. This client supports the OTP grant type and may use different validation in the postLogin action.
+- **LFX One Profile Client**: Regular web application used for social account linking, self-service Auth0 access (user profile updates), and passwordless email linking. This client supports both Authorization Code flow for Management API access and OTP grant type for passwordless flows.
 - **LFX V2 Auth Service Client**: Machine-to-machine client used by Auth Service for reading user profiles
 
 ## Authentication Flows
@@ -17,9 +16,9 @@ The authentication architecture uses multiple Auth0 clients and flows to support
 |------|-------------|-------------|----------|---------|
 | [Flow A](A-auth-service-m2m-profile-lookup.md) | Auth Service M2M | Auth Service M2M | `auth0_mgmt` | Read user profiles and check email-to-username mappings |
 | [Flow B](B-lfx-one-login-ssr-oidc.md) | LFX One Login (SSR OIDC) | LFX One | `lfxv2` | Authenticate users and obtain access tokens for LFX v2 API |
-| [Flow C](C-spa-profile-update-oidc.md) | Self-Service Profile Updates | LFX One Profile | `auth0_mgmt` | Allow users to update their own profiles via Management API |
-| [Flow D](D-spa-social-identity-linking.md) | Social Identity Linking | LFX One Profile | None | Link social identities (Google, GitHub, etc.) to user accounts |
-| [Flow E](E-passwordless-email-linking.md) | Email Identity Linking | LFX One Passwordless | None | Link additional email addresses using passwordless OTP verification |
+| [Flow C](C-profile-update.md) | Self-Service Profile Updates | LFX One Profile | `auth0_mgmt` | Allow users to update their own profiles via Management API |
+| [Flow D](D-social-identity-linking.md) | Social Identity Linking | LFX One Profile | None | Link social identities (Google, GitHub, etc.) to user accounts |
+| [Flow E](E-passwordless-email-linking.md) | Email Identity Linking | LFX One Profile | None | Link additional email addresses using passwordless OTP verification |
 
 ## Client Descriptions
 
@@ -27,10 +26,7 @@ The authentication architecture uses multiple Auth0 clients and flows to support
 The main server-side rendering client used for user authentication. This is a regular web application client that implements the authorization code flow with grant types `authorization_code` and `refresh_token` (plus `password-realm` in dev environments for Cypress testing). It obtains access tokens with the `lfxv2` audience for accessing the LFX v2 API (Traefik/Heimdall). This client is used exclusively in Flow B for the initial user login.
 
 ### LFX One Profile Client
-This client is used for social account linking and self-service Auth0 access. This is a **Single Page Application (SPA)** client (`app_type: spa`) that uses the authorization code flow with PKCE and public client authentication (no client secret). It implements the popup/webmessage flow for social identity linking and allows users to update their own profiles through the Auth0 Management API with restricted permissions (users can only modify their own data). Used in Flows C and D.
-
-### LFX One Passwordless Client
-A specialized client used for the passwordless email linking flow, primarily by the Auth Service. This is a **regular web application** client (`app_type: regular_web`) that uses the passwordless OTP grant type (`http://auth0.com/oauth/grant-type/passwordless/otp`). This client is specifically designed for email verification flows and may use different validation logic in the postLogin action compared to other clients. Used exclusively in Flow E.
+A **regular web application** client (`app_type: regular_web`) used for Auth0 Management API access and passwordless flows. This client uses the authorization code flow for obtaining Management API access tokens that allow users to update their own profiles and link identities. It also supports the passwordless OTP grant type (`http://auth0.com/oauth/grant-type/passwordless/otp`) for email verification flows. This client implements a dual authentication pattern where users first authenticate with the main LFX One client, then use this client to obtain additional access tokens for specific audiences (Management API) or perform passwordless verification. Used in Flows C, D, and E.
 
 ### LFX V2 Auth Service M2M Client
 A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the client credentials grant type. This client has restricted permissions with only `read:users` scope (but **not** `update:users`) for the Auth0 Management API. It is used exclusively by the Auth Service to perform read-only operations such as profile lookups and checking email-to-username mappings. Used exclusively in Flow A.
@@ -77,4 +73,35 @@ All Auth0 Management API calls are abstracted through the Auth Service, which co
 3. **Email Verification**: Flow E validates the email in `id_token_pwdless` matches the requested email before linking
 4. **Token Scoping**: Each access token is scoped to specific audiences and permissions
 5. **Abstraction Layer**: Management API calls go through Auth Service, not directly from client
+
+## Architecture Changes (December 2025)
+
+### Consolidation to Regular Web Clients
+
+Based on the PoC implementation in `poc/2025-12-Express-Two-Audiences`, the authentication architecture has been updated to remove the SPA client and consolidate to regular web applications:
+
+**Previous Architecture:**
+- LFX One Client (Regular Web) - Main login
+- LFX One Profile Client (SPA) - Management API access and social linking
+- LFX One Passwordless Client (Regular Web) - Email verification
+
+**Updated Architecture:**
+- LFX One Client (Regular Web) - Main login for LFX v2 API access
+- LFX One Profile Client (Regular Web) - All Management API operations, social linking, and passwordless flows
+
+### Dual Authentication Pattern
+
+The new architecture implements a dual authentication pattern:
+
+1. **Primary Authentication**: Users first authenticate with the LFX One Client to establish their session and get LFX v2 API access
+2. **Secondary Authentication**: When Management API access is needed, users authenticate again with the LFX One Management Client to get audience-specific tokens
+
+This pattern provides better security isolation and allows for different scopes and permissions for different purposes while maintaining a unified user experience.
+
+### Benefits
+
+- **Simplified Architecture**: Fewer clients to manage and configure
+- **Better Security**: Clear separation between different token audiences
+- **Consistent UX**: All flows use server-side redirects instead of mixed SPA/popup patterns
+- **Easier Deployment**: No client-side secret management or CORS concerns
 
