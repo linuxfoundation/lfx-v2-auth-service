@@ -73,35 +73,3 @@ All Auth0 Management API calls are abstracted through the Auth Service, which co
 3. **Email Verification**: Flow E validates the email in `id_token_pwdless` matches the requested email before linking
 4. **Token Scoping**: Each access token is scoped to specific audiences and permissions
 5. **Abstraction Layer**: Management API calls go through Auth Service, not directly from client
-
-## Architecture Changes (December 2025)
-
-### Consolidation to Regular Web Clients
-
-Based on the PoC implementation in `poc/2025-12-Express-Two-Audiences`, the authentication architecture has been updated to remove the SPA client and consolidate to regular web applications:
-
-**Previous Architecture:**
-- LFX One Client (Regular Web) - Main login
-- LFX One Profile Client (SPA) - Management API access and social linking
-- LFX One Passwordless Client (Regular Web) - Email verification
-
-**Updated Architecture:**
-- LFX One Client (Regular Web) - Main login for LFX v2 API access
-- LFX One Profile Client (Regular Web) - All Management API operations, social linking, and passwordless flows
-
-### Dual Authentication Pattern
-
-The new architecture implements a dual authentication pattern:
-
-1. **Primary Authentication**: Users first authenticate with the LFX One Client to establish their session and get LFX v2 API access
-2. **Secondary Authentication**: When Management API access is needed, users authenticate again with the LFX One Management Client to get audience-specific tokens
-
-This pattern provides better security isolation and allows for different scopes and permissions for different purposes while maintaining a unified user experience.
-
-### Benefits
-
-- **Simplified Architecture**: Fewer clients to manage and configure
-- **Better Security**: Clear separation between different token audiences
-- **Consistent UX**: All flows use server-side redirects instead of mixed SPA/popup patterns
-- **Easier Deployment**: No client-side secret management or CORS concerns
-
