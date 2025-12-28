@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 )
 
 type authService struct {
