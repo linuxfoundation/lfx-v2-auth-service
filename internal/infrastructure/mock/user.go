@@ -417,7 +417,7 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 	return nil
 }
 
-func (u *userWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
+func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 
 	// Trim whitespace from input

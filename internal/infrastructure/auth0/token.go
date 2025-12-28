@@ -140,9 +140,9 @@ func (tm *TokenManager) GetTokenInfo() (*TokenInfo, error) {
 
 // loadM2MConfigFromEnv loads M2M configuration from environment variables or secrets
 func loadM2MConfigFromEnv(ctx context.Context, config Config) (m2mConfig, error) {
-	clientID := os.Getenv(constants.Auth0ClientIDEnvKey)
+	clientID := os.Getenv(constants.Auth0M2MClientIDEnvKey)
 	if clientID == "" {
-		return m2mConfig{}, errors.NewUnexpected("AUTH0_CLIENT_ID is required")
+		return m2mConfig{}, errors.NewUnexpected("AUTH0_M2M_CLIENT_ID is required")
 	}
 
 	audience := os.Getenv(constants.Auth0AudienceEnvKey)
@@ -151,14 +151,14 @@ func loadM2MConfigFromEnv(ctx context.Context, config Config) (m2mConfig, error)
 	}
 
 	// private key is base64 encoded
-	privateKey := os.Getenv(constants.Auth0PrivateBase64KeyEnvKey)
+	privateKey := os.Getenv(constants.Auth0M2MPrivateBase64KeyEnvKey)
 	if privateKey == "" {
-		return m2mConfig{}, errors.NewUnexpected("AUTH0_PRIVATE_BASE64_KEY is required")
+		return m2mConfig{}, errors.NewUnexpected("AUTH0_M2M_PRIVATE_BASE64_KEY is required")
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(privateKey)
 	if err != nil {
-		return m2mConfig{}, errors.NewUnexpected("failed to base64-decode AUTH0_PRIVATE_BASE64_KEY", err)
+		return m2mConfig{}, errors.NewUnexpected("failed to base64-decode AUTH0_M2M_PRIVATE_BASE64_KEY", err)
 	}
 	privateKey = string(decoded)
 	//
@@ -217,19 +217,17 @@ func NewM2MTokenManager(ctx context.Context, config Config) (*TokenManager, erro
 	}, nil
 }
 
-// NewRegularWebAuthConfig creates an Auth0 authentication client for regular web flows (passwordless)
-// using client ID and client secret instead of private key JWT
-func NewRegularWebAuthConfig(ctx context.Context, domain string) (*authentication.Authentication, error) {
-	clientID := os.Getenv(constants.Auth0RegularWebClientIDEnvKey)
+// NewProfileClientAuthConfig creates an Auth0 authentication client for LFX Profile
+// using client ID and client secret for passwordless flows
+func NewProfileClientAuthConfig(ctx context.Context, domain string) (*authentication.Authentication, error) {
+	clientID := os.Getenv(constants.Auth0LFXProfileClientIDEnvKey)
 	if clientID == "" {
-		return nil, nil
-		// TODO - implement the AUTH0 flow, including secrets
-		// return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_ID is required for email linking flow")
+		return nil, errors.NewUnexpected("AUTH0_LFX_PROFILE_CLIENT_ID is required for email linking flow")
 	}
 
-	clientSecret := os.Getenv(constants.Auth0RegularWebClientSecretEnvKey)
+	clientSecret := os.Getenv(constants.Auth0LFXProfileClientSecretEnvKey)
 	if clientSecret == "" {
-		return nil, errors.NewUnexpected("AUTH0_REGULAR_WEB_CLIENT_SECRET is required for email linking flow")
+		return nil, errors.NewUnexpected("AUTH0_LFX_PROFILE_CLIENT_SECRET is required for email linking flow")
 	}
 
 	// Create Auth0 authentication client with client secret
@@ -240,10 +238,10 @@ func NewRegularWebAuthConfig(ctx context.Context, domain string) (*authenticatio
 		authentication.WithClientSecret(clientSecret),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Auth0 regular web client: %w", err)
+		return nil, fmt.Errorf("failed to create Auth0 LFX Profile client: %w", err)
 	}
 
-	slog.DebugContext(ctx, "regular web Auth0 authentication client created successfully",
+	slog.DebugContext(ctx, "LFX Profile Auth0 authentication client created successfully",
 		"client_id", clientID,
 		"domain", domain)
 

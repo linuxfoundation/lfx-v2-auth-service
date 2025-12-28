@@ -178,7 +178,7 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 
 // MetadataLookup prepares the user for metadata lookup based on the input
 // Accepts JWT token, username, or sub
-func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
+func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	// Validate input
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -199,7 +199,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string) (*m
 			return nil, errors.NewValidation("JWT verification configuration is required")
 		}
 
-		claims, err := u.config.JWTVerificationConfig.JWTVerify(ctx, cleanToken, userReadRequiredScope)
+		claims, err := u.config.JWTVerificationConfig.JWTVerify(ctx, cleanToken, requiredScopes...)
 		if err != nil {
 			slog.ErrorContext(ctx, "JWT signature verification failed",
 				"error", err,
@@ -411,14 +411,14 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		auth0Config.JWTVerificationConfig = jwtConfig
 	}
 
-	// Create regular web auth config for email linking flow (passwordless)
-	regularWebAuthConfig, err := NewRegularWebAuthConfig(ctx, auth0Config.Domain)
+	// Create profile client auth config for email linking flow (passwordless)
+	profileClientAuthConfig, err := NewProfileClientAuthConfig(ctx, auth0Config.Domain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create regular web auth config: %w", err)
+		return nil, fmt.Errorf("failed to create profile client auth config: %w", err)
 	}
 
 	// linking flow for email linking (passwordless)
-	emailLinkingFlow := newEmailLinkingFlow(regularWebAuthConfig)
+	emailLinkingFlow := newEmailLinkingFlow(profileClientAuthConfig)
 
 	// linking flow for identity linking (passwordless)
 	identityLinkingFlow := newIdentityLinkingFlow(auth0Config.Domain, httpClient)
