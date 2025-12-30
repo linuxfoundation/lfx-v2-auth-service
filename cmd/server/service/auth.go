@@ -5,12 +5,14 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 )
 
 type authService struct {
-	// Add dependencies here (NATS client, etc.) when needed
+	natsClient *nats.NATSClient
 }
 
 // Livez implements the liveness check endpoint
@@ -21,22 +23,19 @@ func (s *authService) Livez(ctx context.Context) ([]byte, error) {
 
 // Readyz implements the readiness check endpoint
 func (s *authService) Readyz(ctx context.Context) ([]byte, error) {
-	// Readiness check - should verify that the service can handle requests
-	// For now, just return OK. Later, you can add checks for:
-	// - NATS connection status
-	// - Auth provider connectivity (Auth0/Authelia)
-	// - Any required external dependencies
-
-	// TODO: Add actual readiness checks
-	// Example:
-	// if !s.natsClient.IsConnected() {
-	//     return nil, healthservice.MakeServiceUnavailable(errors.New("NATS not connected"))
-	// }
+	// Check NATS connection status
+	if s.natsClient != nil {
+		if err := s.natsClient.IsReady(ctx); err != nil {
+			return nil, fmt.Errorf("NATS not ready: %w", err)
+		}
+	}
 
 	return []byte("OK"), nil
 }
 
 // NewAuthService creates a new auth service
 func NewAuthService() authservice.Service {
-	return &authService{}
+	return &authService{
+		natsClient: getNATSClient(),
+	}
 }
