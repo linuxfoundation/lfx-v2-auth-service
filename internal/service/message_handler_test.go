@@ -66,7 +66,7 @@ func (m *mockUserServiceReader) SearchUser(ctx context.Context, user *model.User
 	return user, nil
 }
 
-func (m *mockUserServiceReader) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
+func (m *mockUserServiceReader) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	if m.metadataLookupFunc != nil {
 		return m.metadataLookupFunc(ctx, input)
 	}

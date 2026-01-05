@@ -150,7 +150,7 @@ func TestMetadataLookupWithJWTVerification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			user, err := userRW.MetadataLookup(ctx, tt.token)
+			user, err := userRW.MetadataLookup(ctx, tt.token, "read:current_user")
 
 			if tt.expectError {
 				if err == nil {

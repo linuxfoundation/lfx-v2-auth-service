@@ -149,7 +149,7 @@ func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 
 // MetadataLookup prepares the user for metadata lookup based on the input
 // Accepts Authelia token, username, or sub
-func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string) (*model.User, error) {
+func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 
 	if input == "" {
 		return nil, errs.NewValidation("input is required")

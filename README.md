@@ -133,15 +133,15 @@ The Auth0 integration can be configured using environment variables:
   - **Required when using Auth0 repository type**
 - `AUTH0_DOMAIN`: Auth0 domain for Management API calls (e.g., `"sso.linuxfoundation.org"`)
   - **If not set, defaults to `${AUTH0_TENANT}.auth0.com`**
-- `AUTH0_CLIENT_ID`: Auth0 Machine-to-Machine application client ID
+- `AUTH0_M2M_CLIENT_ID`: Auth0 Machine-to-Machine application client ID
   - **Required when using Auth0 repository type**
-- `AUTH0_PRIVATE_BASE64_KEY`: Base64-encoded private key for Auth0 M2M authentication
+- `AUTH0_M2M_PRIVATE_BASE64_KEY`: Base64-encoded private key for Auth0 M2M authentication
   - **Required when using Auth0 repository type**
 - `AUTH0_AUDIENCE`: Auth0 API audience/identifier for the Management API
   - **Required when using Auth0 repository type**
-- `AUTH0_REGULAR_WEB_CLIENT_ID`: Auth0 Regular Web Application client ID for passwordless flows
+- `AUTH0_LFX_PROFILE_CLIENT_ID`: Auth0 LFX Profile client ID (Regular Web Application) for passwordless flows
   - **Required when using passwordless email linking flow**
-- `AUTH0_REGULAR_WEB_CLIENT_SECRET`: Auth0 Regular Web Application client secret for passwordless flows
+- `AUTH0_LFX_PROFILE_CLIENT_SECRET`: Auth0 LFX Profile client secret (Regular Web Application) for passwordless flows
   - **Required when using passwordless email linking flow**
 
 ## Releases
