@@ -142,8 +142,8 @@ nats request lfx.auth-service.user_emails.read "john.doe" | jq '.data.alternate_
 - Primary email is always present if the user exists
 - Alternate emails array may be empty if the user has not linked any additional email addresses
 - Only verified alternate emails should be considered as confirmed user identities
-- For detailed Auth0-specific behavior and limitations, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
-- For detailed Authelia-specific behavior and SUB management, see: [`../internal/infrastructure/authelia/README.md`](../internal/infrastructure/authelia/README.md)
+- For detailed Auth0-specific behavior and limitations, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
+- For detailed Authelia-specific behavior and SUB management, see: [`../../internal/infrastructure/authelia/README.md`](../../internal/infrastructure/authelia/README.md)
 
 ---
 

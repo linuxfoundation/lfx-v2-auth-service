@@ -278,7 +278,7 @@ The OTP verification flow integrates with the identity linking system:
 2. **Linking Phase**: User links identity token to account → email added to `AlternateEmails` array
 3. **Storage Update**: User record updated with optimistic locking to prevent race conditions
 
-For complete flow details, see the [Email Verification Documentation](../../../docs/email_verification.md).
+For complete flow details, see the [Email Verification Documentation](../../../docs/subjects/email_verification.md).
 
 ### NATS Subjects
 

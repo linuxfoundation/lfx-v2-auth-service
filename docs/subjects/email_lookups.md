@@ -98,5 +98,5 @@ nats request lfx.auth-service.email_to_sub zephyr.stormwind@mythicaltech.io
 - Linked/alternate email addresses are **not** supported for lookup
 - The service works with Auth0, Authelia, and mock repositories based on configuration
 - The returned subject identifier is the canonical user identifier used throughout the system
-- For Authelia-specific SUB identifier details and how they are populated, see: [`../internal/infrastructure/authelia/README.md`](../internal/infrastructure/authelia/README.md)
+- For Authelia-specific SUB identifier details and how they are populated, see: [`../../internal/infrastructure/authelia/README.md`](../../internal/infrastructure/authelia/README.md)
 
