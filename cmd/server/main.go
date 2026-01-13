@@ -18,6 +18,7 @@ import (
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	logging "github.com/linuxfoundation/lfx-v2-auth-service/pkg/log"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/utils"
 )
 
 const (
@@ -47,6 +48,21 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
+
+	// Set up OpenTelemetry SDK.
+	otelConfig := utils.OTelConfigFromEnv()
+	otelShutdown, err := utils.SetupOTelSDKWithConfig(ctx, otelConfig)
+	if err != nil {
+		slog.ErrorContext(ctx, "error setting up OpenTelemetry SDK", "error", err)
+		os.Exit(1)
+	}
+	// Handle shutdown properly so nothing leaks.
+	defer func() {
+		if shutdownErr := otelShutdown(context.Background()); shutdownErr != nil {
+			slog.ErrorContext(ctx, "error shutting down OpenTelemetry SDK", "error", shutdownErr)
+		}
+	}()
+
 	slog.InfoContext(ctx, "Starting auth service",
 		"bind", *bind,
 		"http-port", *port,
