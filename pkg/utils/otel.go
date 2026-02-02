@@ -75,7 +75,7 @@ type OTelConfig struct {
 	LogsExporter string
 	// Propagators specifies the propagators to use, comma-separated.
 	// Supported values: "tracecontext", "baggage", "jaeger"
-	// Env: OTEL_PROPAGATORS (default: "tracecontext,baggage")
+	// Env: OTEL_PROPAGATORS (default: "tracecontext,baggage,jaeger")
 	Propagators string
 }
 
@@ -130,7 +130,7 @@ func OTelConfigFromEnv() OTelConfig {
 
 	propagators := os.Getenv("OTEL_PROPAGATORS")
 	if propagators == "" {
-		propagators = "tracecontext,baggage"
+		propagators = "tracecontext,baggage,jaeger"
 	}
 
 	slog.With(
@@ -273,6 +273,7 @@ func newPropagator(cfg OTelConfig) propagation.TextMapPropagator {
 		propagators = []propagation.TextMapPropagator{
 			propagation.TraceContext{},
 			propagation.Baggage{},
+			jaeger.Jaeger{},
 		}
 	}
 

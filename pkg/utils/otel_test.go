@@ -278,9 +278,9 @@ func TestNewResource(t *testing.T) {
 
 // TestNewPropagator verifies that newPropagator returns a composite
 // TextMapPropagator that includes the standard W3C trace context fields
-// (traceparent, tracestate) and baggage propagation.
+// (traceparent, tracestate), baggage propagation, and jaeger propagation.
 func TestNewPropagator(t *testing.T) {
-	cfg := OTelConfig{Propagators: "tracecontext,baggage"}
+	cfg := OTelConfig{Propagators: "tracecontext,baggage,jaeger"}
 	prop := newPropagator(cfg)
 
 	if prop == nil {
@@ -293,11 +293,12 @@ func TestNewPropagator(t *testing.T) {
 		t.Error("expected propagator to have fields")
 	}
 
-	// Check for expected propagation fields (traceparent, tracestate, baggage)
+	// Check for expected propagation fields (traceparent, tracestate, baggage, uber-trace-id)
 	expectedFields := map[string]bool{
-		"traceparent": false,
-		"tracestate":  false,
-		"baggage":     false,
+		"traceparent":   false,
+		"tracestate":    false,
+		"baggage":       false,
+		"uber-trace-id": false, // jaeger propagator header
 	}
 
 	for _, field := range fields {
@@ -308,6 +309,31 @@ func TestNewPropagator(t *testing.T) {
 		if !found {
 			t.Errorf("expected propagator to include field %q", field)
 		}
+	}
+}
+
+// TestNewPropagator_Default verifies that the default propagators include
+// tracecontext, baggage, and jaeger when no OTEL_PROPAGATORS is set.
+func TestNewPropagator_Default(t *testing.T) {
+	cfg := OTelConfigFromEnv()
+
+	if cfg.Propagators != "tracecontext,baggage,jaeger" {
+		t.Errorf("expected default Propagators to be 'tracecontext,baggage,jaeger', got %q", cfg.Propagators)
+	}
+
+	prop := newPropagator(cfg)
+	fields := prop.Fields()
+
+	// Should include uber-trace-id from jaeger propagator
+	hasJaeger := false
+	for _, field := range fields {
+		if field == "uber-trace-id" {
+			hasJaeger = true
+			break
+		}
+	}
+	if !hasJaeger {
+		t.Error("expected default propagator to include jaeger (uber-trace-id field)")
 	}
 }
 
