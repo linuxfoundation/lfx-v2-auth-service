@@ -39,7 +39,6 @@ require (
 )
 
 require (
-	github.com/DataDog/dd-trace-go/v2 v2.5.0 // indirect
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
 	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect

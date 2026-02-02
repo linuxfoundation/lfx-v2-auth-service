@@ -21,6 +21,13 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/utils"
 )
 
+// Build-time variables set via ldflags
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 const (
 	defaultPort = "8080"
 	// gracefulShutdownSeconds should be higher than NATS client
@@ -50,7 +57,12 @@ func main() {
 	ctx := context.Background()
 
 	// Set up OpenTelemetry SDK.
+	// Command-line/environment OTEL_SERVICE_VERSION takes precedence over
+	// the build-time Version variable.
 	otelConfig := utils.OTelConfigFromEnv()
+	if otelConfig.ServiceVersion == "" {
+		otelConfig.ServiceVersion = Version
+	}
 	otelShutdown, err := utils.SetupOTelSDKWithConfig(ctx, otelConfig)
 	if err != nil {
 		slog.ErrorContext(ctx, "error setting up OpenTelemetry SDK", "error", err)
@@ -58,7 +70,9 @@ func main() {
 	}
 	// Handle shutdown properly so nothing leaks.
 	defer func() {
-		if shutdownErr := otelShutdown(context.Background()); shutdownErr != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownSeconds*time.Second)
+		defer cancel()
+		if shutdownErr := otelShutdown(shutdownCtx); shutdownErr != nil {
 			slog.ErrorContext(ctx, "error shutting down OpenTelemetry SDK", "error", shutdownErr)
 		}
 	}()

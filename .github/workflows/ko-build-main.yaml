@@ -27,10 +27,16 @@ jobs:
       - uses: ko-build/setup-ko@v0.8
         with:
           version: v0.17.1
-      - run: |
+      - name: Build and publish auth-service image
+        env:
+          VERSION: development
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export GOFLAGS="-ldflags=-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT:0:7}"
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.sha }} \
             -t development \
-            --sbom spdx
+            --sbom spdx \
