@@ -48,4 +48,4 @@ jobs:
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.sha }} \
             -t ${{ steps.container_tag.outputs.tag }} \
-            --sbom spdx \
+            --sbom spdx
