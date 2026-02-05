@@ -256,7 +256,8 @@ func newPropagator(cfg OTelConfig) propagation.TextMapPropagator {
 	var propagators []propagation.TextMapPropagator
 
 	for _, p := range strings.Split(cfg.Propagators, ",") {
-		switch strings.TrimSpace(p) {
+		p = strings.TrimSpace(p)
+		switch p {
 		case "tracecontext":
 			propagators = append(propagators, propagation.TraceContext{})
 		case "baggage":
@@ -286,7 +287,7 @@ func newTraceProvider(ctx context.Context, cfg OTelConfig, res *resource.Resourc
 	var err error
 
 	if cfg.Protocol == OTelProtocolHTTP {
-		opts := []otlptracehttp.Option{}
+		var opts []otlptracehttp.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlptracehttp.WithEndpoint(cfg.Endpoint))
 		}
@@ -295,7 +296,7 @@ func newTraceProvider(ctx context.Context, cfg OTelConfig, res *resource.Resourc
 		}
 		exporter, err = otlptracehttp.New(ctx, opts...)
 	} else {
-		opts := []otlptracegrpc.Option{}
+		var opts []otlptracegrpc.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
 		}
@@ -325,7 +326,7 @@ func newMetricsProvider(ctx context.Context, cfg OTelConfig, res *resource.Resou
 	var err error
 
 	if cfg.Protocol == OTelProtocolHTTP {
-		opts := []otlpmetrichttp.Option{}
+		var opts []otlpmetrichttp.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
 		}
@@ -334,7 +335,7 @@ func newMetricsProvider(ctx context.Context, cfg OTelConfig, res *resource.Resou
 		}
 		exporter, err = otlpmetrichttp.New(ctx, opts...)
 	} else {
-		opts := []otlpmetricgrpc.Option{}
+		var opts []otlpmetricgrpc.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlpmetricgrpc.WithEndpoint(cfg.Endpoint))
 		}
@@ -363,7 +364,7 @@ func newLoggerProvider(ctx context.Context, cfg OTelConfig, res *resource.Resour
 	var err error
 
 	if cfg.Protocol == OTelProtocolHTTP {
-		opts := []otlploghttp.Option{}
+		var opts []otlploghttp.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlploghttp.WithEndpoint(cfg.Endpoint))
 		}
@@ -372,7 +373,7 @@ func newLoggerProvider(ctx context.Context, cfg OTelConfig, res *resource.Resour
 		}
 		exporter, err = otlploghttp.New(ctx, opts...)
 	} else {
-		opts := []otlploggrpc.Option{}
+		var opts []otlploggrpc.Option
 		if cfg.Endpoint != "" {
 			opts = append(opts, otlploggrpc.WithEndpoint(cfg.Endpoint))
 		}

@@ -340,4 +340,3 @@ func TestInitStructureLogConfig(t *testing.T) {
 		})
 	}
 }
-
