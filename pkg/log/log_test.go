@@ -325,6 +325,9 @@ func TestInitStructureLogConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			prev := slog.Default()
+			defer slog.SetDefault(prev)
+
 			// Set test env vars
 			t.Setenv("LOG_LEVEL", tt.logLevel)
 			t.Setenv("LOG_ADD_SOURCE", tt.addSource)
