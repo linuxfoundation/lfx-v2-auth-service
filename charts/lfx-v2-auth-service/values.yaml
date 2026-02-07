@@ -148,7 +148,7 @@ app:
     serviceName: ""
     # serviceVersion is the service version for OpenTelemetry resource
     # identification
-    # (default: "1.0.0")
+    # (default: build-time version from ldflags)
     serviceVersion: ""
     # protocol specifies the OTLP protocol: "grpc" or "http"
     # (default: "grpc")
