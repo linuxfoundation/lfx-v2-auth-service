@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Client represents a generic HTTP client with retry logic
@@ -155,12 +157,14 @@ func (c *Client) Request(ctx context.Context, verb, url string, body io.Reader, 
 	return c.Do(ctx, req)
 }
 
-// NewClient creates a new HTTP client with the given configuration
+// NewClient creates a new HTTP client with the given configuration.
+// The client is instrumented with OpenTelemetry for distributed tracing.
 func NewClient(config Config) *Client {
 	return &Client{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: config.Timeout,
+			Timeout:   config.Timeout,
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
 		},
 	}
 }
