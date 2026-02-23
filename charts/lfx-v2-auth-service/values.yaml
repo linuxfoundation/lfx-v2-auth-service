@@ -138,3 +138,41 @@ app:
       value: authelia-users
     AUTHELIA_OIDC_USERINFO_URL:
       value: https://auth.k8s.orb.local/api/oidc/userinfo
+  # extraEnv allows injecting additional environment variables before
+  # other configurations
+  extraEnv: []
+  # otel is the configuration for OpenTelemetry tracing
+  otel:
+    # serviceName is the service name for OpenTelemetry resource identification
+    # (default: "lfx-v2-auth-service")
+    serviceName: ""
+    # serviceVersion is the service version for OpenTelemetry resource
+    # identification
+    # (default: build-time version from ldflags)
+    serviceVersion: ""
+    # protocol specifies the OTLP protocol: "grpc" or "http"
+    # (default: "grpc")
+    protocol: "grpc"
+    # endpoint is the OTLP collector endpoint
+    # For gRPC: typically "host:4317", for HTTP: typically "host:4318"
+    endpoint: ""
+    # insecure disables TLS for the OTLP connection
+    # Set to "true" for in-cluster communication without TLS
+    insecure: "false"
+    # tracesExporter specifies the traces exporter: "otlp" or "none"
+    # (default: "none")
+    tracesExporter: "none"
+    # tracesSampleRatio specifies the sampling ratio for traces (0.0 to 1.0)
+    # A value of 1.0 means all traces are sampled, 0.5 means 50% are sampled
+    # (default: "1.0")
+    tracesSampleRatio: "1.0"
+    # metricsExporter specifies the metrics exporter: "otlp" or "none"
+    # (default: "none")
+    metricsExporter: "none"
+    # logsExporter specifies the logs exporter: "otlp" or "none"
+    # (default: "none")
+    logsExporter: "none"
+    # propagators specifies the propagators to use, comma-separated
+    # Supported values: "tracecontext", "baggage", "jaeger"
+    # (default: "tracecontext,baggage")
+    propagators: "tracecontext,baggage,jaeger"

@@ -8,6 +8,8 @@ import (
 	"log"
 	"log/slog"
 	"os"
+
+	slogotel "github.com/remychantenay/slog-otel"
 )
 
 type ctxKey string
@@ -101,7 +103,12 @@ func InitStructureLogConfig() {
 	}
 	h = slog.NewJSONHandler(os.Stdout, logOptions)
 	log.SetFlags(log.Llongfile)
-	logger := contextHandler{h}
+
+	// Wrap with slog-otel handler to add trace_id and span_id from context
+	otelHandler := slogotel.OtelHandler{Next: h}
+
+	// Wrap with contextHandler to support context-based attributes
+	logger := contextHandler{otelHandler}
 	slog.SetDefault(slog.New(logger))
 }
 
