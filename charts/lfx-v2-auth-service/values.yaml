@@ -4,6 +4,10 @@
 # replicaCount is the number of replicas for the deployment
 replicaCount: 3
 
+podAnnotations: {}
+
+podLabels: {}
+
 image:
   repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/server
   # tag is the container image tag (overrides appVersion from Chart.yaml)
