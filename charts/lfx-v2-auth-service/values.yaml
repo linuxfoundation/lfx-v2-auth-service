@@ -4,8 +4,16 @@
 # replicaCount is the number of replicas for the deployment
 replicaCount: 3
 
+# podAnnotations are additional annotations applied to the pod template.
+# Example:
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port: "8080"
 podAnnotations: {}
 
+# podLabels are additional labels applied to the pod template.
+# Example:
+#   team: platform
+#   environment: production
 podLabels: {}
 
 image:
