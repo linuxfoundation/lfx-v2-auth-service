@@ -13,8 +13,15 @@ spec:
       app: {{ .Chart.Name }}
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app: {{ .Chart.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- if eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia" }}
       serviceAccountName: {{ .Chart.Name }}
