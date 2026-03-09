@@ -479,7 +479,7 @@ func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClie
 
 	errSyncUsers := u.sync.syncUsers(ctx, u.storage, u.orchestrator)
 	if errSyncUsers != nil {
-		slog.Warn("failed to sync from storage to orchestrator", "error", errSyncUsers)
+		slog.WarnContext(ctx, "failed to sync from storage to orchestrator", "error", errSyncUsers)
 	}
 
 	return u, nil
