@@ -30,19 +30,23 @@ sequenceDiagram
     
     Auth0-->>SSR: D4: access_token_social<br/>for /userinfo (IGNORE) +<br/>id_token_social
 
-    Note over SSR: SSR uses<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
+    alt id_token_social sub starts with "auth0|" (database user, not a social identity)
+        SSR-->>Browser: Error: cannot link two LFID accounts
+    else id_token_social sub is a social identity (e.g. google-oauth2|, github|)
+        Note over SSR: SSR uses<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
 
-    SSR->>NATS: D5: Publish link request<br/>with access_token_mgmt_self + id_token_social
-    Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
-    NATS->>AuthSvc: Deliver request
+        SSR->>NATS: D5: Publish link request<br/>with access_token_mgmt_self + id_token_social
+        Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
+        NATS->>AuthSvc: Deliver request
 
-    AuthSvc->>Auth0Mgmt: Link social identity<br/>using access_token_mgmt_self<br/>w/ id_token_social claims
-    
-    Auth0Mgmt-->>AuthSvc: Identity linked successfully
-    AuthSvc->>NATS: Publish response
-    NATS->>SSR: Deliver response
-    
-    SSR-->>Browser: Update UI with<br/>newly linked identity
-    
+        AuthSvc->>Auth0Mgmt: Link social identity<br/>using access_token_mgmt_self<br/>w/ id_token_social claims
+
+        Auth0Mgmt-->>AuthSvc: Identity linked successfully
+        AuthSvc->>NATS: Publish response
+        NATS->>SSR: Deliver response
+
+        SSR-->>Browser: Update UI with<br/>newly linked identity
+    end
+
     Note over Browser,Auth0Mgmt: Auth Service abstracts all Auth0 Management API calls
 ```
