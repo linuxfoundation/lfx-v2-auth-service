@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -51,7 +52,7 @@ func (ilf *identityLinkingFlow) LinkIdentityToUser(ctx context.Context, userID, 
 	// Call Auth0 Management API to link the identity
 	// IMPORTANT: Using the user's management API token (with update:current_user_identities scope)
 	// NOT the service's M2M credentials
-	url := fmt.Sprintf("https://%s/api/v2/users/%s/identities", ilf.domain, userID)
+	url := fmt.Sprintf("https://%s/api/v2/users/%s/identities", ilf.domain, url.PathEscape(userID))
 
 	apiRequest := httpclient.NewAPIRequest(
 		ilf.httpClient,
@@ -114,7 +115,12 @@ func (ilf *identityLinkingFlow) UnlinkIdentityFromUser(ctx context.Context, prim
 	// Call Auth0 Management API to unlink the identity
 	// IMPORTANT: Using the user's management API token (with update:current_user_identities scope)
 	// NOT the service's M2M credentials
-	url := fmt.Sprintf("https://%s/api/v2/users/%s/identities/%s/%s", ilf.domain, primaryUserID, provider, secondaryUserID)
+	url := fmt.Sprintf("https://%s/api/v2/users/%s/identities/%s/%s",
+		ilf.domain,
+		url.PathEscape(primaryUserID),
+		url.PathEscape(provider),
+		url.PathEscape(secondaryUserID),
+	)
 
 	apiRequest := httpclient.NewAPIRequest(
 		ilf.httpClient,

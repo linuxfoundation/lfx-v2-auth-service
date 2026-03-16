@@ -1137,6 +1137,217 @@ func TestMessageHandlerOrchestrator_GetUserMetadata_NoUserReader(t *testing.T) {
 	}
 }
 
+// mockIdentityLinker is a mock implementation of port.IdentityLinker for testing
+type mockIdentityLinker struct {
+	linkIdentityFunc   func(ctx context.Context, request *model.LinkIdentity) error
+	unlinkIdentityFunc func(ctx context.Context, request *model.UnlinkIdentity) error
+}
+
+func (m *mockIdentityLinker) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+	if m.linkIdentityFunc != nil {
+		return m.linkIdentityFunc(ctx, request)
+	}
+	return nil
+}
+
+func (m *mockIdentityLinker) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	if m.unlinkIdentityFunc != nil {
+		return m.unlinkIdentityFunc(ctx, request)
+	}
+	return nil
+}
+
+func TestMessageHandlerOrchestrator_UnlinkIdentity(t *testing.T) {
+	ctx := context.Background()
+
+	validPayload := func(provider, identityID string) []byte {
+		req := &model.UnlinkIdentity{}
+		req.User.AuthToken = "auth0|testuser"
+		req.Unlink.Provider = provider
+		req.Unlink.IdentityID = identityID
+		data, _ := json.Marshal(req)
+		return data
+	}
+
+	tests := []struct {
+		name             string
+		messageData      []byte
+		userReader       *mockUserServiceReader
+		identityUnlinker *mockIdentityLinker
+		validateResult   func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "nil identityUnlinker returns service unavailable",
+			messageData: validPayload("linkedin", "QhNK44iR6W"),
+			userReader:  &mockUserServiceReader{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "auth service unavailable")
+			},
+		},
+		{
+			name:             "nil userReader returns service unavailable",
+			messageData:      validPayload("linkedin", "QhNK44iR6W"),
+			identityUnlinker: &mockIdentityLinker{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "auth service unavailable")
+			},
+		},
+		{
+			name:             "invalid JSON returns error",
+			messageData:      []byte(`{invalid json`),
+			userReader:       &mockUserServiceReader{},
+			identityUnlinker: &mockIdentityLinker{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertFailureResponse(t, result)
+			},
+		},
+		{
+			name:        "MetadataLookup failure returns error",
+			messageData: validPayload("linkedin", "QhNK44iR6W"),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return nil, errors.NewUnauthorized("invalid token")
+				},
+			},
+			identityUnlinker: &mockIdentityLinker{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "invalid token")
+			},
+		},
+		{
+			name:        "unlinker error returns error",
+			messageData: validPayload("linkedin", "QhNK44iR6W"),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|testuser"}, nil
+				},
+			},
+			identityUnlinker: &mockIdentityLinker{
+				unlinkIdentityFunc: func(ctx context.Context, request *model.UnlinkIdentity) error {
+					return errors.NewUnexpected("failed to unlink identity from user")
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "failed to unlink identity from user")
+			},
+		},
+		{
+			name:        "successful unlink passes correct fields to unlinker",
+			messageData: validPayload("linkedin", "QhNK44iR6W"),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|testuser"}, nil
+				},
+			},
+			identityUnlinker: &mockIdentityLinker{
+				unlinkIdentityFunc: func(ctx context.Context, request *model.UnlinkIdentity) error {
+					if request.User.UserID != "auth0|testuser" {
+						t.Errorf("expected user_id auth0|testuser, got %s", request.User.UserID)
+					}
+					if request.Unlink.Provider != "linkedin" {
+						t.Errorf("expected provider linkedin, got %s", request.Unlink.Provider)
+					}
+					if request.Unlink.IdentityID != "QhNK44iR6W" {
+						t.Errorf("expected identity_id QhNK44iR6W, got %s", request.Unlink.IdentityID)
+					}
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				var resp UserDataResponse
+				if err := json.Unmarshal(result, &resp); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if !resp.Success {
+					t.Errorf("expected success=true, got error: %s", resp.Error)
+				}
+				if resp.Message != "identity unlinked successfully" {
+					t.Errorf("expected message 'identity unlinked successfully', got %q", resp.Message)
+				}
+			},
+		},
+		{
+			name:        "user_id is populated from MetadataLookup not from payload",
+			messageData: validPayload("google-oauth2", "110851128638631517648"),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|resolveduser"}, nil
+				},
+			},
+			identityUnlinker: &mockIdentityLinker{
+				unlinkIdentityFunc: func(ctx context.Context, request *model.UnlinkIdentity) error {
+					if request.User.UserID != "auth0|resolveduser" {
+						t.Errorf("user_id should come from MetadataLookup, got %s", request.User.UserID)
+					}
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertSuccessResponse(t, result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := []messageHandlerOrchestratorOption{}
+			if tt.userReader != nil {
+				opts = append(opts, WithUserReaderForMessageHandler(tt.userReader))
+			}
+			if tt.identityUnlinker != nil {
+				opts = append(opts, WithIdentityUnlinkerForMessageHandler(tt.identityUnlinker))
+			}
+
+			orchestrator := NewMessageHandlerOrchestrator(opts...)
+			result, err := orchestrator.UnlinkIdentity(ctx, &mockTransportMessenger{data: tt.messageData})
+
+			if err != nil {
+				t.Fatalf("UnlinkIdentity() unexpected Go error: %v", err)
+			}
+			if result == nil {
+				t.Fatal("UnlinkIdentity() returned nil result")
+			}
+			tt.validateResult(t, result)
+		})
+	}
+}
+
+func assertErrorResponse(t *testing.T, result []byte, wantErr string) {
+	t.Helper()
+	var resp UserDataResponse
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Success {
+		t.Errorf("expected success=false, got success=true")
+	}
+	if resp.Error != wantErr {
+		t.Errorf("expected error %q, got %q", wantErr, resp.Error)
+	}
+}
+
+func assertFailureResponse(t *testing.T, result []byte) {
+	t.Helper()
+	var resp UserDataResponse
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Success {
+		t.Errorf("expected success=false")
+	}
+}
+
+func assertSuccessResponse(t *testing.T, result []byte) {
+	t.Helper()
+	var resp UserDataResponse
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("expected success=true, got error: %s", resp.Error)
+	}
+}
+
 // Helper function to compare UserMetadata structs
 func compareUserMetadata(actual, expected *model.UserMetadata) bool {
 	if actual == nil && expected == nil {

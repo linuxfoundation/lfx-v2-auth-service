@@ -4,6 +4,7 @@
 package redaction
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -131,9 +132,10 @@ func TestRedactEmail(t *testing.T) {
 }
 
 func TestRedactJWTs(t *testing.T) {
-	// A real-looking JWT (header.payload.signature — all base64url segments ≥10 chars each)
-	jwt1 := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHx0ZXN0dXNlciIsInNjb3BlIjoidXBkYXRlOmN1cnJlbnRfdXNlcl9pZGVudGl0aWVzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-	jwt2 := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.abc123def456ghi789jkl012mno345pqr678stu"
+	// JWT-shaped strings built from repeated chars to avoid triggering secret scanners.
+	// Pattern: three base64url segments separated by dots, each ≥10 chars.
+	jwt1 := strings.Repeat("a", 16) + "." + strings.Repeat("b", 24) + "." + strings.Repeat("c", 32)
+	jwt2 := strings.Repeat("x", 20) + "." + strings.Repeat("y", 18) + "." + strings.Repeat("z", 28)
 
 	tests := []struct {
 		name     string
