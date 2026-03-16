@@ -19,7 +19,6 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
-
 // Config holds the configuration for Auth0 Management API
 type Config struct {
 	Tenant string
