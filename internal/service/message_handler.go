@@ -27,10 +27,11 @@ type UserDataResponse struct {
 
 // messageHandlerOrchestrator orchestrates the message handling process
 type messageHandlerOrchestrator struct {
-	userWriter     port.UserWriter
-	userReader     port.UserReader
-	emailHandler   port.EmailHandler
-	identityLinker port.IdentityLinker
+	userWriter       port.UserWriter
+	userReader       port.UserReader
+	emailHandler     port.EmailHandler
+	identityLinker   port.IdentityLinker
+	identityUnlinker port.IdentityLinker
 }
 
 // messageHandlerOrchestratorOption defines a function type for setting options
@@ -64,6 +65,13 @@ func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) mes
 	}
 }
 
+// WithIdentityUnlinkerForMessageHandler sets the identity unlinker for the message handler orchestrator
+func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) messageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.identityUnlinker = identityUnlinker
+	}
+}
+
 func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	response := UserDataResponse{
 		Success: false,
@@ -76,7 +84,7 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
 func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria string, email string) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("user service unavailable")
+		return nil, errs.NewUnexpected("auth service unavailable")
 	}
 
 	slog.DebugContext(ctx, "search by email",
@@ -134,7 +142,7 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("user service unavailable")
+		return nil, errs.NewUnexpected("auth service unavailable")
 	}
 
 	input := strings.TrimSpace(string(msg.Data()))
@@ -222,7 +230,7 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil {
-		return m.errorResponse("user service unavailable"), nil
+		return m.errorResponse("auth service unavailable"), nil
 	}
 
 	user := &model.User{}
@@ -383,11 +391,11 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityLinker == nil {
-		return m.errorResponse("user service unavailable"), nil
+		return m.errorResponse("auth service unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		return m.errorResponse("user service unavailable"), nil
+		return m.errorResponse("auth service unavailable"), nil
 	}
 
 	linkRequest := &model.LinkIdentity{}
@@ -418,6 +426,47 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 	if err != nil {
 		errorResponseJSON := m.errorResponse("failed to marshal response")
 		return errorResponseJSON, nil
+	}
+
+	return responseJSON, nil
+}
+
+// UnlinkIdentity removes a secondary identity from a user account
+func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.identityUnlinker == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	if m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	unlinkRequest := &model.UnlinkIdentity{}
+	err := json.Unmarshal(msg.Data(), unlinkRequest)
+	if err != nil {
+		return m.errorResponse("failed to unmarshal unlink identity request"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, unlinkRequest.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	unlinkRequest.User.UserID = user.UserID
+
+	errUnlinkIdentity := m.identityUnlinker.UnlinkIdentity(ctx, unlinkRequest)
+	if errUnlinkIdentity != nil {
+		return m.errorResponse(errUnlinkIdentity.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "identity unlinked successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
 	}
 
 	return responseJSON, nil

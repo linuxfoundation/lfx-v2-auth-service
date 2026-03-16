@@ -130,6 +130,63 @@ func TestRedactEmail(t *testing.T) {
 	}
 }
 
+func TestRedactJWTs(t *testing.T) {
+	// A real-looking JWT (header.payload.signature — all base64url segments ≥10 chars each)
+	jwt1 := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHx0ZXN0dXNlciIsInNjb3BlIjoidXBkYXRlOmN1cnJlbnRfdXNlcl9pZGVudGl0aWVzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	jwt2 := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.abc123def456ghi789jkl012mno345pqr678stu"
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "no JWT present",
+			input:    `{"provider":"linkedin","user_id":"QhNK44iR6W"}`,
+			expected: `{"provider":"linkedin","user_id":"QhNK44iR6W"}`,
+		},
+		{
+			name:     "single JWT in JSON body",
+			input:    `{"link_with":"` + jwt1 + `"}`,
+			expected: `{"link_with":"[REDACTED]"}`,
+		},
+		{
+			name:     "multiple JWTs in body",
+			input:    `{"auth_token":"` + jwt1 + `","identity_token":"` + jwt2 + `"}`,
+			expected: `{"auth_token":"[REDACTED]","identity_token":"[REDACTED]"}`,
+		},
+		{
+			name:     "JWT as plain string",
+			input:    jwt1,
+			expected: "[REDACTED]",
+		},
+		{
+			name:     "non-JWT dot-separated string (segments too short)",
+			input:    "foo.bar.baz",
+			expected: "foo.bar.baz",
+		},
+		{
+			name:     "mixed content with JWT",
+			input:    `calling API url=https://example.auth0.com token=` + jwt1,
+			expected: `calling API url=https://example.auth0.com token=[REDACTED]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := RedactJWTs(tt.input)
+			if result != tt.expected {
+				t.Errorf("RedactJWTs(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 // Benchmarks to ensure redaction performance is acceptable
 func BenchmarkRedact(b *testing.B) {
 	testString := "johndoe123@example.com"

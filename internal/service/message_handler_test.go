@@ -610,8 +610,8 @@ func TestMessageHandlerOrchestrator_EmailToUsername_NoUserReader(t *testing.T) {
 		t.Error("Expected success=false when user reader is nil")
 	}
 
-	if response.Error != "user service unavailable" {
-		t.Errorf("Expected error 'user service unavailable', got %s", response.Error)
+	if response.Error != "auth service unavailable" {
+		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
 	}
 }
 
@@ -1132,8 +1132,8 @@ func TestMessageHandlerOrchestrator_GetUserMetadata_NoUserReader(t *testing.T) {
 	if userResponse.Success {
 		t.Errorf("Expected error but got success")
 	}
-	if userResponse.Error != "user service unavailable" {
-		t.Errorf("Expected 'user service unavailable' error, got: %s", userResponse.Error)
+	if userResponse.Error != "auth service unavailable" {
+		t.Errorf("Expected 'auth service unavailable' error, got: %s", userResponse.Error)
 	}
 }
 
