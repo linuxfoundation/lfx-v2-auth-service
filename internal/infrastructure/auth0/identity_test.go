@@ -106,10 +106,8 @@ func TestValidateLinkRequest(t *testing.T) {
 				if tt.errorMsg != "" && err.Error() != tt.errorMsg {
 					t.Errorf("ValidateLinkRequest() error = %q, want %q", err.Error(), tt.errorMsg)
 				}
-			} else {
-				if err != nil {
-					t.Errorf("ValidateLinkRequest() unexpected error: %v", err)
-				}
+			} else if err != nil {
+				t.Errorf("ValidateLinkRequest() unexpected error: %v", err)
 			}
 		})
 	}

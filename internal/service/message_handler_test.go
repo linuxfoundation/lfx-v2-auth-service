@@ -1205,13 +1205,12 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name            string
-		messageData     []byte
-		linker          *mockIdentityLinker
-		reader          *mockUserServiceReader
-		expectSuccess   bool
-		expectError     string
-		expectLinkerCalled bool
+		name          string
+		messageData   []byte
+		linker        *mockIdentityLinker
+		reader        *mockUserServiceReader
+		expectSuccess bool
+		expectError   string
 	}{
 		{
 			name:        "validate guard blocks database user token",
@@ -1225,10 +1224,9 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 					return nil
 				},
 			},
-			reader:             &mockUserServiceReader{},
-			expectSuccess:      false,
-			expectError:        "the provided identity token belongs to an existing LFID account and cannot be linked",
-			expectLinkerCalled: false,
+			reader:        &mockUserServiceReader{},
+			expectSuccess: false,
+			expectError:   "the provided identity token belongs to an existing LFID account and cannot be linked",
 		},
 		{
 			name:        "validate guard passes for social token",
@@ -1242,8 +1240,7 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 					return &model.User{UserID: "auth0|user123"}, nil
 				},
 			},
-			expectSuccess:      true,
-			expectLinkerCalled: true,
+			expectSuccess: true,
 		},
 		{
 			name:          "invalid json returns error",
