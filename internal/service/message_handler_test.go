@@ -33,6 +33,26 @@ func (m *mockTransportMessenger) Respond(data []byte) error {
 	return nil
 }
 
+// mockIdentityLinker is a mock implementation of port.IdentityLinker for testing
+type mockIdentityLinker struct {
+	validateLinkRequestFunc func(ctx context.Context, request *model.LinkIdentity) error
+	linkIdentityFunc        func(ctx context.Context, request *model.LinkIdentity) error
+}
+
+func (m *mockIdentityLinker) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
+	if m.validateLinkRequestFunc != nil {
+		return m.validateLinkRequestFunc(ctx, request)
+	}
+	return nil
+}
+
+func (m *mockIdentityLinker) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
+	if m.linkIdentityFunc != nil {
+		return m.linkIdentityFunc(ctx, request)
+	}
+	return nil
+}
+
 // mockUserServiceWriter is a mock implementation of UserServiceWriter for testing
 type mockUserServiceWriter struct {
 	updateUserFunc func(ctx context.Context, user *model.User) (*model.User, error)
@@ -1171,4 +1191,92 @@ func compareStringPtr(a, b *string) bool {
 		return false
 	}
 	return *a == *b
+}
+
+func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
+	ctx := context.Background()
+
+	validRequest := func() []byte {
+		r := &model.LinkIdentity{}
+		r.User.AuthToken = "some-auth-token"
+		r.LinkWith.IdentityToken = "some-identity-token"
+		data, _ := json.Marshal(r)
+		return data
+	}()
+
+	tests := []struct {
+		name            string
+		messageData     []byte
+		linker          *mockIdentityLinker
+		reader          *mockUserServiceReader
+		expectSuccess   bool
+		expectError     string
+		expectLinkerCalled bool
+	}{
+		{
+			name:        "validate guard blocks database user token",
+			messageData: validRequest,
+			linker: &mockIdentityLinker{
+				validateLinkRequestFunc: func(_ context.Context, _ *model.LinkIdentity) error {
+					return errors.NewValidation("the provided identity token belongs to an existing LFID account and cannot be linked")
+				},
+				linkIdentityFunc: func(_ context.Context, _ *model.LinkIdentity) error {
+					t.Error("LinkIdentity should not be called when validation fails")
+					return nil
+				},
+			},
+			reader:             &mockUserServiceReader{},
+			expectSuccess:      false,
+			expectError:        "the provided identity token belongs to an existing LFID account and cannot be linked",
+			expectLinkerCalled: false,
+		},
+		{
+			name:        "validate guard passes for social token",
+			messageData: validRequest,
+			linker: &mockIdentityLinker{
+				validateLinkRequestFunc: func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+				linkIdentityFunc:        func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+			},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+					return &model.User{UserID: "auth0|user123"}, nil
+				},
+			},
+			expectSuccess:      true,
+			expectLinkerCalled: true,
+		},
+		{
+			name:          "invalid json returns error",
+			messageData:   []byte(`{bad json`),
+			linker:        &mockIdentityLinker{},
+			reader:        &mockUserServiceReader{},
+			expectSuccess: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orchestrator := NewMessageHandlerOrchestrator(
+				WithIdentityLinkerForMessageHandler(tt.linker),
+				WithUserReaderForMessageHandler(tt.reader),
+			)
+
+			result, err := orchestrator.LinkIdentity(ctx, &mockTransportMessenger{data: tt.messageData})
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+
+			var response UserDataResponse
+			if err := json.Unmarshal(result, &response); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+
+			if response.Success != tt.expectSuccess {
+				t.Errorf("success = %v, want %v (error: %s)", response.Success, tt.expectSuccess, response.Error)
+			}
+			if tt.expectError != "" && response.Error != tt.expectError {
+				t.Errorf("error = %q, want %q", response.Error, tt.expectError)
+			}
+		})
+	}
 }

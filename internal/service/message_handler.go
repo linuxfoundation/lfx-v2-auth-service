@@ -397,6 +397,11 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		return responseJSON, nil
 	}
 
+	errValidateLinkRequest := m.identityLinker.ValidateLinkRequest(ctx, linkRequest)
+	if errValidateLinkRequest != nil {
+		return m.errorResponse(errValidateLinkRequest.Error()), nil
+	}
+
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil

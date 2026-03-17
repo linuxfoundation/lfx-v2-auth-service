@@ -349,6 +349,11 @@ func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	}, nil
 }
 
+func (a *userReaderWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
+	slog.DebugContext(ctx, "no validations for authelia request")
+	return nil
+}
+
 func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	if request == nil {
 		return errs.NewValidation("request is required")
