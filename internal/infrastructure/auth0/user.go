@@ -359,7 +359,7 @@ func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *mod
 	}
 
 	if strings.HasPrefix(sub, auth0SubPrefix) {
-		slog.WarnContext(ctx, "social identity token belongs to a database user; rejecting link request")
+		slog.WarnContext(ctx, "identity token belongs to a database (LFID) user; rejecting link request")
 		return errors.NewValidation("the provided identity token belongs to an existing LFID account and cannot be linked")
 	}
 
