@@ -19,3 +19,22 @@ type LinkIdentity struct {
 		IdentityToken string `json:"identity_token"`
 	} `json:"link_with"`
 }
+
+// UnlinkIdentity represents a request to unlink a secondary identity from a user account.
+type UnlinkIdentity struct {
+	// User contains the authenticated user's information needed to authorize the unlinking action.
+	User struct {
+		// UserID is the primary user's ID, populated from the auth_token sub claim.
+		UserID string `json:"user_id"`
+		// AuthToken is the JWT token with the update:current_user_identities scope.
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+
+	// Unlink contains the secondary identity to be removed.
+	Unlink struct {
+		// Provider is the identity provider of the secondary account (e.g. "google-oauth2", "auth0").
+		Provider string `json:"provider"`
+		// IdentityID is the identity's user_id as returned by the identity provider (the part after the "|").
+		IdentityID string `json:"identity_id"`
+	} `json:"unlink"`
+}

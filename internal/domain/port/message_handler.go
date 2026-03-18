@@ -45,6 +45,7 @@ type UserLinkHandler interface {
 // IdentityLinkingHandler defines the behavior of the identity linking domain handlers
 type IdentityLinkingHandler interface {
 	LinkIdentity(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	UnlinkIdentity(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // EmailLinkingHandler defines the behavior of the email linking domain handlers

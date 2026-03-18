@@ -32,6 +32,7 @@ type UserWriter interface {
 // IdentityLinker defines the behavior of the identity linker
 type IdentityLinker interface {
 	LinkIdentity(ctx context.Context, request *model.LinkIdentity) error
+	UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error
 }
 
 // EmailHandler defines the behavior of the email handler

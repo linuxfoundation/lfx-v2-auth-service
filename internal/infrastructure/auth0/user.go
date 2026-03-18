@@ -12,16 +12,11 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
-)
-
-const (
-	userUpdateRequiredScope         = "update:current_user_metadata"
-	userUpdateIdentityRequiredScope = "update:current_user_identities"
-	userReadRequiredScope           = "read:current_user"
 )
 
 // Config holds the configuration for Auth0 Management API
@@ -242,7 +237,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		return nil, errors.NewValidation("JWT verification configuration is required")
 	}
 
-	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, userUpdateRequiredScope)
+	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, constants.UserUpdateMetadataRequiredScope)
 	if errJwtVerify != nil {
 		slog.ErrorContext(ctx, "jwt verify failed", "error", errJwtVerify)
 		return nil, errJwtVerify
@@ -379,6 +374,55 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	}
 
 	slog.DebugContext(ctx, "identity linked successfully via user reader writer",
+		"user_id", redaction.Redact(request.User.UserID),
+	)
+
+	return nil
+}
+
+func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+
+	if u.identityLinkingFlow == nil {
+		return errors.NewUnexpected("identity linking flow not configured")
+	}
+
+	if request == nil {
+		return errors.NewValidation("unlink identity request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	if request.User.AuthToken == "" {
+		return errors.NewValidation("user_token is required")
+	}
+
+	if request.Unlink.Provider == "" {
+		return errors.NewValidation("provider is required")
+	}
+
+	if request.Unlink.IdentityID == "" {
+		return errors.NewValidation("identity_id is required")
+	}
+
+	slog.DebugContext(ctx, "unlinking identity from user",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", request.Unlink.Provider,
+	)
+
+	errUnlinkIdentity := u.identityLinkingFlow.UnlinkIdentityFromUser(
+		ctx,
+		request.User.UserID,
+		request.User.AuthToken,
+		request.Unlink.Provider,
+		request.Unlink.IdentityID,
+	)
+	if errUnlinkIdentity != nil {
+		return errUnlinkIdentity
+	}
+
+	slog.DebugContext(ctx, "identity unlinked successfully via user reader writer",
 		"user_id", redaction.Redact(request.User.UserID),
 	)
 

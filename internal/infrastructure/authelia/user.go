@@ -446,6 +446,11 @@ func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	return nil
 }
 
+func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	slog.DebugContext(ctx, "authelia: unlink identity - not implemented")
+	return errs.NewServiceUnavailable("unlink identity is not implemented for authelia")
+}
+
 // NewUserReaderWriter creates a new Authelia User repository
 func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClient *nats.NATSClient) (port.UserReaderWriter, error) {
 	// Set defaults in case of not set

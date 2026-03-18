@@ -1,19 +1,25 @@
 # User Identity Linking
 
-This document describes the NATS subject for linking verified identities to user accounts.
+This document describes the NATS subjects for linking and unlinking identities (social providers, email, etc.) to and from user accounts.
 
 ---
 
-## Link Verified Email Identity
+## Important Notes
 
-After successfully verifying an email address and receiving an ID token, link the verified email identity to the user's account.
+- The `user_id` is automatically extracted from the `sub` claim of `user.auth_token` — it does not need to be provided explicitly
+- The Auth Service uses the **user's token** (not the service's M2M credentials) to call the identity provider, ensuring the operation is scoped to the user's own permissions
+- These subjects are **only supported for Auth0**. Authelia and mock implementations do not support this functionality yet.
 
-**Subject:** `lfx.auth-service.user_identity.link`  
+---
+
+## Link Identity
+
+Links a verified identity to the user's account. The identity can come from any provider (e.g. Google, LinkedIn, GitHub) or from the email verification flow — in which case the `identity_token` is the ID token received after successfully verifying an email address.
+
+**Subject:** `lfx.auth-service.user_identity.link`
 **Pattern:** Request/Reply
 
 ### Request Payload
-
-The request payload must be a JSON object containing the user's JWT token and the ID token from the email verification step:
 
 ```json
 {
@@ -28,14 +34,12 @@ The request payload must be a JSON object containing the user's JWT token and th
 
 ### Required Fields
 
-- `user.auth_token`: A JWT access token for the Auth0 Management API with the `update:current_user_identities` scope. The `user_id` will be automatically extracted from the `sub` claim of this token.
-- `link_with.identity_token`: The ID token obtained from the email verification process that contains the verified email identity
+- `user.auth_token`: A JWT access token with the `update:current_user_identities` scope.
+- `link_with.identity_token`: The ID token representing the identity to be linked. For the email verification flow, this is the token received after completing the OTP verification step.
 
 ### Reply
 
-The service links the verified email identity to the user account without changing the user's current global session:
-
-**Success Reply:**
+**Success:**
 ```json
 {
   "success": true,
@@ -43,26 +47,17 @@ The service links the verified email identity to the user account without changi
 }
 ```
 
-**Error Reply (Invalid Token):**
+**Error:**
 ```json
 {
   "success": false,
-  "error": "jwt verify failed for link identity"
-}
-```
-
-**Error Reply (Link Failed):**
-```json
-{
-  "success": false,
-  "error": "failed to link identity to user"
+  "error": "<error message>"
 }
 ```
 
 ### Example using NATS CLI
 
 ```bash
-# Link the verified email identity to the user account
 nats request lfx.auth-service.user_identity.link '{
   "user": {
     "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
@@ -71,21 +66,71 @@ nats request lfx.auth-service.user_identity.link '{
     "identity_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
   }
 }'
-
-# Expected response: {"success":true,"message":"identity linked successfully"}
 ```
 
-### Important Notes
+---
 
-- The SSR application must provide the user's JWT token (`user.auth_token`) with the `update:current_user_identities` scope
-- The Auth Service automatically extracts the `user_id` from the `sub` claim of the user's token
-- The Auth Service verifies the JWT token signature and validates the required scope before processing
-- The Auth Service uses the **user's token** (not the service's M2M credentials) to call the Auth0 Management API
-- This ensures the operation is performed with the user's permissions and does not change their current global session
-- The `link_with.identity_token` field contains the ID token from the email verification process with the verified email information that will be linked to the user account
-- This feature is **only supported for Auth0**. Authelia and mock implementations do not support this functionality yet.
+## Unlink Identity
 
-### Complete Flow
+Removes a secondary identity (e.g. Google, LinkedIn, GitHub) from the user's account.
 
-For a complete understanding of how this operation fits into the email verification and linking flow, see the [Email Verification Documentation](email_verification.md#complete-email-verification-and-linking-flow) which includes a comprehensive flow diagram showing all three steps (Steps 1-2: Email Verification, Step 3: Identity Linking).
+**Subject:** `lfx.auth-service.user_identity.unlink`
+**Pattern:** Request/Reply
 
+### Request Payload
+
+```json
+{
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  },
+  "unlink": {
+    "provider": "linkedin",
+    "identity_id": "QhNK44iR6W"
+  }
+}
+```
+
+### Required Fields
+
+- `user.auth_token`: A JWT access token with the `update:current_user_identities` scope.
+- `unlink.provider`: The identity provider to unlink (e.g. `google-oauth2`, `linkedin`, `github`).
+- `unlink.identity_id`: The identity's ID as returned by the identity provider. This must be retrieved directly from the identity provider since there is no dedicated subject for listing identities at this time.
+
+### Reply
+
+**Success:**
+```json
+{
+  "success": true,
+  "message": "identity unlinked successfully"
+}
+```
+
+**Error:**
+```json
+{
+  "success": false,
+  "error": "<error message>"
+}
+```
+
+### Example using NATS CLI
+
+```bash
+nats request lfx.auth-service.user_identity.unlink '{
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  },
+  "unlink": {
+    "provider": "linkedin",
+    "identity_id": "QhNK44iR6W"
+  }
+}'
+```
+
+---
+
+## Email Verification Flow
+
+When linking an email identity, `lfx.auth-service.user_identity.link` is used as the final step after completing the OTP verification. For the complete flow see [Email Verification Documentation](email_verification.md#complete-email-verification-and-linking-flow).
