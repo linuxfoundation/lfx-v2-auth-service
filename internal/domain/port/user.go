@@ -31,6 +31,7 @@ type UserWriter interface {
 
 // IdentityLinker defines the behavior of the identity linker
 type IdentityLinker interface {
+	ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error
 	LinkIdentity(ctx context.Context, request *model.LinkIdentity) error
 	UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error
 }

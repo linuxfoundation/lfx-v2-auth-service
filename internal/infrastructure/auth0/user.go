@@ -337,6 +337,30 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	return authResponse, nil
 }
 
+const auth0SubPrefix = "auth0|"
+
+func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
+	if request == nil {
+		return errors.NewValidation("link identity request is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errors.NewValidation("link_with identity token is required")
+	}
+
+	sub, err := jwt.ExtractSubject(ctx, request.LinkWith.IdentityToken)
+	if err != nil {
+		return errors.NewValidation("invalid identity token: unable to extract subject")
+	}
+
+	if strings.HasPrefix(sub, auth0SubPrefix) {
+		slog.WarnContext(ctx, "identity token belongs to a database (LFID) user; rejecting link request")
+		return errors.NewValidation("the provided identity token belongs to an existing LFID account and cannot be linked")
+	}
+
+	return nil
+}
+
 func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 
 	if u.identityLinkingFlow == nil {

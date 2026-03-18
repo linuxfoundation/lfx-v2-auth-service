@@ -337,6 +337,11 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	}, nil
 }
 
+func (u *userWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
+	slog.DebugContext(ctx, "no validations for mock request")
+	return nil
+}
+
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "mock: linking identity")
 
