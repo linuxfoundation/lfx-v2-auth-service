@@ -422,6 +422,11 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 	return nil
 }
 
+func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	slog.DebugContext(ctx, "mock: unlink identity - not implemented")
+	return errors.NewServiceUnavailable("unlink identity is not implemented for mock")
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 

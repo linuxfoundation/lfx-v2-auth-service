@@ -33,6 +33,7 @@ type UserWriter interface {
 type IdentityLinker interface {
 	ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error
 	LinkIdentity(ctx context.Context, request *model.LinkIdentity) error
+	UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error
 }
 
 // EmailHandler defines the behavior of the email handler

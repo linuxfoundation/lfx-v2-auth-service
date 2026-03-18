@@ -197,6 +197,9 @@ func QueueSubscriptions(ctx context.Context) error {
 			service.WithIdentityLinkerForMessageHandler(
 				userReaderWriter,
 			),
+			service.WithIdentityUnlinkerForMessageHandler(
+				userReaderWriter,
+			),
 		),
 	}
 
@@ -216,6 +219,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.EmailLinkingSendVerificationSubject: messageHandlerService.HandleMessage,
 		constants.EmailLinkingVerifySubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
+		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		// Add more subjects here as needed
 	}
 
