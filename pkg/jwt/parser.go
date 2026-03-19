@@ -84,7 +84,7 @@ func ParseUnverified(ctx context.Context, tokenString string, opts *ParseOptions
 	}
 
 	// Parse the token without verification using jwx
-	token, err := jwt.Parse([]byte(cleanToken), jwt.WithVerify(false))
+	token, err := jwt.Parse([]byte(cleanToken), jwt.WithVerify(false), jwt.WithValidate(false))
 	if err != nil {
 		return nil, errors.NewValidation("failed to parse JWT token: %w", err)
 	}
