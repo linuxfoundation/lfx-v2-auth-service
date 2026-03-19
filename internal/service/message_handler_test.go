@@ -37,6 +37,7 @@ func (m *mockTransportMessenger) Respond(data []byte) error {
 type mockIdentityLinker struct {
 	validateLinkRequestFunc func(ctx context.Context, request *model.LinkIdentity) error
 	linkIdentityFunc        func(ctx context.Context, request *model.LinkIdentity) error
+	unlinkIdentityFunc      func(ctx context.Context, request *model.UnlinkIdentity) error
 }
 
 func (m *mockIdentityLinker) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
@@ -49,6 +50,13 @@ func (m *mockIdentityLinker) ValidateLinkRequest(ctx context.Context, request *m
 func (m *mockIdentityLinker) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	if m.linkIdentityFunc != nil {
 		return m.linkIdentityFunc(ctx, request)
+	}
+	return nil
+}
+
+func (m *mockIdentityLinker) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	if m.unlinkIdentityFunc != nil {
+		return m.unlinkIdentityFunc(ctx, request)
 	}
 	return nil
 }
@@ -1155,26 +1163,6 @@ func TestMessageHandlerOrchestrator_GetUserMetadata_NoUserReader(t *testing.T) {
 	if userResponse.Error != "auth service unavailable" {
 		t.Errorf("Expected 'auth service unavailable' error, got: %s", userResponse.Error)
 	}
-}
-
-// mockIdentityLinker is a mock implementation of port.IdentityLinker for testing
-type mockIdentityLinker struct {
-	linkIdentityFunc   func(ctx context.Context, request *model.LinkIdentity) error
-	unlinkIdentityFunc func(ctx context.Context, request *model.UnlinkIdentity) error
-}
-
-func (m *mockIdentityLinker) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
-	if m.linkIdentityFunc != nil {
-		return m.linkIdentityFunc(ctx, request)
-	}
-	return nil
-}
-
-func (m *mockIdentityLinker) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
-	if m.unlinkIdentityFunc != nil {
-		return m.unlinkIdentityFunc(ctx, request)
-	}
-	return nil
 }
 
 func TestMessageHandlerOrchestrator_UnlinkIdentity(t *testing.T) {
