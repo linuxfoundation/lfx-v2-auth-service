@@ -212,17 +212,9 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 
-	data := map[string]any{
-		"primary_email": user.PrimaryEmail,
-	}
-
-	if len(user.AlternateEmails) > 0 {
-		data["alternate_emails"] = user.AlternateEmails
-	}
-
 	response := UserDataResponse{
 		Success: true,
-		Data:    data,
+		Data:    map[string]any{"primary_email": user.PrimaryEmail, "alternate_emails": user.AlternateEmails},
 	}
 
 	responseJSON, err := json.Marshal(response)
