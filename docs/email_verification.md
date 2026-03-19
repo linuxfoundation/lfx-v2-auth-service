@@ -263,4 +263,3 @@ The Mock flow is fully self-contained — no NATS KV or SMTP is involved:
 2. **Verify OTP** (`email_linking.verify`): Compares the submitted code against the in-memory entry. On success, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
 3. **Link identity** (`user_identity.link`): Same `email|` dispatch — the verified email is appended to the user's `alternate_emails` in the in-memory store.
 
-See [Mock Flow Tests](mock_flow_tests.md) for ready-to-run commands including OTP retrieval from logs.

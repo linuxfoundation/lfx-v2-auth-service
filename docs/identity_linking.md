@@ -164,8 +164,7 @@ Both operations use optimistic concurrency on the NATS KV bucket — a `conflict
 
 ### Mock
 
-The Mock implementation follows the same sub-prefix dispatch and storage targets as Authelia, using an in-memory map instead of NATS KV. No external provider call is made. Social identity tokens passed to `user_identity.link` are parsed unverified — a crafted JWT with the correct `sub` claim is sufficient. See [Mock Flow Tests](mock_flow_tests.md) for ready-to-run commands.
-
+The Mock implementation follows the same sub-prefix dispatch and storage targets as Authelia, using an in-memory map instead of NATS KV. No external provider call is made. Social identity tokens passed to `user_identity.link` are parsed unverified — a crafted JWT with the correct `sub` claim is sufficient.
 ---
 
 ## Email Verification Flow

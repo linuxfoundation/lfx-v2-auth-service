@@ -541,8 +541,6 @@ func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	return nil
 }
 
-
-
 // NewUserReaderWriter creates a new Authelia User repository
 func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClient *nats.NATSClient) (port.UserReaderWriter, error) {
 	// Set defaults in case of not set
