@@ -19,6 +19,8 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
+const auth0SubPrefix = "auth0|"
+
 // Config holds the configuration for Auth0 Management API
 type Config struct {
 	Tenant string
@@ -336,8 +338,6 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 
 	return authResponse, nil
 }
-
-const auth0SubPrefix = "auth0|"
 
 func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
 	if request == nil {

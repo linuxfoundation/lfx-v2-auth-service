@@ -19,7 +19,6 @@ const (
 	actionNeededOrchestratorCreation = "orchestrator_creation"
 	actionNeededOrchestratorUpdate   = "orchestrator_update"
 	actionNeededStorageCreation      = "storage_creation"
-	actionNeededStorageUpdate        = "storage_update"
 	actionNeededNone                 = "none"
 )
 

@@ -15,6 +15,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/collections"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
@@ -358,102 +359,186 @@ func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	if request == nil {
 		return errs.NewValidation("request is required")
 	}
-
 	if request.User.UserID == "" {
 		return errs.NewValidation("user ID is required")
 	}
-
 	if request.LinkWith.IdentityToken == "" {
 		return errs.NewValidation("identity token is required")
 	}
 
-	// Parse the identity token to extract the email (from sub claim)
 	opts := &jwt.ParseOptions{
-		RequireExpiration: false, // The token might be expired but we still want the email
+		RequireExpiration: false,
 		AllowBearerPrefix: true,
 		RequireSubject:    true,
 	}
-
 	claims, err := jwt.ParseUnverified(ctx, request.LinkWith.IdentityToken, opts)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to parse identity token",
-			"error", err,
-		)
+		slog.ErrorContext(ctx, "failed to parse identity token", "error", err)
 		return errs.NewValidation("invalid identity token")
 	}
 
-	// Extract email
-	email := claims.Email
+	sub := claims.Subject
+
+	if strings.HasPrefix(sub, "email|") {
+		return a.linkEmailIdentity(ctx, request, claims.Email)
+	}
+	return a.linkSocialIdentity(ctx, request, sub, claims.Email)
+}
+
+func (a *userReaderWriter) linkEmailIdentity(ctx context.Context, request *model.LinkIdentity, email string) error {
 	if email == "" {
 		return errs.NewValidation("identity token does not contain an email")
 	}
 
-	slog.DebugContext(ctx, "linking identity",
+	slog.DebugContext(ctx, "linking email identity",
 		"user_id", redaction.Redact(request.User.UserID),
 		"email", redaction.RedactEmail(email),
 	)
 
-	// Converting the sub to use the lookup key
-	user := &model.User{
-		Sub: request.User.UserID,
-	}
+	user := &model.User{Sub: request.User.UserID}
 	key := a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
 
-	// Get the user with revision for optimistic locking
 	existingUser, revision, err := a.storage.GetUserWithRevision(ctx, key)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to get user for linking identity",
+		slog.ErrorContext(ctx, "failed to get user for linking email identity",
 			"user_id", redaction.Redact(request.User.UserID),
 			"error", err,
 		)
 		return err
 	}
 
-	// Check if the email already exists in the alternate email list
-	emailExists := false
 	for _, altEmail := range existingUser.AlternateEmails {
 		if strings.EqualFold(altEmail.Email, email) {
-			emailExists = true
 			slog.InfoContext(ctx, "email already exists in alternate email list",
 				"user_id", redaction.Redact(request.User.UserID),
 				"email", redaction.RedactEmail(email),
 			)
-			break
+			return nil
 		}
 	}
 
-	// If email doesn't exist, add it to the list
-	if !emailExists {
-		if existingUser.AlternateEmails == nil {
-			existingUser.AlternateEmails = []model.Email{}
-		}
-		existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
-			Email:    email,
-			Verified: true, // The email is verified because it came from a verified identity token
-		})
+	existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
+		Email:    email,
+		Verified: true,
+	})
 
-		// Update the user with optimistic locking
-		err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to update user with alternate email",
-				"user_id", redaction.Redact(request.User.UserID),
-				"error", err,
-			)
-			return err
-		}
-
-		slog.InfoContext(ctx, "successfully linked alternate email to user",
+	err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to update user with alternate email",
 			"user_id", redaction.Redact(request.User.UserID),
-			"email", redaction.RedactEmail(email),
+			"error", err,
 		)
+		return err
 	}
 
+	slog.InfoContext(ctx, "successfully linked email identity",
+		"user_id", redaction.Redact(request.User.UserID),
+		"email", redaction.RedactEmail(email),
+	)
+	return nil
+}
+
+func (a *userReaderWriter) linkSocialIdentity(ctx context.Context, request *model.LinkIdentity, sub, email string) error {
+	parts := strings.SplitN(sub, "|", 2)
+	if len(parts) != 2 {
+		return errs.NewValidation("invalid social identity sub format")
+	}
+	provider, identityID := parts[0], parts[1]
+
+	user := &model.User{Sub: request.User.UserID}
+	key := a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
+
+	existingUser, revision, err := a.storage.GetUserWithRevision(ctx, key)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to get user for linking social identity",
+			"user_id", redaction.Redact(request.User.UserID),
+			"error", err,
+		)
+		return err
+	}
+
+	for _, id := range existingUser.Identities {
+		if id.Provider == provider && id.IdentityID == identityID {
+			slog.InfoContext(ctx, "social identity already linked",
+				"user_id", redaction.Redact(request.User.UserID),
+				"provider", provider,
+			)
+			return nil
+		}
+	}
+
+	existingUser.Identities = append(existingUser.Identities, model.Identity{
+		Provider:   provider,
+		IdentityID: identityID,
+		Email:      email,
+		IsSocial:   true,
+	})
+
+	err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to update user with social identity",
+			"user_id", redaction.Redact(request.User.UserID),
+			"error", err,
+		)
+		return err
+	}
+
+	slog.InfoContext(ctx, "successfully linked social identity",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", provider,
+	)
 	return nil
 }
 
 func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
-	slog.DebugContext(ctx, "authelia: unlink identity - not implemented")
-	return errs.NewServiceUnavailable("unlink identity is not implemented for authelia")
+	if request == nil {
+		return errs.NewValidation("request is required")
+	}
+	if request.User.UserID == "" {
+		return errs.NewValidation("user ID is required")
+	}
+	if request.Unlink.Provider == "" || request.Unlink.IdentityID == "" {
+		return errs.NewValidation("provider and identity_id are required")
+	}
+
+	user := &model.User{Sub: request.User.UserID}
+	key := a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
+
+	existingUser, revision, err := a.storage.GetUserWithRevision(ctx, key)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to get user for unlinking identity",
+			"user_id", redaction.Redact(request.User.UserID),
+			"error", err,
+		)
+		return err
+	}
+
+	switch request.Unlink.Provider {
+	case "email":
+		existingUser.AlternateEmails = collections.RemoveFromSlice(existingUser.AlternateEmails, func(e model.Email) bool {
+			return strings.EqualFold(e.Email, request.Unlink.IdentityID)
+		})
+	default:
+		existingUser.Identities = collections.RemoveFromSlice(existingUser.Identities, func(id model.Identity) bool {
+			return id.Provider == request.Unlink.Provider && id.IdentityID == request.Unlink.IdentityID
+		})
+	}
+
+	err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to update user after unlinking identity",
+			"user_id", redaction.Redact(request.User.UserID),
+			"provider", request.Unlink.Provider,
+			"error", err,
+		)
+		return err
+	}
+
+	slog.InfoContext(ctx, "successfully unlinked identity",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", request.Unlink.Provider,
+	)
+	return nil
 }
 
 // NewUserReaderWriter creates a new Authelia User repository
