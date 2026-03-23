@@ -23,6 +23,7 @@ type User struct {
 	Username        string        `json:"username" yaml:"username"`
 	PrimaryEmail    string        `json:"primary_email" yaml:"primary_email"`
 	AlternateEmails []Email       `json:"alternate_emails,omitempty" yaml:"alternate_emails,omitempty"`
+	Identities      []Identity    `json:"identities,omitempty" yaml:"identities,omitempty"`
 	UserMetadata    *UserMetadata `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
 }
 

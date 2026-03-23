@@ -14,6 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
@@ -155,7 +156,7 @@ func TestUserReaderWriter_UpdateUser_JWTValidation(t *testing.T) {
 	}
 
 	// Test JWT verification directly (this should work)
-	claims, err := verify.JWTVerify(ctx, user.Token, userUpdateRequiredScope)
+	claims, err := verify.JWTVerify(ctx, user.Token, constants.UserUpdateMetadataRequiredScope)
 	if err != nil {
 		t.Errorf("jwtVerify() should not return error, got %v", err)
 		return

@@ -14,6 +14,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/collections"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/password"
@@ -319,8 +320,8 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
 
-	// Generate an identity token for the verified email
-	idToken, err := jwt.GenerateSimpleTestIdentityToken(email.Email, 1*time.Hour)
+	// Generate an identity token for the verified email using email| sub prefix
+	idToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(email.Email, fmt.Sprintf("email|%s", normalizedEmail), 1*time.Hour)
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to generate identity token", err)
 	}
@@ -335,6 +336,11 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 		TokenType: "Bearer",
 		ExpiresIn: 3600, // 1 hour
 	}, nil
+}
+
+func (u *userWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
+	slog.DebugContext(ctx, "no validations for mock request")
+	return nil
 }
 
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
@@ -352,42 +358,36 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 		return errors.NewValidation("identity_token is required")
 	}
 
-	// Extract email from the identity token
-	email, err := jwt.ExtractEmail(ctx, request.LinkWith.IdentityToken)
+	sub, err := jwt.ExtractSubject(ctx, request.LinkWith.IdentityToken)
 	if err != nil {
-		return errors.NewValidation("failed to extract email from identity token")
+		return errors.NewValidation("failed to extract subject from identity token")
 	}
 
-	if email == "" {
-		return errors.NewValidation("identity token does not contain email claim")
+	if strings.HasPrefix(sub, "email|") {
+		email := strings.TrimPrefix(sub, "email|")
+		return u.linkEmailIdentity(ctx, request, email)
 	}
+	return u.linkSocialIdentity(ctx, request, sub, request.LinkWith.IdentityToken)
+}
 
+func (u *userWriter) linkEmailIdentity(ctx context.Context, request *model.LinkIdentity, email string) error {
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
 
-	slog.InfoContext(ctx, "mock: linking email to user",
-		"user_id", redaction.Redact(request.User.UserID),
-		"email", redaction.Redact(email),
-	)
-
-	// Find the user by user_id
 	user, exists := u.users[request.User.UserID]
 	if !exists {
 		return errors.NewNotFound("user not found")
 	}
 
-	// Check if email is already the primary email
 	if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
 		return errors.NewValidation("email is already the primary email")
 	}
 
-	// Check if email is already in alternate emails
 	for _, altEmail := range user.AlternateEmails {
 		if strings.ToLower(altEmail.Email) == normalizedEmail {
 			return errors.NewValidation("email is already linked as alternate email")
 		}
 	}
 
-	// Check if this email is linked to any other user
 	for _, otherUser := range u.users {
 		if otherUser.UserID == user.UserID {
 			continue
@@ -402,17 +402,88 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 		}
 	}
 
-	// Add email to alternate emails
 	user.AlternateEmails = append(user.AlternateEmails, model.Email{
 		Email:    email,
 		Verified: true,
 	})
 
-	slog.InfoContext(ctx, "mock: identity linked successfully",
+	slog.InfoContext(ctx, "mock: email identity linked successfully",
 		"user_id", redaction.Redact(request.User.UserID),
 		"email", redaction.Redact(email),
-		"total_alternate_emails", len(user.AlternateEmails),
 	)
+
+	return nil
+}
+
+func (u *userWriter) linkSocialIdentity(ctx context.Context, request *model.LinkIdentity, sub, identityToken string) error {
+	parts := strings.SplitN(sub, "|", 2)
+	if len(parts) != 2 {
+		return errors.NewValidation("invalid identity token subject format")
+	}
+	provider, identityID := parts[0], parts[1]
+
+	email, _ := jwt.ExtractEmail(ctx, identityToken)
+
+	user, exists := u.users[request.User.UserID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	for _, id := range user.Identities {
+		if id.Provider == provider && id.IdentityID == identityID {
+			return errors.NewValidation("identity is already linked")
+		}
+	}
+
+	user.Identities = append(user.Identities, model.Identity{
+		Provider:   provider,
+		IdentityID: identityID,
+		Email:      email,
+		IsSocial:   true,
+	})
+
+	slog.InfoContext(ctx, "mock: social identity linked successfully",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", provider,
+	)
+
+	return nil
+}
+
+func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	slog.DebugContext(ctx, "mock: unlinking identity")
+
+	if request == nil {
+		return errors.NewValidation("unlink identity request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	user, exists := u.users[request.User.UserID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	switch request.Unlink.Provider {
+	case "email":
+		user.AlternateEmails = collections.RemoveFromSlice(user.AlternateEmails, func(e model.Email) bool {
+			return strings.EqualFold(e.Email, request.Unlink.IdentityID)
+		})
+		slog.InfoContext(ctx, "mock: email identity unlinked",
+			"user_id", redaction.Redact(request.User.UserID),
+			"email", redaction.Redact(request.Unlink.IdentityID),
+		)
+	default:
+		user.Identities = collections.RemoveFromSlice(user.Identities, func(id model.Identity) bool {
+			return id.Provider == request.Unlink.Provider && id.IdentityID == request.Unlink.IdentityID
+		})
+		slog.InfoContext(ctx, "mock: social identity unlinked",
+			"user_id", redaction.Redact(request.User.UserID),
+			"provider", request.Unlink.Provider,
+		)
+	}
 
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // Caller defines the behavior of a request caller
@@ -93,7 +94,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	slog.DebugContext(ctx, "calling API",
 		"method", a.Method,
 		"url", a.URL,
-		"request_body", string(requestBody))
+		"request_body", redaction.RedactJWTs(string(requestBody)))
 
 	// Prepare headers (normalize Authorization token)
 	authHeader := strings.TrimSpace(a.Token)

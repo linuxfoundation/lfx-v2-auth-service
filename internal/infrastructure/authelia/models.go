@@ -45,6 +45,7 @@ type AutheliaUserStorage struct {
 	DisplayName    string              `json:"displayname"`               // display name for Authelia
 	UserMetadata   *model.UserMetadata `json:"user_metadata,omitempty"`   // user metadata from domain model
 	AlternateEmail []model.Email       `json:"alternate_email,omitempty"` // alternate email for Authelia
+	Identities     []model.Identity    `json:"identities,omitempty"`      // linked social identities
 	CreatedAt      time.Time           `json:"created_at"`                // creation timestamp
 	UpdatedAt      time.Time           `json:"updated_at"`                // update timestamp
 }
@@ -63,12 +64,14 @@ func (a *AutheliaUser) ToStorage() *AutheliaUserStorage {
 		username       string
 		userMetadata   *model.UserMetadata
 		alternateEmail []model.Email
+		identities     []model.Identity
 	)
 
 	if a.User != nil {
 		username = a.Username
 		userMetadata = a.UserMetadata
 		alternateEmail = a.AlternateEmails
+		identities = a.Identities
 	}
 
 	return &AutheliaUserStorage{
@@ -78,6 +81,7 @@ func (a *AutheliaUser) ToStorage() *AutheliaUserStorage {
 		DisplayName:    a.DisplayName,
 		UserMetadata:   userMetadata,
 		AlternateEmail: alternateEmail,
+		Identities:     identities,
 		CreatedAt:      a.CreatedAt,
 		UpdatedAt:      a.UpdatedAt,
 	}
@@ -92,6 +96,7 @@ func (a *AutheliaUser) FromStorage(storage *AutheliaUserStorage) {
 	a.UserMetadata = storage.UserMetadata
 	a.PrimaryEmail = storage.Email
 	a.AlternateEmails = storage.AlternateEmail
+	a.Identities = storage.Identities
 	// for consistency in naming across implementations,
 	// we use the unique identifier as the user_id
 	a.UserID = storage.Sub

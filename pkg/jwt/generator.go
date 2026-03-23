@@ -115,18 +115,6 @@ func IdentityTokenOptions(email string, signingKey *rsa.PrivateKey) *GeneratorOp
 	}
 }
 
-// HMACAccessTokenOptions creates options for generating an HMAC-signed access token (useful for testing)
-func HMACAccessTokenOptions(subject string, secret []byte) *GeneratorOptions {
-	return &GeneratorOptions{
-		TokenType:     TokenTypeAccess,
-		Subject:       subject,
-		ExpiresIn:     time.Hour,
-		IssuedAt:      time.Now(),
-		SigningMethod: jwa.HS256,
-		SigningKey:    secret,
-	}
-}
-
 // HMACIdentityTokenOptions creates options for generating an HMAC-signed identity token (useful for testing)
 func HMACIdentityTokenOptions(email string, secret []byte) *GeneratorOptions {
 	return &GeneratorOptions{
