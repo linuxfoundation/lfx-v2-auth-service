@@ -5,6 +5,7 @@ package auth0
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
@@ -90,11 +91,25 @@ func (u *Auth0User) ToUser() *model.User {
 		alternateEmails = append(alternateEmails, alternateEmail)
 	}
 
+	var identities []model.Identity
+	for _, auth0Id := range u.Identities {
+		identity := model.Identity{
+			Provider:   auth0Id.Provider,
+			IdentityID: fmt.Sprintf("%v", auth0Id.UserID),
+			IsSocial:   auth0Id.IsSocial,
+		}
+		if auth0Id.ProfileData != nil {
+			identity.Email = auth0Id.ProfileData.Email
+		}
+		identities = append(identities, identity)
+	}
+
 	return &model.User{
 		UserID:          u.UserID,
 		Username:        u.Username,
 		PrimaryEmail:    u.Email,
 		AlternateEmails: alternateEmails,
+		Identities:      identities,
 		UserMetadata:    meta,
 	}
 }
