@@ -37,6 +37,8 @@ type Auth0Identity struct {
 type Auth0ProfileData struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
+	Nickname      string `json:"nickname"`
+	Name          string `json:"name"`
 }
 
 // Auth0UserMetadata represents the metadata of a user in Auth0.
@@ -101,6 +103,8 @@ func (u *Auth0User) ToUser() *model.User {
 		if auth0Id.ProfileData != nil {
 			identity.Email = auth0Id.ProfileData.Email
 			identity.EmailVerified = auth0Id.ProfileData.EmailVerified
+			identity.Nickname = auth0Id.ProfileData.Nickname
+			identity.Name = auth0Id.ProfileData.Name
 		}
 		identities = append(identities, identity)
 	}

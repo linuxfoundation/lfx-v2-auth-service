@@ -113,6 +113,8 @@ func TestAuth0User_ToUser(t *testing.T) {
 						ProfileData: &Auth0ProfileData{
 							Email:         "user@github.com",
 							EmailVerified: false,
+							Nickname:      "octocat",
+							Name:          "Octo Cat",
 						},
 					},
 					{
@@ -133,10 +135,38 @@ func TestAuth0User_ToUser(t *testing.T) {
 				assert.Equal(t, "github", user.Identities[1].Provider)
 				assert.Equal(t, "gh-222", user.Identities[1].IdentityID)
 				assert.False(t, user.Identities[1].EmailVerified)
+				assert.Equal(t, "octocat", user.Identities[1].Nickname)
+				assert.Equal(t, "Octo Cat", user.Identities[1].Name)
 
 				assert.Equal(t, "auth0", user.Identities[2].Provider)
 				assert.Equal(t, "auth0-333", user.Identities[2].IdentityID)
 				assert.Empty(t, user.Identities[2].Email)
+			},
+		},
+		{
+			name: "identity with nickname but no email",
+			auth0User: Auth0User{
+				UserID: "auth0|abc123",
+				Identities: []Auth0Identity{
+					{
+						Provider: "github",
+						UserID:   "gh-999",
+						IsSocial: true,
+						ProfileData: &Auth0ProfileData{
+							Nickname: "devuser",
+							Name:     "Dev User",
+						},
+					},
+				},
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.Len(t, user.Identities, 1)
+				id := user.Identities[0]
+				assert.Equal(t, "github", id.Provider)
+				assert.Equal(t, "gh-999", id.IdentityID)
+				assert.Empty(t, id.Email)
+				assert.Equal(t, "devuser", id.Nickname)
+				assert.Equal(t, "Dev User", id.Name)
 			},
 		},
 		{

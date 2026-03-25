@@ -244,6 +244,8 @@ type identityResponse struct {
 type identityProfileData struct {
 	Email         string `json:"email,omitempty"`
 	EmailVerified bool   `json:"email_verified,omitempty"`
+	Nickname      string `json:"nickname,omitempty"`
+	Name          string `json:"name,omitempty"`
 }
 
 // ListIdentities retrieves the user's linked identities
@@ -290,10 +292,12 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 			UserID:   id.IdentityID,
 			IsSocial: id.IsSocial,
 		}
-		if id.Email != "" {
+		if id.Email != "" || id.Nickname != "" || id.Name != "" {
 			resp.ProfileData = &identityProfileData{
 				Email:         id.Email,
 				EmailVerified: id.EmailVerified,
+				Nickname:      id.Nickname,
+				Name:          id.Name,
 			}
 		}
 		identities = append(identities, resp)

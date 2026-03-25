@@ -9,6 +9,8 @@ type Identity struct {
 	IdentityID    string `json:"identity_id"`              // provider-specific user ID (part after "|" in Auth0)
 	Email         string `json:"email,omitempty"`          // email from the provider's profileData, if available
 	EmailVerified bool   `json:"email_verified,omitempty"` // email verification status from the provider's profileData
+	Nickname      string `json:"nickname,omitempty"`       // username/handle from the provider's profileData (e.g. GitHub username)
+	Name          string `json:"name,omitempty"`           // display name from the provider's profileData
 	IsSocial      bool   `json:"is_social"`
 }
 
