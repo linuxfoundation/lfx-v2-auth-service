@@ -1500,7 +1500,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 						UserID: "auth0|123",
 						Identities: []model.Identity{
 							{Provider: "google-oauth2", IdentityID: "google123", Email: "user@gmail.com", IsSocial: true},
-							{Provider: "github", IdentityID: "gh456", IsSocial: true},
+							{Provider: "github", IdentityID: "gh456", Nickname: "octocat", IsSocial: true},
 						},
 					}, nil
 				},
@@ -1529,8 +1529,8 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 				if response.Data[0].ProfileData == nil || response.Data[0].ProfileData.Email != "user@gmail.com" {
 					t.Error("expected profileData with email")
 				}
-				if response.Data[1].ProfileData != nil {
-					t.Error("expected nil profileData for identity without email")
+				if response.Data[1].ProfileData == nil || response.Data[1].ProfileData.Nickname != "octocat" {
+					t.Error("expected profileData with nickname for GitHub identity")
 				}
 			},
 		},
