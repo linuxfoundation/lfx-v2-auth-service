@@ -1476,3 +1476,166 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		messageData        []byte
+		mockReader         *mockUserServiceReader
+		expectSuccess      bool
+		expectError        string
+		validateIdentities func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "successful list with identities",
+			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123", Token: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{
+						UserID: "auth0|123",
+						Identities: []model.Identity{
+							{Provider: "google-oauth2", IdentityID: "google123", Email: "user@gmail.com", IsSocial: true},
+							{Provider: "github", IdentityID: "gh456", IsSocial: true},
+						},
+					}, nil
+				},
+			},
+			expectSuccess: true,
+			validateIdentities: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool               `json:"success"`
+					Data    []identityResponse `json:"data"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if len(response.Data) != 2 {
+					t.Fatalf("expected 2 identities, got %d", len(response.Data))
+				}
+				if response.Data[0].Provider != "google-oauth2" {
+					t.Errorf("expected provider google-oauth2, got %s", response.Data[0].Provider)
+				}
+				if response.Data[0].UserID != "google123" {
+					t.Errorf("expected user_id google123, got %s", response.Data[0].UserID)
+				}
+				if !response.Data[0].IsSocial {
+					t.Error("expected isSocial true")
+				}
+				if response.Data[0].ProfileData == nil || response.Data[0].ProfileData.Email != "user@gmail.com" {
+					t.Error("expected profileData with email")
+				}
+				if response.Data[1].ProfileData != nil {
+					t.Error("expected nil profileData for identity without email")
+				}
+			},
+		},
+		{
+			name:        "successful list with no identities",
+			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123", Token: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{UserID: "auth0|123", Identities: nil}, nil
+				},
+			},
+			expectSuccess: true,
+			validateIdentities: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool               `json:"success"`
+					Data    []identityResponse `json:"data"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if len(response.Data) != 0 {
+					t.Errorf("expected 0 identities, got %d", len(response.Data))
+				}
+			},
+		},
+		{
+			name:          "missing auth_token",
+			messageData:   []byte(`{"user":{"auth_token":""}}`),
+			mockReader:    &mockUserServiceReader{},
+			expectSuccess: false,
+			expectError:   "auth_token is required",
+		},
+		{
+			name:          "invalid json payload",
+			messageData:   []byte(`not-json`),
+			mockReader:    &mockUserServiceReader{},
+			expectSuccess: false,
+			expectError:   "failed to unmarshal request",
+		},
+		{
+			name:          "reader unavailable",
+			messageData:   []byte(`{"user":{"auth_token":"token"}}`),
+			mockReader:    nil, // handler created without WithUserReaderForMessageHandler
+			expectSuccess: false,
+			expectError:   "auth service unavailable",
+		},
+		{
+			name:        "metadata lookup failure",
+			messageData: []byte(`{"user":{"auth_token":"bad-token"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return nil, errors.NewValidation("invalid token")
+				},
+			},
+			expectSuccess: false,
+			expectError:   "invalid token",
+		},
+		{
+			name:        "get user failure",
+			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123", Token: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return nil, errors.NewNotFound("user not found")
+				},
+			},
+			expectSuccess: false,
+			expectError:   "user not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &mockTransportMessenger{data: tt.messageData}
+
+			var opts []messageHandlerOrchestratorOption
+			if tt.mockReader != nil {
+				opts = append(opts, WithUserReaderForMessageHandler(tt.mockReader))
+			}
+			handler := NewMessageHandlerOrchestrator(opts...)
+
+			result, err := handler.ListIdentities(ctx, msg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var response UserDataResponse
+			if err := json.Unmarshal(result, &response); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+
+			if response.Success != tt.expectSuccess {
+				t.Errorf("success = %v, want %v (error: %s)", response.Success, tt.expectSuccess, response.Error)
+			}
+			if tt.expectError != "" && response.Error != tt.expectError {
+				t.Errorf("error = %q, want %q", response.Error, tt.expectError)
+			}
+			if tt.validateIdentities != nil {
+				tt.validateIdentities(t, result)
+			}
+		})
+	}
+}
