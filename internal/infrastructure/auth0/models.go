@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 )
@@ -95,9 +96,19 @@ func (u *Auth0User) ToUser() *model.User {
 
 	var identities []model.Identity
 	for _, auth0Id := range u.Identities {
+		var identityID string
+		switch v := auth0Id.UserID.(type) {
+		case float64:
+			identityID = strconv.FormatFloat(v, 'f', -1, 64)
+		case string:
+			identityID = v
+		default:
+			identityID = fmt.Sprintf("%v", v)
+		}
+
 		identity := model.Identity{
 			Provider:   auth0Id.Provider,
-			IdentityID: fmt.Sprintf("%v", auth0Id.UserID),
+			IdentityID: identityID,
 			IsSocial:   auth0Id.IsSocial,
 		}
 		if auth0Id.ProfileData != nil {

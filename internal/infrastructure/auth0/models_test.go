@@ -82,14 +82,14 @@ func TestAuth0User_ToUser(t *testing.T) {
 				Identities: []Auth0Identity{
 					{
 						Provider: "github",
-						UserID:   float64(12345),
+						UserID:   float64(5818912),
 						IsSocial: true,
 					},
 				},
 			},
 			validate: func(t *testing.T, user *model.User) {
 				require.Len(t, user.Identities, 1)
-				assert.Equal(t, "12345", user.Identities[0].IdentityID)
+				assert.Equal(t, "5818912", user.Identities[0].IdentityID)
 			},
 		},
 		{
