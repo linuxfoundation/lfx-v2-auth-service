@@ -293,7 +293,7 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 		if id.Email != "" {
 			resp.ProfileData = &identityProfileData{
 				Email:         id.Email,
-				EmailVerified: true,
+				EmailVerified: id.EmailVerified,
 			}
 		}
 		identities = append(identities, resp)

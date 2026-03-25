@@ -7,8 +7,9 @@ package model
 type Identity struct {
 	Provider   string `json:"provider"`        // e.g. "google-oauth2", "linkedin", "github"
 	IdentityID string `json:"identity_id"`     // provider-specific user ID (part after "|" in Auth0)
-	Email      string `json:"email,omitempty"` // email from the provider's profileData, if available
-	IsSocial   bool   `json:"is_social"`
+	Email         string `json:"email,omitempty"`          // email from the provider's profileData, if available
+	EmailVerified bool   `json:"email_verified,omitempty"` // email verification status from the provider's profileData
+	IsSocial      bool   `json:"is_social"`
 }
 
 // LinkIdentity represents a request to link a verified email identity to a user account.

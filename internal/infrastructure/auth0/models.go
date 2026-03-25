@@ -100,6 +100,7 @@ func (u *Auth0User) ToUser() *model.User {
 		}
 		if auth0Id.ProfileData != nil {
 			identity.Email = auth0Id.ProfileData.Email
+			identity.EmailVerified = auth0Id.ProfileData.EmailVerified
 		}
 		identities = append(identities, identity)
 	}
