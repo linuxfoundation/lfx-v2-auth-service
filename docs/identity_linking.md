@@ -1,6 +1,6 @@
-# User Identity Linking
+# User Identity Operations
 
-This document describes the NATS subjects for linking and unlinking identities (social providers, email, etc.) to and from user accounts.
+This document describes the NATS subjects for listing, linking, and unlinking identities (social providers, email, etc.) to and from user accounts.
 
 ---
 
@@ -8,6 +8,64 @@ This document describes the NATS subjects for linking and unlinking identities (
 
 - The `user_id` is automatically extracted from the `sub` claim of `user.auth_token` — it does not need to be provided explicitly
 - Both **Auth0** and **Authelia** implementations support link and unlink operations. The behaviour differs per implementation — see the sections below.
+
+---
+
+## List Identities
+
+Retrieves all identities linked to the authenticated user's account.
+
+**Subject:** `lfx.auth-service.user_identity.list`
+**Pattern:** Request/Reply
+
+### Request Payload
+
+```json
+{
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+```
+
+### Reply
+
+**Success Reply:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "provider": "google-oauth2",
+      "user_id": "google123",
+      "isSocial": true,
+      "profileData": {
+        "email": "user@gmail.com",
+        "email_verified": true
+      }
+    },
+    {
+      "provider": "github",
+      "user_id": "gh456",
+      "isSocial": true
+    }
+  ]
+}
+```
+
+**Error Reply:**
+```json
+{
+  "success": false,
+  "error": "auth_token is required"
+}
+```
+
+### Example using NATS CLI
+
+```bash
+nats request lfx.auth-service.user_identity.list '{"user":{"auth_token":"eyJhbG..."}}'
+```
 
 ---
 

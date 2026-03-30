@@ -36,9 +36,10 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		// email linking operations
 		constants.EmailLinkingSendVerificationSubject: mhs.messageHandler.StartEmailLinking,
 		constants.EmailLinkingVerifySubject:           mhs.messageHandler.VerifyEmailLinking,
-		// identity linking/unlinking operations
+		// identity linking/unlinking/listing operations
 		constants.UserIdentityLinkSubject:   mhs.messageHandler.LinkIdentity,
 		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
+		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
 	}
 
 	handler, ok := handlers[subject]

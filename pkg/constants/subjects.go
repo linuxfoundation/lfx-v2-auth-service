@@ -58,4 +58,8 @@ const (
 	// UserIdentityUnlinkSubject is the subject for the user identity unlinking event.
 	// The subject is of the form: lfx.auth-service.user_identity.unlink
 	UserIdentityUnlinkSubject = "lfx.auth-service.user_identity.unlink"
+
+	// UserIdentityListSubject is the subject for listing user identities.
+	// The subject is of the form: lfx.auth-service.user_identity.list
+	UserIdentityListSubject = "lfx.auth-service.user_identity.list"
 )

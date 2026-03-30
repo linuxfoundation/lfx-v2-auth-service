@@ -226,6 +226,96 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 	return responseJSON, nil
 }
 
+// identityListRequest represents the input for listing user identities
+type identityListRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+}
+
+// identityResponse is the response DTO matching the UI's expected format
+type identityResponse struct {
+	Provider    string               `json:"provider"`
+	UserID      string               `json:"user_id"`
+	IsSocial    bool                 `json:"isSocial"`
+	ProfileData *identityProfileData `json:"profileData,omitempty"`
+}
+
+type identityProfileData struct {
+	Email         string `json:"email,omitempty"`
+	EmailVerified bool   `json:"email_verified,omitempty"`
+	Nickname      string `json:"nickname,omitempty"`
+	Name          string `json:"name,omitempty"`
+}
+
+// ListIdentities retrieves the user's linked identities
+func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	var request identityListRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	slog.DebugContext(ctx, "list identities",
+		"input", redaction.Redact(authToken),
+	)
+
+	user, err := m.userReader.MetadataLookup(ctx, authToken)
+	if err != nil {
+		slog.ErrorContext(ctx, "error looking up user for identity list",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	fullUser, err := m.userReader.GetUser(ctx, user)
+	if err != nil {
+		slog.ErrorContext(ctx, "error getting user for identity list",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	identities := make([]identityResponse, 0, len(fullUser.Identities))
+	for _, id := range fullUser.Identities {
+		resp := identityResponse{
+			Provider: id.Provider,
+			UserID:   id.IdentityID,
+			IsSocial: id.IsSocial,
+		}
+		if id.Email != "" || id.Nickname != "" || id.Name != "" {
+			resp.ProfileData = &identityProfileData{
+				Email:         id.Email,
+				EmailVerified: id.EmailVerified,
+				Nickname:      id.Nickname,
+				Name:          id.Name,
+			}
+		}
+		identities = append(identities, resp)
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Data:    identities,
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
 // UpdateUser updates the user in the identity provider
 func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 

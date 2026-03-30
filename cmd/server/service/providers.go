@@ -220,6 +220,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.EmailLinkingVerifySubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
+		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
 		// Add more subjects here as needed
 	}
 

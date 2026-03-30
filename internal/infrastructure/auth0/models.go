@@ -5,7 +5,9 @@ package auth0
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 )
@@ -36,6 +38,8 @@ type Auth0Identity struct {
 type Auth0ProfileData struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
+	Nickname      string `json:"nickname"`
+	Name          string `json:"name"`
 }
 
 // Auth0UserMetadata represents the metadata of a user in Auth0.
@@ -90,11 +94,38 @@ func (u *Auth0User) ToUser() *model.User {
 		alternateEmails = append(alternateEmails, alternateEmail)
 	}
 
+	var identities []model.Identity
+	for _, auth0Id := range u.Identities {
+		var identityID string
+		switch v := auth0Id.UserID.(type) {
+		case float64:
+			identityID = strconv.FormatFloat(v, 'f', -1, 64)
+		case string:
+			identityID = v
+		default:
+			identityID = fmt.Sprintf("%v", v)
+		}
+
+		identity := model.Identity{
+			Provider:   auth0Id.Provider,
+			IdentityID: identityID,
+			IsSocial:   auth0Id.IsSocial,
+		}
+		if auth0Id.ProfileData != nil {
+			identity.Email = auth0Id.ProfileData.Email
+			identity.EmailVerified = auth0Id.ProfileData.EmailVerified
+			identity.Nickname = auth0Id.ProfileData.Nickname
+			identity.Name = auth0Id.ProfileData.Name
+		}
+		identities = append(identities, identity)
+	}
+
 	return &model.User{
 		UserID:          u.UserID,
 		Username:        u.Username,
 		PrimaryEmail:    u.Email,
 		AlternateEmails: alternateEmails,
+		Identities:      identities,
 		UserMetadata:    meta,
 	}
 }
