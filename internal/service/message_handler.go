@@ -481,16 +481,21 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityLinker == nil {
+		slog.ErrorContext(ctx, "auth service unavailable")
 		return m.errorResponse("auth service unavailable"), nil
 	}
 
 	if m.userReader == nil {
+		slog.ErrorContext(ctx, "auth service unavailable")
 		return m.errorResponse("auth service unavailable"), nil
 	}
 
 	linkRequest := &model.LinkIdentity{}
 	err := json.Unmarshal(msg.Data(), linkRequest)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to unmarshal link identity request",
+			"error", err,
+		)
 		responseJSON := m.errorResponse("failed to unmarshal link identity request")
 		return responseJSON, nil
 	}
