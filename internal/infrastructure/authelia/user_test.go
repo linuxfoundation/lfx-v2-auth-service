@@ -9,6 +9,8 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
@@ -75,6 +77,111 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	// Verify new field
 	if result.UserMetadata.City == nil || *result.UserMetadata.City != "New York" {
 		t.Error("UpdateUser() should add new City field")
+	}
+}
+
+// TestUserReaderWriter_GetUser_Identities tests that GetUser correctly returns the identities
+// stored in the backing store without any transformation.
+func TestUserReaderWriter_GetUser_Identities(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		storageUsers       map[string]*AutheliaUser
+		storageErr         error
+		inputUser          *model.User
+		expectError        bool
+		expectedIdentities []model.Identity
+	}{
+		{
+			name: "GetUser_WithLinkedIdentities",
+			storageUsers: map[string]*AutheliaUser{
+				"testuser": {
+					User: &model.User{
+						Username: "testuser",
+						Identities: []model.Identity{
+							{Provider: "google-oauth2", IdentityID: "g123", IsSocial: true, Email: "u@gmail.com", EmailVerified: true},
+						},
+					},
+				},
+			},
+			inputUser: &model.User{Username: "testuser"},
+			expectedIdentities: []model.Identity{
+				{Provider: "google-oauth2", IdentityID: "g123", IsSocial: true, Email: "u@gmail.com", EmailVerified: true},
+			},
+		},
+		{
+			name: "GetUser_WithNoIdentities",
+			storageUsers: map[string]*AutheliaUser{
+				"testuser": {
+					User: &model.User{
+						Username: "testuser",
+					},
+				},
+			},
+			inputUser:          &model.User{Username: "testuser"},
+			expectedIdentities: nil,
+		},
+		{
+			name: "GetUser_WithMultipleIdentities",
+			storageUsers: map[string]*AutheliaUser{
+				"testuser": {
+					User: &model.User{
+						Username: "testuser",
+						Identities: []model.Identity{
+							{Provider: "google-oauth2", IdentityID: "g123", IsSocial: true},
+							{Provider: "github", IdentityID: "gh456", IsSocial: true, Nickname: "octocat"},
+						},
+					},
+				},
+			},
+			inputUser: &model.User{Username: "testuser"},
+			expectedIdentities: []model.Identity{
+				{Provider: "google-oauth2", IdentityID: "g123", IsSocial: true},
+				{Provider: "github", IdentityID: "gh456", IsSocial: true, Nickname: "octocat"},
+			},
+		},
+		{
+			name:         "GetUser_UserNotFound",
+			storageUsers: map[string]*AutheliaUser{},
+			inputUser:    &model.User{Username: "unknown"},
+			expectError:  true,
+		},
+		{
+			name:        "GetUser_NilInput",
+			inputUser:   nil,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rw := &userReaderWriter{
+				storage: &mockStorageReaderWriter{
+					users:      tt.storageUsers,
+					getUserErr: tt.storageErr,
+				},
+			}
+
+			got, err := rw.GetUser(ctx, tt.inputUser)
+
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			require.Len(t, got.Identities, len(tt.expectedIdentities))
+
+			for i, want := range tt.expectedIdentities {
+				assert.Equal(t, want.Provider, got.Identities[i].Provider, "identity[%d].Provider", i)
+				assert.Equal(t, want.IdentityID, got.Identities[i].IdentityID, "identity[%d].IdentityID", i)
+				assert.Equal(t, want.IsSocial, got.Identities[i].IsSocial, "identity[%d].IsSocial", i)
+				assert.Equal(t, want.Email, got.Identities[i].Email, "identity[%d].Email", i)
+				assert.Equal(t, want.Nickname, got.Identities[i].Nickname, "identity[%d].Nickname", i)
+			}
+		})
 	}
 }
 

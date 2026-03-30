@@ -61,6 +61,14 @@ Retrieves all identities linked to the authenticated user's account.
 }
 ```
 
+### Notes by Provider
+
+| Provider | Source of identities |
+|---|---|
+| **Auth0** | Fetched live from the Auth0 Management API on each call |
+| **Authelia** | Read from the NATS KV user bucket; populated when `user_identity.link` is called |
+| **Mock** | Pre-seeded via `users.yaml` or added at runtime via `user_identity.link` |
+
 ### Example using NATS CLI
 
 ```bash
@@ -152,7 +160,7 @@ Removes a secondary identity (e.g. Google, LinkedIn, GitHub) from the user's acc
 
 - `user.auth_token`: A JWT access token with the `update:current_user_identities` scope.
 - `unlink.provider`: The identity provider to unlink (e.g. `google-oauth2`, `linkedin`, `github`).
-- `unlink.identity_id`: The identity's ID as returned by the identity provider. This must be retrieved directly from the identity provider since there is no dedicated subject for listing identities at this time.
+- `unlink.identity_id`: The identity's ID as returned by the identity provider. Use `lfx.auth-service.user_identity.list` to retrieve the `user_id` for each linked identity.
 
 ### Reply
 

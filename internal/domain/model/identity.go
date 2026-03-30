@@ -5,13 +5,13 @@ package model
 
 // Identity represents a linked identity from an external provider.
 type Identity struct {
-	Provider      string `json:"provider"`                 // e.g. "google-oauth2", "linkedin", "github"
-	IdentityID    string `json:"identity_id"`              // provider-specific user ID (part after "|" in Auth0)
-	Email         string `json:"email,omitempty"`          // email from the provider's profileData, if available
-	EmailVerified bool   `json:"email_verified,omitempty"` // email verification status from the provider's profileData
-	Nickname      string `json:"nickname,omitempty"`       // username/handle from the provider's profileData (e.g. GitHub username)
-	Name          string `json:"name,omitempty"`           // display name from the provider's profileData
-	IsSocial      bool   `json:"is_social"`
+	Provider      string `json:"provider"                  yaml:"provider"`                 // e.g. "google-oauth2", "linkedin", "github"
+	IdentityID    string `json:"identity_id"               yaml:"identity_id"`              // provider-specific user ID (part after "|" in Auth0)
+	Email         string `json:"email,omitempty"           yaml:"email,omitempty"`          // email from the provider's profileData, if available
+	EmailVerified bool   `json:"email_verified,omitempty"  yaml:"email_verified,omitempty"` // email verification status from the provider's profileData
+	Nickname      string `json:"nickname,omitempty"        yaml:"nickname,omitempty"`       // username/handle from the provider's profileData (e.g. GitHub username)
+	Name          string `json:"name,omitempty"            yaml:"name,omitempty"`           // display name from the provider's profileData
+	IsSocial      bool   `json:"is_social"                 yaml:"is_social"`
 }
 
 // LinkIdentity represents a request to link a verified email identity to a user account.

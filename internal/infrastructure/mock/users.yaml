@@ -22,6 +22,18 @@ users:
       postal_code: "10001"
       phone_number: "+1-555-123-4567"
       t_shirt_size: "M"
+    identities:
+      - provider: "google-oauth2"
+        identity_id: "google-zephyr-001"
+        email: "zephyr.stormwind@gmail.com"
+        email_verified: true
+        name: "Zephyr Stormwind"
+        is_social: true
+      - provider: "github"
+        identity_id: "gh-zephyr-001"
+        nickname: "zephyr-gh"
+        name: "Zephyr Stormwind"
+        is_social: true
 
   - token: "mock-token-aurora-002"
     user_id: "auth0|aurora002"
