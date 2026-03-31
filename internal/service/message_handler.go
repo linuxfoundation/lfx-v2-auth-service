@@ -140,6 +140,26 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 	return []byte(user.UserID), nil
 }
 
+// UsernameToSub converts a username to a sub
+func (m *messageHandlerOrchestrator) UsernameToSub(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	username := strings.TrimSpace(string(msg.Data()))
+	if username == "" {
+		return m.errorResponse("username is required"), nil
+	}
+
+	user := &model.User{Username: username}
+	user, err := m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+	if err != nil {
+		return m.errorResponse(err.Error()), nil
+	}
+	return []byte(user.UserID), nil
+}
+
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
 		return nil, errs.NewUnexpected("auth service unavailable")

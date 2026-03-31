@@ -20,6 +20,10 @@ const (
 	// UserEmailToSubSubject is the subject for the user email to sub event.
 	// The subject is of the form: lfx.auth-service.email_to_sub
 	UserEmailToSubSubject = "lfx.auth-service.email_to_sub"
+
+	// UserUsernameToSubSubject is the subject for the username to sub event.
+	// The subject is of the form: lfx.auth-service.username_to_sub
+	UserUsernameToSubSubject = "lfx.auth-service.username_to_sub"
 )
 
 const (

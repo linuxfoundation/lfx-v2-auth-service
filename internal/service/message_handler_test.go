@@ -643,6 +643,505 @@ func TestMessageHandlerOrchestrator_EmailToUsername_NoUserReader(t *testing.T) {
 	}
 }
 
+func TestMessageHandlerOrchestrator_EmailToSub(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		messageData    []byte
+		userReader     *mockUserServiceReader
+		expectError    bool
+		expectedResult string
+		validateResult func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "successful email to sub lookup",
+			messageData: []byte("zephyr.stormwind@mythicaltech.io"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					if criteria != constants.CriteriaTypeEmail {
+						t.Errorf("Expected criteria %s, got %s", constants.CriteriaTypeEmail, criteria)
+					}
+					if user.PrimaryEmail != "zephyr.stormwind@mythicaltech.io" {
+						t.Errorf("Expected email zephyr.stormwind@mythicaltech.io, got %s", user.PrimaryEmail)
+					}
+					return &model.User{
+						UserID:       "auth0|zephyr001",
+						Username:     "zephyr.stormwind",
+						PrimaryEmail: "zephyr.stormwind@mythicaltech.io",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "auth0|zephyr001",
+		},
+		{
+			name:        "email with whitespace is trimmed",
+			messageData: []byte("  mauriciozanetti86@gmail.com  "),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					if user.PrimaryEmail != "mauriciozanetti86@gmail.com" {
+						t.Errorf("Expected trimmed email mauriciozanetti86@gmail.com, got %s", user.PrimaryEmail)
+					}
+					return &model.User{
+						UserID:       "auth0|mauricio001",
+						Username:     "mauriciozanetti",
+						PrimaryEmail: "mauriciozanetti86@gmail.com",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "auth0|mauricio001",
+		},
+		{
+			name:        "email is converted to lowercase",
+			messageData: []byte("UPPERCASE@EXAMPLE.COM"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					if user.PrimaryEmail != "uppercase@example.com" {
+						t.Errorf("Expected lowercased email uppercase@example.com, got %s", user.PrimaryEmail)
+					}
+					return &model.User{
+						UserID:       "auth0|upper001",
+						Username:     "uppercase.user",
+						PrimaryEmail: "uppercase@example.com",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "auth0|upper001",
+		},
+		{
+			name:        "empty email returns error",
+			messageData: []byte(""),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					t.Error("SearchUser should not be called for empty email")
+					return nil, errors.NewValidation("should not be called")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for empty email")
+				}
+				if response.Error != "email is required" {
+					t.Errorf("Expected error 'email is required', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "whitespace-only email returns error",
+			messageData: []byte("   \t\n   "),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					t.Error("SearchUser should not be called for whitespace-only email")
+					return nil, errors.NewValidation("should not be called")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for whitespace-only email")
+				}
+				if response.Error != "email is required" {
+					t.Errorf("Expected error 'email is required', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "user not found error",
+			messageData: []byte("notfound@example.com"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return nil, errors.NewNotFound("user not found")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for user not found")
+				}
+				if response.Error != "user not found" {
+					t.Errorf("Expected error 'user not found', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "search service error",
+			messageData: []byte("service.error@example.com"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return nil, errors.NewUnexpected("database connection failed", nil)
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for service error")
+				}
+				if response.Error != "database connection failed" {
+					t.Errorf("Expected error 'database connection failed', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "user with empty sub",
+			messageData: []byte("empty.sub@example.com"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return &model.User{
+						UserID:       "",
+						Username:     "empty.sub.user",
+						PrimaryEmail: "empty.sub@example.com",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "", // Empty string is a valid response
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockMsg := &mockTransportMessenger{
+				data: tt.messageData,
+			}
+
+			orchestrator := NewMessageHandlerOrchestrator(
+				WithUserReaderForMessageHandler(tt.userReader),
+			)
+
+			result, err := orchestrator.EmailToSub(ctx, mockMsg)
+
+			if err != nil {
+				t.Errorf("EmailToSub() unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Errorf("EmailToSub() returned nil result")
+				return
+			}
+
+			if tt.expectError {
+				if tt.validateResult != nil {
+					tt.validateResult(t, result)
+				}
+			} else {
+				actualResult := string(result)
+				if actualResult != tt.expectedResult {
+					t.Errorf("EmailToSub() = %q, want %q", actualResult, tt.expectedResult)
+				}
+			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_EmailToSub_NoUserReader(t *testing.T) {
+	ctx := context.Background()
+
+	orchestrator := NewMessageHandlerOrchestrator()
+
+	mockMsg := &mockTransportMessenger{
+		data: []byte("test@example.com"),
+	}
+
+	result, err := orchestrator.EmailToSub(ctx, mockMsg)
+
+	if err != nil {
+		t.Errorf("EmailToSub() unexpected error: %v", err)
+		return
+	}
+
+	if result == nil {
+		t.Fatal("EmailToSub() returned nil result")
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if response.Success {
+		t.Error("Expected success=false when user reader is nil")
+	}
+
+	if response.Error != "auth service unavailable" {
+		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
+	}
+}
+
+func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		messageData    []byte
+		userReader     *mockUserServiceReader
+		expectError    bool
+		expectedResult string
+		validateResult func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "successful username to sub lookup",
+			messageData: []byte("zephyr.stormwind"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					if criteria != constants.CriteriaTypeUsername {
+						t.Errorf("Expected criteria %s, got %s", constants.CriteriaTypeUsername, criteria)
+					}
+					if user.Username != "zephyr.stormwind" {
+						t.Errorf("Expected username zephyr.stormwind, got %s", user.Username)
+					}
+					return &model.User{
+						UserID:   "auth0|zephyr001",
+						Username: "zephyr.stormwind",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "auth0|zephyr001",
+		},
+		{
+			name:        "username with whitespace is trimmed",
+			messageData: []byte("  mauriciozanetti  "),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					if user.Username != "mauriciozanetti" {
+						t.Errorf("Expected trimmed username mauriciozanetti, got %s", user.Username)
+					}
+					return &model.User{
+						UserID:   "auth0|mauricio001",
+						Username: "mauriciozanetti",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "auth0|mauricio001",
+		},
+		{
+			name:        "empty username returns error",
+			messageData: []byte(""),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					t.Error("SearchUser should not be called for empty username")
+					return nil, errors.NewValidation("should not be called")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for empty username")
+				}
+				if response.Error != "username is required" {
+					t.Errorf("Expected error 'username is required', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "whitespace-only username returns error",
+			messageData: []byte("   "),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					t.Error("SearchUser should not be called for whitespace-only username")
+					return nil, errors.NewValidation("should not be called")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for whitespace-only username")
+				}
+				if response.Error != "username is required" {
+					t.Errorf("Expected error 'username is required', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "user not found error",
+			messageData: []byte("nonexistent.user"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return nil, errors.NewNotFound("user not found")
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for user not found")
+				}
+				if response.Error != "user not found" {
+					t.Errorf("Expected error 'user not found', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "search service error",
+			messageData: []byte("service.error.user"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return nil, errors.NewUnexpected("database connection failed", nil)
+				},
+			},
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for service error")
+				}
+				if response.Error != "database connection failed" {
+					t.Errorf("Expected error 'database connection failed', got %s", response.Error)
+				}
+			},
+		},
+		{
+			name:        "user with empty sub",
+			messageData: []byte("empty.sub.user"),
+			userReader: &mockUserServiceReader{
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return &model.User{
+						UserID:   "",
+						Username: "empty.sub.user",
+					}, nil
+				},
+			},
+			expectError:    false,
+			expectedResult: "", // Empty string is a valid response
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockMsg := &mockTransportMessenger{
+				data: tt.messageData,
+			}
+
+			orchestrator := NewMessageHandlerOrchestrator(
+				WithUserReaderForMessageHandler(tt.userReader),
+			)
+
+			result, err := orchestrator.UsernameToSub(ctx, mockMsg)
+
+			if err != nil {
+				t.Errorf("UsernameToSub() unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Errorf("UsernameToSub() returned nil result")
+				return
+			}
+
+			if tt.expectError {
+				if tt.validateResult != nil {
+					tt.validateResult(t, result)
+				}
+			} else {
+				actualResult := string(result)
+				if actualResult != tt.expectedResult {
+					t.Errorf("UsernameToSub() = %q, want %q", actualResult, tt.expectedResult)
+				}
+			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_UsernameToSub_NoUserReader(t *testing.T) {
+	ctx := context.Background()
+
+	orchestrator := NewMessageHandlerOrchestrator()
+
+	mockMsg := &mockTransportMessenger{
+		data: []byte("someuser"),
+	}
+
+	result, err := orchestrator.UsernameToSub(ctx, mockMsg)
+
+	if err != nil {
+		t.Errorf("UsernameToSub() unexpected error: %v", err)
+		return
+	}
+
+	if result == nil {
+		t.Fatal("UsernameToSub() returned nil result")
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if response.Success {
+		t.Error("Expected success=false when user reader is nil")
+	}
+
+	if response.Error != "auth service unavailable" {
+		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
+	}
+}
+
 func TestNewMessageHandlerOrchestrator(t *testing.T) {
 	t.Run("create orchestrator with options", func(t *testing.T) {
 		mockWriter := &mockUserServiceWriter{}
