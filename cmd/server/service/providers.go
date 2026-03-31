@@ -214,6 +214,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserMetadataUpdateSubject:           messageHandlerService.HandleMessage,
 		constants.UserEmailToUserSubject:              messageHandlerService.HandleMessage,
 		constants.UserEmailToSubSubject:               messageHandlerService.HandleMessage,
+		constants.UserUsernameToSubSubject:            messageHandlerService.HandleMessage,
 		constants.UserMetadataReadSubject:             messageHandlerService.HandleMessage,
 		constants.UserEmailReadSubject:                messageHandlerService.HandleMessage,
 		constants.EmailLinkingSendVerificationSubject: messageHandlerService.HandleMessage,

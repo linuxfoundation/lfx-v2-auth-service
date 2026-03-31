@@ -31,8 +31,9 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
 		constants.UserEmailReadSubject:      mhs.messageHandler.GetUserEmails,
 		// lookup operations
-		constants.UserEmailToUserSubject: mhs.messageHandler.EmailToUsername,
-		constants.UserEmailToSubSubject:  mhs.messageHandler.EmailToSub,
+		constants.UserEmailToUserSubject:   mhs.messageHandler.EmailToUsername,
+		constants.UserEmailToSubSubject:    mhs.messageHandler.EmailToSub,
+		constants.UserUsernameToSubSubject: mhs.messageHandler.UsernameToSub,
 		// email linking operations
 		constants.EmailLinkingSendVerificationSubject: mhs.messageHandler.StartEmailLinking,
 		constants.EmailLinkingVerifySubject:           mhs.messageHandler.VerifyEmailLinking,

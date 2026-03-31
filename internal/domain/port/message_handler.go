@@ -29,6 +29,7 @@ type UserReaderHandler interface {
 type UserLookupHandler interface {
 	EmailToUsername(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	EmailToSub(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	UsernameToSub(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // UserWriteHandler defines the behavior of the user write domain handlers
