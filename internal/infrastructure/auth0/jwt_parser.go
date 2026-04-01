@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	jwtparser "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
@@ -122,6 +124,9 @@ func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *ht
 
 			expectedIssuer := fmt.Sprintf("https://%s/", domain)
 			expectedAudience := fmt.Sprintf("https://%s/api/v2/", domain)
+			if override := os.Getenv(constants.Auth0ManagementAudienceEnvKey); override != "" {
+				expectedAudience = override
+			}
 
 			slog.InfoContext(ctx, "JWT signature verification enabled",
 				"issuer", expectedIssuer,

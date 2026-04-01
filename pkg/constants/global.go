@@ -57,6 +57,9 @@ const (
 	// Auth0AudienceEnvKey is the environment variable key for the Auth0 audience
 	Auth0AudienceEnvKey = "AUTH0_AUDIENCE"
 
+	// Auth0ManagementAudienceEnvKey is the environment variable key for the Auth0 Management API audience override
+	Auth0ManagementAudienceEnvKey = "AUTH0_MANAGEMENT_AUDIENCE"
+
 	// Auth0 LFX Profile Client configuration (Regular Web Application for passwordless flows)
 	// Auth0LFXProfileClientIDEnvKey is the environment variable key for the LFX Profile Auth0 client ID
 	Auth0LFXProfileClientIDEnvKey = "AUTH0_LFX_PROFILE_CLIENT_ID"

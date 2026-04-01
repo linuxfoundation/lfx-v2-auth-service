@@ -138,6 +138,8 @@ app:
       value: null
     AUTH0_AUDIENCE:
       value: null
+    AUTH0_MANAGEMENT_AUDIENCE:
+      value: null
     # Auth0 LFX Profile Client configuration (Regular Web Application for passwordless flows)
     ## Required when using passwordless email linking flow
     AUTH0_LFX_PROFILE_CLIENT_ID:
