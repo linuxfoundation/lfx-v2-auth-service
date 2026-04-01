@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -124,7 +125,7 @@ func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *ht
 
 			expectedIssuer := fmt.Sprintf("https://%s/", domain)
 			expectedAudience := fmt.Sprintf("https://%s/api/v2/", domain)
-			if override := os.Getenv(constants.Auth0ManagementAudienceEnvKey); override != "" {
+			if override := strings.TrimSpace(os.Getenv(constants.Auth0ManagementAudienceEnvKey)); override != "" {
 				expectedAudience = override
 			}
 
