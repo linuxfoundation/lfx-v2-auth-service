@@ -112,6 +112,14 @@ Link verified identities (such as verified email addresses) to user accounts.
 
 ---
 
+#### Indexer Contract
+
+Documents what data this service sends to the indexer service (currently none).
+
+**[View Indexer Contract](docs/indexer-contract.md)**
+
+---
+
 ### Configuration
 
 ##### NATS Configuration
