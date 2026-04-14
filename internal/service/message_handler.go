@@ -32,43 +32,51 @@ type messageHandlerOrchestrator struct {
 	emailHandler     port.EmailHandler
 	identityLinker   port.IdentityLinker
 	identityUnlinker port.IdentityLinker
+	impersonator     port.Impersonator
 }
 
-// messageHandlerOrchestratorOption defines a function type for setting options
-type messageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
+// MessageHandlerOrchestratorOption defines a function type for setting options
+type MessageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
 
 // WithUserWriterForMessageHandler sets the user writer for the message handler orchestrator
-func WithUserWriterForMessageHandler(userWriter port.UserWriter) messageHandlerOrchestratorOption {
+func WithUserWriterForMessageHandler(userWriter port.UserWriter) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userWriter = userWriter
 	}
 }
 
 // WithUserReaderForMessageHandler sets the user reader for the message handler orchestrator
-func WithUserReaderForMessageHandler(userReader port.UserReader) messageHandlerOrchestratorOption {
+func WithUserReaderForMessageHandler(userReader port.UserReader) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userReader = userReader
 	}
 }
 
 // WithEmailHandlerForMessageHandler sets the email handler for the message handler orchestrator
-func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) messageHandlerOrchestratorOption {
+func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.emailHandler = emailHandler
 	}
 }
 
 // WithIdentityLinkerForMessageHandler sets the identity linker for the message handler orchestrator
-func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) messageHandlerOrchestratorOption {
+func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityLinker = identityLinker
 	}
 }
 
 // WithIdentityUnlinkerForMessageHandler sets the identity unlinker for the message handler orchestrator
-func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) messageHandlerOrchestratorOption {
+func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityUnlinker = identityUnlinker
+	}
+}
+
+// WithImpersonatorForMessageHandler sets the impersonator for the message handler orchestrator
+func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.impersonator = impersonator
 	}
 }
 
@@ -592,8 +600,61 @@ func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg por
 	return responseJSON, nil
 }
 
+// impersonationRequest is the JSON payload expected on the NATS subject.
+type impersonationRequest struct {
+	SubjectToken string `json:"subject_token"`
+	TargetUser   string `json:"target_user"`
+}
+
+// ImpersonateUser handles an impersonation token exchange request over NATS.
+// Request: JSON {"subject_token": "...", "target_user": "email_or_username"}
+// Response: UserDataResponse with Data.AccessToken on success, or Error on failure.
+func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.impersonator == nil {
+		return m.errorResponse("impersonation service unavailable"), nil
+	}
+
+	var req impersonationRequest
+	if err := json.Unmarshal(msg.Data(), &req); err != nil {
+		return m.errorResponse("invalid request: " + err.Error()), nil
+	}
+
+	req.SubjectToken = strings.TrimSpace(req.SubjectToken)
+	req.TargetUser = strings.TrimSpace(req.TargetUser)
+
+	if req.SubjectToken == "" {
+		return m.errorResponse("subject_token is required"), nil
+	}
+	if req.TargetUser == "" {
+		return m.errorResponse("target_user is required"), nil
+	}
+
+	slog.DebugContext(ctx, "impersonation token exchange requested",
+		"target_user", redaction.RedactEmail(req.TargetUser),
+	)
+
+	accessToken, err := m.impersonator.ImpersonateUser(ctx, req.SubjectToken, req.TargetUser)
+	if err != nil {
+		slog.WarnContext(ctx, "impersonation token exchange failed",
+			"error", err,
+			"target_user", redaction.RedactEmail(req.TargetUser),
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Data:    map[string]string{"access_token": accessToken},
+	}
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+	return responseJSON, nil
+}
+
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern
-func NewMessageHandlerOrchestrator(opts ...messageHandlerOrchestratorOption) port.MessageHandler {
+func NewMessageHandlerOrchestrator(opts ...MessageHandlerOrchestratorOption) port.MessageHandler {
 	m := &messageHandlerOrchestrator{}
 	for _, opt := range opts {
 		opt(m)
