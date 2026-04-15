@@ -56,6 +56,6 @@ nats request lfx.auth-service.impersonation.token_exchange \
 
 - Both `subject_token` and `target_user` are required. The request will fail with a validation error if either is missing or blank.
 - The `subject_token` must be a valid, unexpired LFX V2 access token. It must carry the claim `"http://lfx.dev/claims/can_impersonate": true` — enforcement of this requirement is the responsibility of the upstream caller before sending the request.
-- `target_user` can be an email address or username. The service resolves it to an Auth0 user before performing the exchange.
+- `target_user` is passed directly to Auth0's token exchange endpoint. The service does not resolve it to an Auth0 user — that resolution is handled by Auth0 as part of the Custom Token Exchange.
 - This feature is only available when the Auth0 provider is active. The Authelia and mock providers do not support impersonation.
 - Internally, the service uses Auth0's `urn:ietf:params:oauth:grant-type:token-exchange` grant with a signed client-assertion JWT (RS256).
