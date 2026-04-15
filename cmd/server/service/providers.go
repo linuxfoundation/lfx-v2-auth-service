@@ -193,20 +193,28 @@ func QueueSubscriptions(ctx context.Context) error {
 		slog.WarnContext(ctx, "impersonation flow unavailable", "error", err)
 	}
 
-	opts := []service.MessageHandlerOrchestratorOption{
-		service.WithUserWriterForMessageHandler(userReaderWriter),
-		service.WithUserReaderForMessageHandler(userReaderWriter),
-		service.WithEmailHandlerForMessageHandler(userReaderWriter),
-		service.WithIdentityLinkerForMessageHandler(userReaderWriter),
-		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
-	}
-	if impersonationFlow != nil {
-		opts = append(opts, service.WithImpersonatorForMessageHandler(impersonationFlow))
-	}
-
-	messageHandlerService := &MessageHandlerService{
-		messageHandler: service.NewMessageHandlerOrchestrator(opts...),
-	}
+	messageHandlerService := NewMessageHandlerService(
+		service.NewMessageHandlerOrchestrator(
+			service.WithUserWriterForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithUserReaderForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithEmailHandlerForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithIdentityLinkerForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithIdentityUnlinkerForMessageHandler(
+				userReaderWriter,
+			),
+			service.WithImpersonatorForMessageHandler(
+				impersonationFlow,
+			),
+		),
+	)
 
 	// Get the NATS client - we need to access it directly
 	natsClient := getNATSClient()

@@ -21,6 +21,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 )
@@ -46,7 +47,7 @@ type cteResponse struct {
 // NewImpersonationFlow creates an impersonation flow loaded from environment variables.
 // It reuses AUTH0_M2M_CLIENT_ID and AUTH0_M2M_PRIVATE_BASE64_KEY, plus the new
 // AUTH0_LFX_V2_API_AUDIENCE for the CTE subject_token_type / audience.
-func NewImpersonationFlow(ctx context.Context, domain string) (*impersonationFlow, error) {
+func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator, error) {
 	clientID := os.Getenv(constants.Auth0M2MClientIDEnvKey)
 	if clientID == "" {
 		return nil, errors.NewUnexpected(constants.Auth0M2MClientIDEnvKey + " is required")
