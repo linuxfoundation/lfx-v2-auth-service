@@ -51,7 +51,7 @@ const (
 	// Auth0M2MClientIDEnvKey is the environment variable key for the Auth0 M2M client ID
 	Auth0M2MClientIDEnvKey = "AUTH0_M2M_CLIENT_ID"
 
-	// Auth0M2MPrivateBase64KeyEnvKey is the environment variable key for the Auth0 M2M base64 encoded private key
+	// Auth0M2MPrivateBase64KeyEnvKey is the environment variable key for the Auth0 M2M private key (base64-encoded or raw PEM)
 	Auth0M2MPrivateBase64KeyEnvKey = "AUTH0_M2M_PRIVATE_BASE64_KEY"
 
 	// Auth0AudienceEnvKey is the environment variable key for the Auth0 audience

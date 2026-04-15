@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -60,17 +59,17 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 		return nil, errors.NewUnexpected(constants.Auth0LFXv2APIAudienceEnvKey + " is required")
 	}
 
-	privateKeyB64 := os.Getenv(constants.Auth0M2MPrivateBase64KeyEnvKey)
-	if privateKeyB64 == "" {
+	privateKeyRaw := os.Getenv(constants.Auth0M2MPrivateBase64KeyEnvKey)
+	if privateKeyRaw == "" {
 		return nil, errors.NewUnexpected(constants.Auth0M2MPrivateBase64KeyEnvKey + " is required")
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(privateKeyB64)
+	privateKeyPEM, err := decodePrivateKey(privateKeyRaw)
 	if err != nil {
-		return nil, errors.NewUnexpected("failed to base64-decode "+constants.Auth0M2MPrivateBase64KeyEnvKey, err)
+		return nil, err
 	}
 
-	rsaKey, err := parseRSAPrivateKey(decoded)
+	rsaKey, err := parseRSAPrivateKey([]byte(privateKeyPEM))
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to parse private key", err)
 	}
