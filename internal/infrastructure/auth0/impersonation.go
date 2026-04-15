@@ -24,6 +24,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // impersonationFlow performs Auth0 Custom Token Exchange for LFX impersonation.
@@ -94,7 +95,7 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 // targetUser (email or username).
 func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, targetUser string) (string, error) {
 	slog.DebugContext(ctx, "performing impersonation token exchange",
-		"target_user", targetUser,
+		"target_user", redaction.RedactEmail(targetUser),
 	)
 
 	tokenEndpoint := "https://" + f.domain + "/oauth/token"
@@ -135,7 +136,7 @@ func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, t
 		slog.WarnContext(ctx, "impersonation token exchange denied",
 			"error", cteResp.Error,
 			"error_description", cteResp.ErrorDesc,
-			"target_user", targetUser,
+			"target_user", redaction.RedactEmail(targetUser),
 		)
 		return "", fmt.Errorf("%s: %s", cteResp.Error, cteResp.ErrorDesc)
 	}
@@ -144,7 +145,7 @@ func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, t
 		return "", fmt.Errorf("token exchange returned empty access token (status %d)", httpResp.StatusCode)
 	}
 
-	slog.DebugContext(ctx, "impersonation token exchange succeeded", "target_user", targetUser)
+	slog.DebugContext(ctx, "impersonation token exchange succeeded", "target_user", redaction.RedactEmail(targetUser))
 	return cteResp.AccessToken, nil
 }
 
