@@ -41,6 +41,10 @@ const (
 	// UserEmailReadSubject is the subject for the user email read event.
 	// The subject is of the form: lfx.auth-service.user_emails.read
 	UserEmailReadSubject = "lfx.auth-service.user_emails.read"
+
+	// UserEmailSetPrimarySubject is the subject for setting a user's primary email.
+	// The subject is of the form: lfx.auth-service.user_emails.set_primary
+	UserEmailSetPrimarySubject = "lfx.auth-service.user_emails.set_primary"
 )
 
 const (

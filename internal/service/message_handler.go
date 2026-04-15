@@ -678,6 +678,56 @@ func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, 
 	return responseJSON, nil
 }
 
+// setPrimaryEmailRequest represents the JSON payload for set_primary email requests
+type setPrimaryEmailRequest struct {
+	User  struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Email string `json:"email"`
+}
+
+// SetPrimaryEmail handles requests to swap an alternate email to become the user's primary email
+func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userWriter == nil || m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	var request setPrimaryEmailRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal set primary email request"), nil
+	}
+
+	if strings.TrimSpace(request.User.AuthToken) == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+	if strings.TrimSpace(request.Email) == "" {
+		return m.errorResponse("email is required"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, request.Email)
+	if errSetPrimary != nil {
+		return m.errorResponse(errSetPrimary.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "primary email updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern
 func NewMessageHandlerOrchestrator(opts ...messageHandlerOrchestratorOption) port.MessageHandler {
 	m := &messageHandlerOrchestrator{}

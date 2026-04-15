@@ -28,6 +28,7 @@ type UserReader interface {
 // UserWriter defines the behavior of the user writer
 type UserWriter interface {
 	UpdateUser(ctx context.Context, user *model.User) (*model.User, error)
+	SetPrimaryEmail(ctx context.Context, userID string, email string) error
 }
 
 // IdentityLinker defines the behavior of the identity linker

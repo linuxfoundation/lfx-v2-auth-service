@@ -86,12 +86,20 @@ func (u *Auth0User) ToUser() *model.User {
 	}
 
 	var alternateEmails []model.Email
-	for _, alternateEmail := range u.AlternateEmail {
-		alternateEmail := model.Email{
-			Email:    alternateEmail.Email,
-			Verified: alternateEmail.EmailVerified,
+	for _, identity := range u.Identities {
+		if identity.Connection != emailAuthenticationFilter {
+			continue
 		}
-		alternateEmails = append(alternateEmails, alternateEmail)
+		if identity.ProfileData == nil || identity.ProfileData.Email == "" {
+			continue
+		}
+		if identity.ProfileData.Email == u.Email {
+			continue
+		}
+		alternateEmails = append(alternateEmails, model.Email{
+			Email:    identity.ProfileData.Email,
+			Verified: identity.ProfileData.EmailVerified,
+		})
 	}
 
 	var identities []model.Identity

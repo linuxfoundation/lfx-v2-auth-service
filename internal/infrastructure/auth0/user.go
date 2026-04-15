@@ -499,3 +499,75 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		errorResponse:       NewErrorResponse(),
 	}, nil
 }
+
+// setPrimaryEmailRequest represents the request body for updating a user's primary email in Auth0
+type setPrimaryEmailRequest struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+// SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
+// The email must already be a verified linked identity on the user's account.
+func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+
+	// Fetch the user to validate the requested email is a verified linked identity
+	fullUser, errGetUser := u.GetUser(ctx, &model.User{UserID: userID})
+	if errGetUser != nil {
+		slog.ErrorContext(ctx, "failed to get user for set primary email",
+			"error", errGetUser,
+			"user_id", redaction.Redact(userID),
+		)
+		return errGetUser
+	}
+
+	// Verify the email is one of the user's verified linked email identities
+	found := false
+	for _, alt := range fullUser.AlternateEmails {
+		if alt.Email == email {
+			if !alt.Verified {
+				return errors.NewValidation("email is not verified and cannot be set as primary")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.NewValidation("email is not a linked identity on this account")
+	}
+
+	m2mToken, errGetToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errGetToken != nil {
+		return errors.NewUnexpected("failed to get M2M token for set primary email", errGetToken)
+	}
+
+	payload := setPrimaryEmailRequest{
+		Email:         email,
+		EmailVerified: true,
+	}
+
+	apiRequest := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPatch),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, userID)),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("set primary email"),
+		httpclient.WithBody(payload),
+	)
+
+	var patchResponse map[string]any
+	statusCode, errCall := apiRequest.Call(ctx, &patchResponse)
+	if errCall != nil {
+		slog.ErrorContext(ctx, "failed to set primary email in Auth0",
+			"error", errCall,
+			"status_code", statusCode,
+			"user_id", redaction.Redact(userID),
+		)
+		return errors.NewUnexpected("failed to set primary email", errCall)
+	}
+
+	slog.DebugContext(ctx, "primary email updated successfully",
+		"user_id", redaction.Redact(userID),
+	)
+
+	return nil
+}

@@ -502,6 +502,13 @@ func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User
 	return nil
 }
 
+func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+	slog.DebugContext(ctx, "mock: setting primary email",
+		"user_id", redaction.Redact(userID),
+	)
+	return nil
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 

@@ -549,6 +549,10 @@ func (a *userReaderWriter) SendResetPasswordLink(_ context.Context, _ *model.Use
 	return errs.NewValidation("password reset link is not supported for Authelia users")
 }
 
+func (a *userReaderWriter) SetPrimaryEmail(_ context.Context, _ string, _ string) error {
+	return errs.NewValidation("set primary email is not supported for Authelia users")
+}
+
 // NewUserReaderWriter creates a new Authelia User repository
 func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClient *nats.NATSClient) (port.UserReaderWriter, error) {
 	// Set defaults in case of not set
