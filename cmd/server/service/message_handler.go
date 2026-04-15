@@ -41,6 +41,8 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		constants.UserIdentityLinkSubject:   mhs.messageHandler.LinkIdentity,
 		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
 		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
+		// impersonation
+		constants.ImpersonationTokenExchangeSubject: mhs.messageHandler.ImpersonateUser,
 	}
 
 	handler, ok := handlers[subject]

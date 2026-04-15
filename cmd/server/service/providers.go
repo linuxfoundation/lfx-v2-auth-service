@@ -183,25 +183,31 @@ func QueueSubscriptions(ctx context.Context) error {
 
 	userReaderWriter := newUserReaderWriter(ctx)
 
-	messageHandlerService := &MessageHandlerService{
-		messageHandler: service.NewMessageHandlerOrchestrator(
-			service.WithUserWriterForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithUserReaderForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithEmailHandlerForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithIdentityLinkerForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithIdentityUnlinkerForMessageHandler(
-				userReaderWriter,
-			),
-		),
+	opts := []service.MessageHandlerOrchestratorOption{
+		service.WithUserWriterForMessageHandler(userReaderWriter),
+		service.WithUserReaderForMessageHandler(userReaderWriter),
+		service.WithEmailHandlerForMessageHandler(userReaderWriter),
+		service.WithIdentityLinkerForMessageHandler(userReaderWriter),
+		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
 	}
+
+	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
+		auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
+		if auth0Domain == "" {
+			auth0Domain = fmt.Sprintf("%s.auth0.com", os.Getenv(constants.Auth0TenantEnvKey))
+		}
+
+		impersonationFlow, err := auth0.NewImpersonationFlow(ctx, auth0Domain)
+		if err != nil {
+			slog.WarnContext(ctx, "impersonation flow unavailable", "error", err)
+		} else {
+			opts = append(opts, service.WithImpersonatorForMessageHandler(impersonationFlow))
+		}
+	}
+
+	messageHandlerService := NewMessageHandlerService(
+		service.NewMessageHandlerOrchestrator(opts...),
+	)
 
 	// Get the NATS client - we need to access it directly
 	natsClient := getNATSClient()
@@ -222,6 +228,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
+		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,
 		// Add more subjects here as needed
 	}
 

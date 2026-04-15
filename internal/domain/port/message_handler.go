@@ -8,6 +8,7 @@ import "context"
 // MessageHandler defines the behavior of the all domain handlers
 type MessageHandler interface {
 	UserHandler
+	ImpersonationMessageHandler
 }
 
 // UserHandler defines the behavior of the user domain handlers

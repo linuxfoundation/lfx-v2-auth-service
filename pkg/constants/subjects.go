@@ -45,6 +45,15 @@ const (
 
 const (
 
+	// Impersonation subjects
+
+	// ImpersonationTokenExchangeSubject is the subject for the impersonation token exchange.
+	// The subject is of the form: lfx.auth-service.impersonation.token_exchange
+	ImpersonationTokenExchangeSubject = "lfx.auth-service.impersonation.token_exchange"
+)
+
+const (
+
 	// Email and Identity linking subjects
 
 	// EmailLinkingSendVerificationSubject is the subject for the email linking start event.
