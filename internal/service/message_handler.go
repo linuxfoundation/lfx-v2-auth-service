@@ -32,6 +32,7 @@ type messageHandlerOrchestrator struct {
 	emailHandler     port.EmailHandler
 	identityLinker   port.IdentityLinker
 	identityUnlinker port.IdentityLinker
+	passwordHandler  port.PasswordHandler
 }
 
 // messageHandlerOrchestratorOption defines a function type for setting options
@@ -69,6 +70,13 @@ func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) mes
 func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) messageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityUnlinker = identityUnlinker
+	}
+}
+
+// WithPasswordHandlerForMessageHandler sets the password handler for the message handler orchestrator
+func WithPasswordHandlerForMessageHandler(passwordHandler port.PasswordHandler) messageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.passwordHandler = passwordHandler
 	}
 }
 
@@ -582,6 +590,84 @@ func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg por
 	response := UserDataResponse{
 		Success: true,
 		Message: "identity unlinked successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// ChangePassword handles password change requests
+func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ChangePasswordRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal change password request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+	if strings.TrimSpace(request.CurrentPassword) == "" {
+		return m.errorResponse("current_password is required"), nil
+	}
+	if strings.TrimSpace(request.NewPassword) == "" {
+		return m.errorResponse("new_password is required"), nil
+	}
+
+	user := &model.User{Token: request.Token}
+
+	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
+	if errChange != nil {
+		return m.errorResponse(errChange.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// SendResetPasswordLink handles password reset link requests
+func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ResetPasswordLinkRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal reset password link request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+
+	user := &model.User{Token: request.Token}
+
+	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
+	if errReset != nil {
+		return m.errorResponse(errReset.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password reset link sent successfully",
 	}
 
 	responseJSON, err := json.Marshal(response)

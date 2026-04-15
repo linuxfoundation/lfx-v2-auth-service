@@ -16,6 +16,7 @@ type UserHandler interface {
 	UserReaderHandler
 	UserLookupHandler
 	UserLinkHandler
+	PasswordManagementHandler
 }
 
 // UserReadHandler defines the behavior of the user read/lookup domain handlers
@@ -54,4 +55,10 @@ type IdentityLinkingHandler interface {
 type EmailLinkingHandler interface {
 	StartEmailLinking(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	VerifyEmailLinking(ctx context.Context, msg TransportMessenger) ([]byte, error)
+}
+
+// PasswordManagementHandler defines the behavior of the password management domain handlers
+type PasswordManagementHandler interface {
+	ChangePassword(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	SendResetPasswordLink(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }

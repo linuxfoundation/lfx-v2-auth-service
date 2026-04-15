@@ -23,6 +23,7 @@ var jwtPattern = regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-
 //   - Redact("ab") → "**"
 //   - Redact("abc") → "a****"
 //   - Redact("johndoe123") → "joh****"
+//   - Redact("auth0|johndoe123") → "auth0|joh****" <-- include this
 func Redact(sensitive string) string {
 	if len(sensitive) == 0 {
 		return ""
@@ -39,6 +40,11 @@ func Redact(sensitive string) string {
 	// For short strings (3-5 chars), show first rune + asterisks
 	if n <= 5 {
 		return string(runes[0]) + "****"
+	}
+
+	// Handle Auth0 user IDs
+	if strings.HasPrefix(sensitive, "auth0|") {
+		return "auth0|" + Redact(strings.TrimPrefix(sensitive, "auth0|"))
 	}
 
 	// For longer strings (>5 runes), show first 3 runes + asterisks

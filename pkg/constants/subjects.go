@@ -67,3 +67,16 @@ const (
 	// The subject is of the form: lfx.auth-service.user_identity.list
 	UserIdentityListSubject = "lfx.auth-service.user_identity.list"
 )
+
+const (
+
+	// Password management subjects
+
+	// PasswordUpdateSubject is the subject for updating a user's password.
+	// The subject is of the form: lfx.auth-service.password.update
+	PasswordUpdateSubject = "lfx.auth-service.password.update"
+
+	// PasswordResetLinkSubject is the subject for sending a password reset link.
+	// The subject is of the form: lfx.auth-service.password.reset_link
+	PasswordResetLinkSubject = "lfx.auth-service.password.reset_link"
+)

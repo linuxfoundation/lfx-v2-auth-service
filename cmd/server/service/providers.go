@@ -200,6 +200,9 @@ func QueueSubscriptions(ctx context.Context) error {
 			service.WithIdentityUnlinkerForMessageHandler(
 				userReaderWriter,
 			),
+			service.WithPasswordHandlerForMessageHandler(
+				userReaderWriter,
+			),
 		),
 	}
 
@@ -222,7 +225,8 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
-		// Add more subjects here as needed
+		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
+		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 	}
 
 	for subject, handler := range subjects {

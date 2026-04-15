@@ -41,6 +41,9 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		constants.UserIdentityLinkSubject:   mhs.messageHandler.LinkIdentity,
 		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
 		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
+		// password management operations
+		constants.PasswordUpdateSubject:    mhs.messageHandler.ChangePassword,
+		constants.PasswordResetLinkSubject: mhs.messageHandler.SendResetPasswordLink,
 	}
 
 	handler, ok := handlers[subject]

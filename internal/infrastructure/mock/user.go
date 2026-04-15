@@ -488,6 +488,20 @@ func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkId
 	return nil
 }
 
+func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	slog.DebugContext(ctx, "mock: changing password",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
+func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	slog.DebugContext(ctx, "mock: sending reset password link",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 
