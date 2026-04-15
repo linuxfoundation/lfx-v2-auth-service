@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -24,6 +23,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
 
 // impersonationFlow performs Auth0 Custom Token Exchange for LFX impersonation.
@@ -34,6 +34,7 @@ type impersonationFlow struct {
 	// lfxV2Audience is the LFX V2 API identifier used as both subject_token_type
 	// and audience in the Custom Token Exchange request.
 	lfxV2Audience string
+	httpClient    *httpclient.Client
 }
 
 type cteResponse struct {
@@ -84,6 +85,7 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 		privateKey:    rsaKey,
 		domain:        domain,
 		lfxV2Audience: lfxV2Audience,
+		httpClient:    httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second}),
 	}, nil
 }
 
@@ -114,25 +116,18 @@ func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, t
 		"target_user":           {targetUser},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	httpResp, err := f.httpClient.Do(ctx, httpclient.Request{
+		Method:  http.MethodPost,
+		URL:     tokenEndpoint,
+		Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:    strings.NewReader(form.Encode()),
+	})
+	if err != nil && httpResp == nil {
 		return "", fmt.Errorf("token exchange request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read token exchange response: %w", err)
 	}
 
 	var cteResp cteResponse
-	if err := json.Unmarshal(body, &cteResp); err != nil {
+	if err := json.Unmarshal(httpResp.Body, &cteResp); err != nil {
 		return "", fmt.Errorf("failed to parse token exchange response: %w", err)
 	}
 
@@ -146,7 +141,7 @@ func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, t
 	}
 
 	if cteResp.AccessToken == "" {
-		return "", fmt.Errorf("token exchange returned empty access token (status %d)", resp.StatusCode)
+		return "", fmt.Errorf("token exchange returned empty access token (status %d)", httpResp.StatusCode)
 	}
 
 	slog.DebugContext(ctx, "impersonation token exchange succeeded", "target_user", targetUser)
