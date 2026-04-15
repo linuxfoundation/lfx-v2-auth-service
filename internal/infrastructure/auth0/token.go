@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/auth0/go-auth0/authentication"
@@ -150,18 +151,15 @@ func loadM2MConfigFromEnv(ctx context.Context, config Config) (m2mConfig, error)
 		return m2mConfig{}, errors.NewUnexpected(constants.Auth0AudienceEnvKey + " is required")
 	}
 
-	// private key is base64 encoded
-	privateKey := os.Getenv(constants.Auth0M2MPrivateBase64KeyEnvKey)
-	if privateKey == "" {
+	privateKeyRaw := os.Getenv(constants.Auth0M2MPrivateBase64KeyEnvKey)
+	if privateKeyRaw == "" {
 		return m2mConfig{}, errors.NewUnexpected(constants.Auth0M2MPrivateBase64KeyEnvKey + " is required")
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(privateKey)
+	privateKey, err := decodePrivateKey(privateKeyRaw)
 	if err != nil {
-		return m2mConfig{}, errors.NewUnexpected("failed to base64-decode "+constants.Auth0M2MPrivateBase64KeyEnvKey, err)
+		return m2mConfig{}, err
 	}
-	privateKey = string(decoded)
-	//
 
 	// Optional organization
 	organization := os.Getenv("AUTH0_ORGANIZATION")
@@ -246,4 +244,18 @@ func NewProfileClientAuthConfig(ctx context.Context, domain string) (*authentica
 		"domain", domain)
 
 	return authConfig, nil
+}
+
+// decodePrivateKey accepts a private key value that may be base64-encoded or raw PEM.
+// If the value is already a PEM key (starts with "-----BEGIN"), it is returned as-is.
+// Otherwise it is base64-decoded.
+func decodePrivateKey(raw string) (string, error) {
+	if strings.HasPrefix(raw, "-----BEGIN") {
+		return raw, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return "", errors.NewUnexpected("failed to decode "+constants.Auth0M2MPrivateBase64KeyEnvKey+": value is neither valid PEM nor valid base64", err)
+	}
+	return string(decoded), nil
 }

@@ -143,7 +143,7 @@ The Auth0 integration can be configured using environment variables:
   - **If not set, defaults to `${AUTH0_TENANT}.auth0.com`**
 - `AUTH0_M2M_CLIENT_ID`: Auth0 Machine-to-Machine application client ID
   - **Required when using Auth0 repository type**
-- `AUTH0_M2M_PRIVATE_BASE64_KEY`: Base64-encoded private key for Auth0 M2M authentication
+- `AUTH0_M2M_PRIVATE_BASE64_KEY`: Private key for Auth0 M2M authentication (base64-encoded or raw PEM)
   - **Required when using Auth0 repository type**
 - `AUTH0_AUDIENCE`: Auth0 API audience/identifier for the Management API
   - **Required when using Auth0 repository type**
