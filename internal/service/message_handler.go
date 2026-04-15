@@ -35,46 +35,46 @@ type messageHandlerOrchestrator struct {
 	impersonator     port.Impersonator
 }
 
-// messageHandlerOrchestratorOption defines a function type for setting options
-type messageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
+// MessageHandlerOrchestratorOption defines a function type for setting options
+type MessageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
 
 // WithUserWriterForMessageHandler sets the user writer for the message handler orchestrator
-func WithUserWriterForMessageHandler(userWriter port.UserWriter) messageHandlerOrchestratorOption {
+func WithUserWriterForMessageHandler(userWriter port.UserWriter) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userWriter = userWriter
 	}
 }
 
 // WithUserReaderForMessageHandler sets the user reader for the message handler orchestrator
-func WithUserReaderForMessageHandler(userReader port.UserReader) messageHandlerOrchestratorOption {
+func WithUserReaderForMessageHandler(userReader port.UserReader) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userReader = userReader
 	}
 }
 
 // WithEmailHandlerForMessageHandler sets the email handler for the message handler orchestrator
-func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) messageHandlerOrchestratorOption {
+func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.emailHandler = emailHandler
 	}
 }
 
 // WithIdentityLinkerForMessageHandler sets the identity linker for the message handler orchestrator
-func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) messageHandlerOrchestratorOption {
+func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityLinker = identityLinker
 	}
 }
 
 // WithIdentityUnlinkerForMessageHandler sets the identity unlinker for the message handler orchestrator
-func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) messageHandlerOrchestratorOption {
+func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityUnlinker = identityUnlinker
 	}
 }
 
 // WithImpersonatorForMessageHandler sets the impersonator for the message handler orchestrator
-func WithImpersonatorForMessageHandler(impersonator port.Impersonator) messageHandlerOrchestratorOption {
+func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.impersonator = impersonator
 	}
@@ -654,7 +654,7 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 }
 
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern
-func NewMessageHandlerOrchestrator(opts ...messageHandlerOrchestratorOption) port.MessageHandler {
+func NewMessageHandlerOrchestrator(opts ...MessageHandlerOrchestratorOption) port.MessageHandler {
 	m := &messageHandlerOrchestrator{}
 	for _, opt := range opts {
 		opt(m)
