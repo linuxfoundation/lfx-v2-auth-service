@@ -25,12 +25,13 @@ type Caller interface {
 type RequestOption func(*apiRequest)
 
 type apiRequest struct {
-	httpClient  *Client
-	Method      string
-	URL         string // Full URL for non-user-specific endpoints (overrides Endpoint if provided)
-	Body        any
-	Token       string
-	Description string
+	httpClient    *Client
+	Method        string
+	URL           string // Full URL for non-user-specific endpoints (overrides Endpoint if provided)
+	Body          any
+	Token         string
+	Description   string
+	sensitiveBody bool // when true, the request body is replaced with [REDACTED] in logs
 }
 
 // WithMethod sets the HTTP method for the request
@@ -58,6 +59,15 @@ func WithBody(body any) RequestOption {
 func WithToken(token string) RequestOption {
 	return func(req *apiRequest) {
 		req.Token = token
+	}
+}
+
+// WithSensitiveBody marks the request body as sensitive so it is replaced
+// with [REDACTED] in debug logs instead of being printed in full.
+// Use this for endpoints that carry passwords, client secrets, or other credentials.
+func WithSensitiveBody() RequestOption {
+	return func(req *apiRequest) {
+		req.sensitiveBody = true
 	}
 }
 
@@ -91,10 +101,14 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 		}
 	}
 
+	loggedBody := redaction.RedactJWTs(string(requestBody))
+	if a.sensitiveBody {
+		loggedBody = "[REDACTED]"
+	}
 	slog.DebugContext(ctx, "calling API",
 		"method", a.Method,
 		"url", a.URL,
-		"request_body", redaction.RedactJWTs(string(requestBody)))
+		"request_body", loggedBody)
 
 	// Prepare headers (normalize Authorization token)
 	authHeader := strings.TrimSpace(a.Token)

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
+	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
@@ -43,24 +43,12 @@ type resetPasswordRequest struct {
 }
 
 // ChangePassword validates the user's current password and sets a new one.
+// The caller is expected to have already verified the JWT and set user.UserID.
 // Flow:
-// 1. Verify the user's JWT token
-// 2. Look up the user to get their username
-// 3. Validate current password via Auth0 oauth/token (Resource Owner Password Grant)
-// 4. Update the password via Auth0 Management API using M2M token
+// 1. Look up the user to get their username
+// 2. Validate current password via Auth0 oauth/token (Resource Owner Password Grant)
+// 3. Update the password via Auth0 Management API using M2M token
 func (u *userReaderWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
-
-	if u.config.JWTVerificationConfig == nil {
-		return errors.NewValidation("JWT verification configuration is required")
-	}
-
-	// Verify JWT and extract sub
-	claims, err := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, constants.UserChangePasswordRequiredScope)
-	if err != nil {
-		slog.ErrorContext(ctx, "jwt verify failed for password change", "error", err)
-		return err
-	}
-	user.UserID = claims.Subject
 
 	slog.DebugContext(ctx, "changing password for user",
 		"user_id", redaction.Redact(user.UserID),
@@ -100,10 +88,11 @@ func (u *userReaderWriter) ChangePassword(ctx context.Context, user *model.User,
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, user.UserID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(user.UserID))),
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("update user password"),
 		httpclient.WithBody(updatePayload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var patchResponse map[string]any
@@ -128,8 +117,8 @@ func (u *userReaderWriter) ChangePassword(ctx context.Context, user *model.User,
 // a Resource Owner Password Grant against Auth0's oauth/token endpoint.
 func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username, password string) error {
 
-	clientID := os.Getenv(constants.Auth0LFXProfileClientIDEnvKey)
-	clientSecret := os.Getenv(constants.Auth0LFXProfileClientSecretEnvKey)
+	clientID := u.config.LFXProfileClientID
+	clientSecret := u.config.LFXProfileClientSecret
 
 	if clientID == "" || clientSecret == "" {
 		return errors.NewUnexpected("Auth0 profile client credentials not configured for password validation")
@@ -152,6 +141,7 @@ func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username
 		httpclient.WithURL(url),
 		httpclient.WithDescription("validate current password"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var tokenResponse map[string]any
@@ -179,19 +169,8 @@ func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username
 
 // SendResetPasswordLink sends a password reset email to the user via Auth0's
 // Authentication API POST /dbconnections/change_password endpoint.
+// The caller is expected to have already verified the JWT and set user.UserID.
 func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
-
-	if u.config.JWTVerificationConfig == nil {
-		return errors.NewValidation("JWT verification configuration is required")
-	}
-
-	// Verify JWT and extract sub
-	claims, err := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, constants.UserChangePasswordRequiredScope)
-	if err != nil {
-		slog.ErrorContext(ctx, "jwt verify failed for reset password link", "error", err)
-		return err
-	}
-	user.UserID = claims.Subject
 
 	slog.DebugContext(ctx, "sending reset password link for user",
 		"user_id", redaction.Redact(user.UserID),
@@ -211,7 +190,7 @@ func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *mode
 		return errors.NewValidation("user does not have an email address")
 	}
 
-	clientID := os.Getenv(constants.Auth0LFXOneClientIDEnvKey)
+	clientID := u.config.LFXOneClientID
 	if clientID == "" {
 		return errors.NewUnexpected("Auth0 LFX One client ID not configured for reset password link")
 	}
@@ -232,9 +211,8 @@ func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *mode
 		httpclient.WithBody(payload),
 	)
 
-	// The response is a plain text string, not JSON
-	var response string
-	statusCode, errCall := apiRequest.Call(ctx, &response)
+	// Auth0 returns plain text (not JSON) for this endpoint; pass nil since we only need the status code.
+	statusCode, errCall := apiRequest.Call(ctx, nil)
 	if errCall != nil {
 		slog.ErrorContext(ctx, "failed to send reset password link",
 			"error", errCall,

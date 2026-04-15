@@ -611,7 +611,7 @@ func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg por
 // ChangePassword handles password change requests
 func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
-	if m.passwordHandler == nil {
+	if m.passwordHandler == nil || m.userReader == nil {
 		return m.errorResponse("password service unavailable"), nil
 	}
 
@@ -630,7 +630,10 @@ func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg por
 		return m.errorResponse("new_password is required"), nil
 	}
 
-	user := &model.User{Token: request.Token}
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
 
 	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
 	if errChange != nil {
@@ -653,7 +656,7 @@ func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg por
 // SendResetPasswordLink handles password reset link requests
 func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
-	if m.passwordHandler == nil {
+	if m.passwordHandler == nil || m.userReader == nil {
 		return m.errorResponse("password service unavailable"), nil
 	}
 
@@ -666,7 +669,10 @@ func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, 
 		return m.errorResponse("token is required"), nil
 	}
 
-	user := &model.User{Token: request.Token}
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
 
 	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
 	if errReset != nil {

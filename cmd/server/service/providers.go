@@ -110,8 +110,11 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 		}
 
 		auth0Config := auth0.Config{
-			Tenant: auth0Tenant,
-			Domain: auth0Domain,
+			Tenant:                 auth0Tenant,
+			Domain:                 auth0Domain,
+			LFXProfileClientID:     os.Getenv(constants.Auth0LFXProfileClientIDEnvKey),
+			LFXProfileClientSecret: os.Getenv(constants.Auth0LFXProfileClientSecretEnvKey),
+			LFXOneClientID:         os.Getenv(constants.Auth0LFXOneClientIDEnvKey),
 		}
 
 		slog.DebugContext(ctx, "Auth0 client initialized with M2M token support",

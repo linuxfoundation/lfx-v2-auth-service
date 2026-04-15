@@ -18,6 +18,8 @@ const (
 	// UserUpdateIdentityRequiredScope is the Auth0 scope required to link or unlink identities for the current user.
 	UserUpdateIdentityRequiredScope = "update:current_user_identities"
 	// UserChangePasswordRequiredScope is the Auth0 scope required to change the current user's password.
+	// Intentionally shares the same value as UserUpdateMetadataRequiredScope — Auth0 does not have a
+	// dedicated password-change scope, so the metadata update scope is used as the access gate.
 	UserChangePasswordRequiredScope = "update:current_user_metadata"
 )
 

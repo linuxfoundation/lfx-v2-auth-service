@@ -29,6 +29,12 @@ func Redact(sensitive string) string {
 		return ""
 	}
 
+	// Handle Auth0 user IDs before length-based checks so that short suffixes
+	// (e.g. "auth0|ab") are redacted as "auth0|**" rather than "aut****".
+	if suffix, ok := strings.CutPrefix(sensitive, "auth0|"); ok {
+		return "auth0|" + Redact(suffix)
+	}
+
 	runes := []rune(sensitive)
 	n := len(runes)
 
@@ -40,11 +46,6 @@ func Redact(sensitive string) string {
 	// For short strings (3-5 chars), show first rune + asterisks
 	if n <= 5 {
 		return string(runes[0]) + "****"
-	}
-
-	// Handle Auth0 user IDs
-	if strings.HasPrefix(sensitive, "auth0|") {
-		return "auth0|" + Redact(strings.TrimPrefix(sensitive, "auth0|"))
 	}
 
 	// For longer strings (>5 runes), show first 3 runes + asterisks

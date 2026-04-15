@@ -29,6 +29,14 @@ type Config struct {
 	M2MTokenManager *TokenManager
 	// JWTVerificationConfig for JWT signature verification
 	JWTVerificationConfig *JWTVerificationConfig
+	// LFXProfileClientID is the Auth0 client ID for the LFX Profile app,
+	// used to validate current passwords via Resource Owner Password Grant.
+	LFXProfileClientID string
+	// LFXProfileClientSecret is the Auth0 client secret for the LFX Profile app.
+	LFXProfileClientSecret string
+	// LFXOneClientID is the Auth0 client ID for the LFX One app,
+	// used as the audience when sending password reset links.
+	LFXOneClientID string
 }
 
 // userUpdateRequest represents the request body for updating a user in Auth0

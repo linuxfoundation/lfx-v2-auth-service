@@ -25,7 +25,6 @@ type UserReaderHandler interface {
 	GetUserMetadata(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	GetUserEmails(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	ListIdentities(ctx context.Context, msg TransportMessenger) ([]byte, error)
-	SetPrimaryEmail(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // UserLookupHandler defines the behavior of the user lookup domain handlers
@@ -38,6 +37,7 @@ type UserLookupHandler interface {
 // UserWriteHandler defines the behavior of the user write domain handlers
 type UserWriteHandler interface {
 	UpdateUser(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	SetPrimaryEmail(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // UserLinkHandler defines the behavior of the user link/alternate email domain handlers
