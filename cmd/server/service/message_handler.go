@@ -45,6 +45,8 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		// password management operations
 		constants.PasswordUpdateSubject:    mhs.messageHandler.ChangePassword,
 		constants.PasswordResetLinkSubject: mhs.messageHandler.SendResetPasswordLink,
+		// impersonation
+		constants.ImpersonationTokenExchangeSubject: mhs.messageHandler.ImpersonateUser,
 	}
 
 	handler, ok := handlers[subject]

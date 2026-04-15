@@ -1805,7 +1805,7 @@ func TestMessageHandlerOrchestrator_UnlinkIdentity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := []messageHandlerOrchestratorOption{}
+			opts := []MessageHandlerOrchestratorOption{}
 			if tt.userReader != nil {
 				opts = append(opts, WithUserReaderForMessageHandler(tt.userReader))
 			}
@@ -2118,7 +2118,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := &mockTransportMessenger{data: tt.messageData}
 
-			var opts []messageHandlerOrchestratorOption
+			var opts []MessageHandlerOrchestratorOption
 			if tt.mockReader != nil {
 				opts = append(opts, WithUserReaderForMessageHandler(tt.mockReader))
 			}

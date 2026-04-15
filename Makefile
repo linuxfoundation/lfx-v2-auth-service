@@ -17,7 +17,7 @@ HELM_RELEASE_NAME=lfx-v2-auth-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.24.5
+GO_VERSION := 1.25.0
 GOOS := linux
 GOARCH := amd64
 
