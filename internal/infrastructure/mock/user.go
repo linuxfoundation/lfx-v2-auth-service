@@ -489,6 +489,9 @@ func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkId
 }
 
 func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
 	slog.DebugContext(ctx, "mock: changing password",
 		"user_id", redaction.Redact(user.UserID),
 	)
@@ -496,6 +499,9 @@ func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, curre
 }
 
 func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
 	slog.DebugContext(ctx, "mock: sending reset password link",
 		"user_id", redaction.Redact(user.UserID),
 	)

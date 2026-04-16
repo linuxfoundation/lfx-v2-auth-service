@@ -110,15 +110,15 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 		"url", a.URL,
 		"request_body", loggedBody)
 
-	// Prepare headers (normalize Authorization token)
-	authHeader := strings.TrimSpace(a.Token)
-	lower := strings.ToLower(authHeader)
-	if !strings.HasPrefix(lower, "bearer ") {
-		authHeader = "Bearer " + authHeader
-	}
+	// Prepare headers; only add Authorization when a token is provided
 	headers := map[string]string{
-		"Authorization": authHeader,
-		"Accept":        "application/json",
+		"Accept": "application/json",
+	}
+	if authHeader := strings.TrimSpace(a.Token); authHeader != "" {
+		if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			authHeader = "Bearer " + authHeader
+		}
+		headers["Authorization"] = authHeader
 	}
 
 	// Add Content-Type for requests with body

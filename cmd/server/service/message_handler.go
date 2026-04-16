@@ -27,10 +27,10 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 
 	handlers := map[string]func(ctx context.Context, msg port.TransportMessenger) ([]byte, error){
 		// user read/write operations
-		constants.UserMetadataUpdateSubject: mhs.messageHandler.UpdateUser,
-		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
-		constants.UserEmailReadSubject:         mhs.messageHandler.GetUserEmails,
-		constants.UserEmailSetPrimarySubject:   mhs.messageHandler.SetPrimaryEmail,
+		constants.UserMetadataUpdateSubject:  mhs.messageHandler.UpdateUser,
+		constants.UserMetadataReadSubject:    mhs.messageHandler.GetUserMetadata,
+		constants.UserEmailReadSubject:       mhs.messageHandler.GetUserEmails,
+		constants.UserEmailSetPrimarySubject: mhs.messageHandler.SetPrimaryEmail,
 		// lookup operations
 		constants.UserEmailToUserSubject:   mhs.messageHandler.EmailToUsername,
 		constants.UserEmailToSubSubject:    mhs.messageHandler.EmailToSub,

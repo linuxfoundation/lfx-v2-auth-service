@@ -54,14 +54,16 @@ func (u *userReaderWriter) ChangePassword(ctx context.Context, user *model.User,
 		"user_id", redaction.Redact(user.UserID),
 	)
 
-	// Look up the user to get their username (nickname)
-	fullUser, errGetUser := u.GetUser(ctx, user)
+	// Look up the user to get their username (nickname).
+	// Pass a fresh model.User with only UserID so GetUser fetches an M2M token
+	// instead of reusing the caller's JWT (which has no Management API access).
+	fullUser, errGetUser := u.GetUser(ctx, &model.User{UserID: user.UserID})
 	if errGetUser != nil {
 		slog.ErrorContext(ctx, "failed to get user for password change",
 			"error", errGetUser,
 			"user_id", redaction.Redact(user.UserID),
 		)
-		return errGetUser
+		return errors.NewUnexpected("failed to get user for password change", errGetUser)
 	}
 
 	if !strings.HasPrefix(user.UserID, "auth0|") || fullUser.Username == "" {
@@ -176,14 +178,16 @@ func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *mode
 		"user_id", redaction.Redact(user.UserID),
 	)
 
-	// Look up the user to get their email
-	fullUser, errGetUser := u.GetUser(ctx, user)
+	// Look up the user to get their email.
+	// Pass a fresh model.User with only UserID so GetUser fetches an M2M token
+	// instead of reusing the caller's JWT (which has no Management API access).
+	fullUser, errGetUser := u.GetUser(ctx, &model.User{UserID: user.UserID})
 	if errGetUser != nil {
 		slog.ErrorContext(ctx, "failed to get user for reset password link",
 			"error", errGetUser,
 			"user_id", redaction.Redact(user.UserID),
 		)
-		return errGetUser
+		return errors.NewUnexpected("failed to get user for reset password link", errGetUser)
 	}
 
 	if strings.TrimSpace(fullUser.PrimaryEmail) == "" {

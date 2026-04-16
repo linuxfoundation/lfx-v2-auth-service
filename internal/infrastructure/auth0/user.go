@@ -518,6 +518,13 @@ type setPrimaryEmailRequest struct {
 // The email must already be a verified linked identity on the user's account.
 func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
 
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user ID is required")
+	}
+	if strings.TrimSpace(email) == "" {
+		return errors.NewValidation("email is required")
+	}
+
 	// Fetch the user to validate the requested email is a verified linked identity
 	fullUser, errGetUser := u.GetUser(ctx, &model.User{UserID: userID})
 	if errGetUser != nil {
@@ -525,13 +532,13 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 			"error", errGetUser,
 			"user_id", redaction.Redact(userID),
 		)
-		return errGetUser
+		return errors.NewUnexpected("failed to get user for set primary email", errGetUser)
 	}
 
 	// Verify the email is one of the user's verified linked email identities
 	found := false
 	for _, alt := range fullUser.AlternateEmails {
-		if alt.Email == email {
+		if strings.EqualFold(alt.Email, email) {
 			if !alt.Verified {
 				return errors.NewValidation("email is not verified and cannot be set as primary")
 			}

@@ -63,7 +63,7 @@ func (m *mockIdentityLinker) UnlinkIdentity(ctx context.Context, request *model.
 
 // mockUserServiceWriter is a mock implementation of UserServiceWriter for testing
 type mockUserServiceWriter struct {
-	updateUserFunc    func(ctx context.Context, user *model.User) (*model.User, error)
+	updateUserFunc      func(ctx context.Context, user *model.User) (*model.User, error)
 	setPrimaryEmailFunc func(ctx context.Context, userID string, email string) error
 }
 

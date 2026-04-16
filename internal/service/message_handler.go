@@ -715,8 +715,12 @@ func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg po
 	if strings.TrimSpace(request.User.AuthToken) == "" {
 		return m.errorResponse("auth_token is required"), nil
 	}
-	if strings.TrimSpace(request.Email) == "" {
+	email := strings.ToLower(strings.TrimSpace(request.Email))
+	if email == "" {
 		return m.errorResponse("email is required"), nil
+	}
+	if !(&model.Email{Email: email}).IsValidEmail() {
+		return m.errorResponse("invalid email format"), nil
 	}
 
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
@@ -724,7 +728,7 @@ func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg po
 		return m.errorResponse(errMetadataLookup.Error()), nil
 	}
 
-	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, request.Email)
+	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, email)
 	if errSetPrimary != nil {
 		return m.errorResponse(errSetPrimary.Error()), nil
 	}
