@@ -147,6 +147,91 @@ nats request lfx.auth-service.user_emails.read "john.doe" | jq '.data.alternate_
 
 ---
 
+## Set Primary Email
+
+To change a user's primary email address, send a NATS request to the following subject:
+
+**Subject:** `lfx.auth-service.user_emails.set_primary`  
+**Pattern:** Request/Reply
+
+The caller must provide a valid JWT token and the email address to promote to primary. The email must already be a verified alternate email on the user's account.
+
+### Request Payload
+
+```json
+{
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  },
+  "email": "new-primary@example.com"
+}
+```
+
+### Request Fields
+
+- `user.auth_token` (string, required): A valid JWT token identifying the authenticated user
+- `email` (string, required): The email address to set as the new primary; must be a verified alternate email on the account
+
+### Reply
+
+**Success Reply:**
+```json
+{
+  "success": true,
+  "message": "primary email updated successfully"
+}
+```
+
+**Error Reply (Email Not Found):**
+```json
+{
+  "success": false,
+  "message": "email not found in user's alternate emails"
+}
+```
+
+**Error Reply (Invalid Token):**
+```json
+{
+  "success": false,
+  "message": "invalid token"
+}
+```
+
+**Error Reply (Invalid Email Format):**
+```json
+{
+  "success": false,
+  "message": "invalid email format"
+}
+```
+
+### Example using NATS CLI
+
+```bash
+# Set a new primary email for the authenticated user
+nats request lfx.auth-service.user_emails.set_primary \
+  '{"user": {"auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}, "email": "new-primary@example.com"}'
+```
+
+### Important Notes
+
+- Requires the `update:current_user_identities` scope in the JWT
+- The target email must already exist as a verified alternate email on the user's account; it cannot be an arbitrary new address
+- The email input is normalized to lowercase before processing; matching is case-insensitive
+- After a successful update, the previous primary email becomes an alternate email on the account
+- For detailed Auth0-specific behavior, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+
+### Provider Support
+
+| Provider | Support |
+|----------|---------|
+| Auth0    | Full    |
+| Authelia | Not implemented |
+| Mock     | Simulated (mutates in-memory store) |
+
+---
+
 ## Use Cases
 
 ### Identity Verification
@@ -187,4 +272,5 @@ See [`email_lookups.md`](email_lookups.md) for more details on these subjects.
 - **Email Verification**: [`email_verification.md`](email_verification.md)
 - **User Metadata**: [`user_metadata.md`](user_metadata.md)
 - **Identity Linking**: [`identity_linking.md`](identity_linking.md)
+- **Password Management**: [`password_management.md`](password_management.md)
 
