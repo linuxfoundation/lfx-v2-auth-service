@@ -512,6 +512,41 @@ func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email s
 	slog.DebugContext(ctx, "mock: setting primary email",
 		"user_id", redaction.Redact(userID),
 	)
+
+	existingUser, exists := u.users[userID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	oldPrimary := existingUser.PrimaryEmail
+	existingUser.PrimaryEmail = email
+
+	// Move the old primary email into alternate emails if not already present
+	if oldPrimary != "" {
+		found := false
+		for _, alt := range existingUser.AlternateEmails {
+			if strings.EqualFold(alt.Email, oldPrimary) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
+				Email:    oldPrimary,
+				Verified: true,
+			})
+		}
+	}
+
+	// Remove the new primary from alternate emails
+	filtered := make([]model.Email, 0, len(existingUser.AlternateEmails))
+	for _, alt := range existingUser.AlternateEmails {
+		if !strings.EqualFold(alt.Email, email) {
+			filtered = append(filtered, alt)
+		}
+	}
+	existingUser.AlternateEmails = filtered
+
 	return nil
 }
 

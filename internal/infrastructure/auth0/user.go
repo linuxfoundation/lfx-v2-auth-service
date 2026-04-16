@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
@@ -563,7 +564,7 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, userID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("set primary email"),
 		httpclient.WithBody(payload),

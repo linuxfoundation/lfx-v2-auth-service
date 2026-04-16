@@ -49,6 +49,9 @@ type resetPasswordRequest struct {
 // 2. Validate current password via Auth0 oauth/token (Resource Owner Password Grant)
 // 3. Update the password via Auth0 Management API using M2M token
 func (u *userReaderWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
 
 	slog.DebugContext(ctx, "changing password for user",
 		"user_id", redaction.Redact(user.UserID),
@@ -173,6 +176,9 @@ func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username
 // Authentication API POST /dbconnections/change_password endpoint.
 // The caller is expected to have already verified the JWT and set user.UserID.
 func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
 
 	slog.DebugContext(ctx, "sending reset password link for user",
 		"user_id", redaction.Redact(user.UserID),
