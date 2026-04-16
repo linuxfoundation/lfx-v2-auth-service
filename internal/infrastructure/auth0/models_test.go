@@ -209,12 +209,31 @@ func TestAuth0User_ToUser(t *testing.T) {
 			},
 		},
 		{
-			name: "alternate emails are converted",
+			name: "alternate emails are extracted from email identities",
 			auth0User: Auth0User{
 				UserID: "auth0|abc123",
-				AlternateEmail: []Auth0ProfileData{
-					{Email: "alt1@example.com", EmailVerified: true},
-					{Email: "alt2@example.com", EmailVerified: false},
+				Email:  "primary@example.com",
+				Identities: []Auth0Identity{
+					{
+						Connection:  "email",
+						ProfileData: &Auth0ProfileData{Email: "alt1@example.com", EmailVerified: true},
+					},
+					{
+						Connection:  "email",
+						ProfileData: &Auth0ProfileData{Email: "alt2@example.com", EmailVerified: false},
+					},
+					{
+						Connection:  "google-oauth2",
+						ProfileData: &Auth0ProfileData{Email: "social@example.com", EmailVerified: true},
+					},
+					{
+						Connection:  "email",
+						ProfileData: &Auth0ProfileData{Email: "primary@example.com", EmailVerified: true},
+					},
+					{
+						Connection:  "email",
+						ProfileData: nil,
+					},
 				},
 			},
 			validate: func(t *testing.T, user *model.User) {

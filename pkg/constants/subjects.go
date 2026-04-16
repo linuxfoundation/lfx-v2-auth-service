@@ -41,6 +41,10 @@ const (
 	// UserEmailReadSubject is the subject for the user email read event.
 	// The subject is of the form: lfx.auth-service.user_emails.read
 	UserEmailReadSubject = "lfx.auth-service.user_emails.read"
+
+	// UserEmailSetPrimarySubject is the subject for setting a user's primary email.
+	// The subject is of the form: lfx.auth-service.user_emails.set_primary
+	UserEmailSetPrimarySubject = "lfx.auth-service.user_emails.set_primary"
 )
 
 const (
@@ -75,4 +79,17 @@ const (
 	// UserIdentityListSubject is the subject for listing user identities.
 	// The subject is of the form: lfx.auth-service.user_identity.list
 	UserIdentityListSubject = "lfx.auth-service.user_identity.list"
+)
+
+const (
+
+	// Password management subjects
+
+	// PasswordUpdateSubject is the subject for updating a user's password.
+	// The subject is of the form: lfx.auth-service.password.update
+	PasswordUpdateSubject = "lfx.auth-service.password.update"
+
+	// PasswordResetLinkSubject is the subject for sending a password reset link.
+	// The subject is of the form: lfx.auth-service.password.reset_link
+	PasswordResetLinkSubject = "lfx.auth-service.password.reset_link"
 )

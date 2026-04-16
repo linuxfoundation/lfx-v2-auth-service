@@ -146,6 +146,10 @@ app:
       value: null
     AUTH0_LFX_PROFILE_CLIENT_SECRET:
       value: null
+    # Auth0 LFX One Client configuration (user-facing SSR app)
+    ## Required for sending password reset links
+    AUTH0_LFX_ONE_CLIENT_ID:
+      value: null
 
     # Authelia configuration
     ## Required when using authelia repository type

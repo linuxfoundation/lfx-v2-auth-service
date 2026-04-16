@@ -488,6 +488,68 @@ func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkId
 	return nil
 }
 
+func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
+	slog.DebugContext(ctx, "mock: changing password",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
+func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
+	slog.DebugContext(ctx, "mock: sending reset password link",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
+func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+	slog.DebugContext(ctx, "mock: setting primary email",
+		"user_id", redaction.Redact(userID),
+	)
+
+	existingUser, exists := u.users[userID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	oldPrimary := existingUser.PrimaryEmail
+	existingUser.PrimaryEmail = email
+
+	// Move the old primary email into alternate emails if not already present
+	if oldPrimary != "" {
+		found := false
+		for _, alt := range existingUser.AlternateEmails {
+			if strings.EqualFold(alt.Email, oldPrimary) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
+				Email:    oldPrimary,
+				Verified: true,
+			})
+		}
+	}
+
+	// Remove the new primary from alternate emails
+	filtered := make([]model.Email, 0, len(existingUser.AlternateEmails))
+	for _, alt := range existingUser.AlternateEmails {
+		if !strings.EqualFold(alt.Email, email) {
+			filtered = append(filtered, alt)
+		}
+	}
+	existingUser.AlternateEmails = filtered
+
+	return nil
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
 

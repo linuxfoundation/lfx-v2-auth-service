@@ -63,7 +63,8 @@ func (m *mockIdentityLinker) UnlinkIdentity(ctx context.Context, request *model.
 
 // mockUserServiceWriter is a mock implementation of UserServiceWriter for testing
 type mockUserServiceWriter struct {
-	updateUserFunc func(ctx context.Context, user *model.User) (*model.User, error)
+	updateUserFunc      func(ctx context.Context, user *model.User) (*model.User, error)
+	setPrimaryEmailFunc func(ctx context.Context, userID string, email string) error
 }
 
 func (m *mockUserServiceWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
@@ -71,6 +72,33 @@ func (m *mockUserServiceWriter) UpdateUser(ctx context.Context, user *model.User
 		return m.updateUserFunc(ctx, user)
 	}
 	return user, nil
+}
+
+func (m *mockUserServiceWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+	if m.setPrimaryEmailFunc != nil {
+		return m.setPrimaryEmailFunc(ctx, userID, email)
+	}
+	return nil
+}
+
+// mockPasswordHandler is a mock implementation of port.PasswordHandler for testing
+type mockPasswordHandler struct {
+	changePasswordFunc        func(ctx context.Context, user *model.User, currentPassword, newPassword string) error
+	sendResetPasswordLinkFunc func(ctx context.Context, user *model.User) error
+}
+
+func (m *mockPasswordHandler) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	if m.changePasswordFunc != nil {
+		return m.changePasswordFunc(ctx, user, currentPassword, newPassword)
+	}
+	return nil
+}
+
+func (m *mockPasswordHandler) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	if m.sendResetPasswordLinkFunc != nil {
+		return m.sendResetPasswordLinkFunc(ctx, user)
+	}
+	return nil
 }
 
 // mockUserServiceReader is a mock implementation of UserServiceReader for testing
@@ -2135,6 +2163,458 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 			if tt.validateIdentities != nil {
 				tt.validateIdentities(t, result)
 			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_ChangePassword(t *testing.T) {
+	ctx := context.Background()
+
+	validPayload := func() []byte {
+		data, _ := json.Marshal(model.ChangePasswordRequest{
+			Token:           "valid-token",
+			CurrentPassword: "oldpass123",
+			NewPassword:     "newpass456",
+		})
+		return data
+	}
+
+	tests := []struct {
+		name            string
+		messageData     []byte
+		passwordHandler *mockPasswordHandler
+		userReader      *mockUserServiceReader
+		validateResult  func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "nil passwordHandler returns service unavailable",
+			messageData: validPayload(),
+			userReader:  &mockUserServiceReader{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "password service unavailable")
+			},
+		},
+		{
+			name:            "nil userReader returns service unavailable",
+			messageData:     validPayload(),
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "password service unavailable")
+			},
+		},
+		{
+			name:            "invalid JSON returns error",
+			messageData:     []byte(`{invalid json`),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertFailureResponse(t, result)
+			},
+		},
+		{
+			name: "missing token returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(model.ChangePasswordRequest{
+					CurrentPassword: "oldpass123",
+					NewPassword:     "newpass456",
+				})
+				return data
+			}(),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "token is required")
+			},
+		},
+		{
+			name: "missing current_password returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(model.ChangePasswordRequest{
+					Token:       "valid-token",
+					NewPassword: "newpass456",
+				})
+				return data
+			}(),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "current_password is required")
+			},
+		},
+		{
+			name: "missing new_password returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(model.ChangePasswordRequest{
+					Token:           "valid-token",
+					CurrentPassword: "oldpass123",
+				})
+				return data
+			}(),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "new_password is required")
+			},
+		},
+		{
+			name:        "MetadataLookup failure returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return nil, errors.NewUnauthorized("invalid token")
+				},
+			},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "invalid token")
+			},
+		},
+		{
+			name:        "password handler error returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				changePasswordFunc: func(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+					return errors.NewUnauthorized("current password is incorrect")
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "current password is incorrect")
+			},
+		},
+		{
+			name:        "successful password change",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				changePasswordFunc: func(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+					if user.UserID != "auth0|123" {
+						t.Errorf("expected user_id auth0|123, got %s", user.UserID)
+					}
+					if currentPassword != "oldpass123" {
+						t.Errorf("expected currentPassword oldpass123, got %s", currentPassword)
+					}
+					if newPassword != "newpass456" {
+						t.Errorf("expected newPassword newpass456, got %s", newPassword)
+					}
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertSuccessResponse(t, result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &mockTransportMessenger{data: tt.messageData}
+
+			var opts []MessageHandlerOrchestratorOption
+			if tt.userReader != nil {
+				opts = append(opts, WithUserReaderForMessageHandler(tt.userReader))
+			}
+			if tt.passwordHandler != nil {
+				opts = append(opts, WithPasswordHandlerForMessageHandler(tt.passwordHandler))
+			}
+			handler := NewMessageHandlerOrchestrator(opts...)
+
+			result, err := handler.ChangePassword(ctx, msg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tt.validateResult(t, result)
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_SendResetPasswordLink(t *testing.T) {
+	ctx := context.Background()
+
+	validPayload := func() []byte {
+		data, _ := json.Marshal(model.ResetPasswordLinkRequest{
+			Token: "valid-token",
+		})
+		return data
+	}
+
+	tests := []struct {
+		name            string
+		messageData     []byte
+		passwordHandler *mockPasswordHandler
+		userReader      *mockUserServiceReader
+		validateResult  func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "nil passwordHandler returns service unavailable",
+			messageData: validPayload(),
+			userReader:  &mockUserServiceReader{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "password service unavailable")
+			},
+		},
+		{
+			name:            "nil userReader returns service unavailable",
+			messageData:     validPayload(),
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "password service unavailable")
+			},
+		},
+		{
+			name:            "invalid JSON returns error",
+			messageData:     []byte(`{invalid json`),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertFailureResponse(t, result)
+			},
+		},
+		{
+			name: "missing token returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(model.ResetPasswordLinkRequest{})
+				return data
+			}(),
+			userReader:      &mockUserServiceReader{},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "token is required")
+			},
+		},
+		{
+			name:        "MetadataLookup failure returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return nil, errors.NewUnauthorized("invalid token")
+				},
+			},
+			passwordHandler: &mockPasswordHandler{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "invalid token")
+			},
+		},
+		{
+			name:        "password handler error returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				sendResetPasswordLinkFunc: func(ctx context.Context, user *model.User) error {
+					return errors.NewUnexpected("failed to send reset password link")
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "failed to send reset password link")
+			},
+		},
+		{
+			name:        "successful reset password link",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				sendResetPasswordLinkFunc: func(ctx context.Context, user *model.User) error {
+					if user.UserID != "auth0|123" {
+						t.Errorf("expected user_id auth0|123, got %s", user.UserID)
+					}
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertSuccessResponse(t, result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &mockTransportMessenger{data: tt.messageData}
+
+			var opts []MessageHandlerOrchestratorOption
+			if tt.userReader != nil {
+				opts = append(opts, WithUserReaderForMessageHandler(tt.userReader))
+			}
+			if tt.passwordHandler != nil {
+				opts = append(opts, WithPasswordHandlerForMessageHandler(tt.passwordHandler))
+			}
+			handler := NewMessageHandlerOrchestrator(opts...)
+
+			result, err := handler.SendResetPasswordLink(ctx, msg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tt.validateResult(t, result)
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
+	ctx := context.Background()
+
+	validPayload := func() []byte {
+		data, _ := json.Marshal(setPrimaryEmailRequest{
+			User: struct {
+				AuthToken string `json:"auth_token"`
+			}{AuthToken: "valid-token"},
+			Email: "new-primary@example.com",
+		})
+		return data
+	}
+
+	tests := []struct {
+		name           string
+		messageData    []byte
+		userWriter     *mockUserServiceWriter
+		userReader     *mockUserServiceReader
+		validateResult func(t *testing.T, result []byte)
+	}{
+		{
+			name:        "nil userWriter returns service unavailable",
+			messageData: validPayload(),
+			userReader:  &mockUserServiceReader{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "auth service unavailable")
+			},
+		},
+		{
+			name:        "nil userReader returns service unavailable",
+			messageData: validPayload(),
+			userWriter:  &mockUserServiceWriter{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "auth service unavailable")
+			},
+		},
+		{
+			name:        "invalid JSON returns error",
+			messageData: []byte(`{invalid json`),
+			userReader:  &mockUserServiceReader{},
+			userWriter:  &mockUserServiceWriter{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertFailureResponse(t, result)
+			},
+		},
+		{
+			name: "missing auth_token returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(setPrimaryEmailRequest{
+					Email: "new-primary@example.com",
+				})
+				return data
+			}(),
+			userReader: &mockUserServiceReader{},
+			userWriter: &mockUserServiceWriter{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "auth_token is required")
+			},
+		},
+		{
+			name: "missing email returns error",
+			messageData: func() []byte {
+				data, _ := json.Marshal(setPrimaryEmailRequest{
+					User: struct {
+						AuthToken string `json:"auth_token"`
+					}{AuthToken: "valid-token"},
+				})
+				return data
+			}(),
+			userReader: &mockUserServiceReader{},
+			userWriter: &mockUserServiceWriter{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "email is required")
+			},
+		},
+		{
+			name:        "MetadataLookup failure returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return nil, errors.NewUnauthorized("invalid token")
+				},
+			},
+			userWriter: &mockUserServiceWriter{},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "invalid token")
+			},
+		},
+		{
+			name:        "SetPrimaryEmail handler error returns error",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			userWriter: &mockUserServiceWriter{
+				setPrimaryEmailFunc: func(ctx context.Context, userID string, email string) error {
+					return errors.NewValidation("email not found in alternate emails")
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, "email not found in alternate emails")
+			},
+		},
+		{
+			name:        "successful set primary email",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123"}, nil
+				},
+			},
+			userWriter: &mockUserServiceWriter{
+				setPrimaryEmailFunc: func(ctx context.Context, userID string, email string) error {
+					if userID != "auth0|123" {
+						t.Errorf("expected user_id auth0|123, got %s", userID)
+					}
+					if email != "new-primary@example.com" {
+						t.Errorf("expected email new-primary@example.com, got %s", email)
+					}
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertSuccessResponse(t, result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &mockTransportMessenger{data: tt.messageData}
+
+			var opts []MessageHandlerOrchestratorOption
+			if tt.userReader != nil {
+				opts = append(opts, WithUserReaderForMessageHandler(tt.userReader))
+			}
+			if tt.userWriter != nil {
+				opts = append(opts, WithUserWriterForMessageHandler(tt.userWriter))
+			}
+			handler := NewMessageHandlerOrchestrator(opts...)
+
+			result, err := handler.SetPrimaryEmail(ctx, msg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tt.validateResult(t, result)
 		})
 	}
 }

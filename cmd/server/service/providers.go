@@ -110,8 +110,11 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 		}
 
 		auth0Config := auth0.Config{
-			Tenant: auth0Tenant,
-			Domain: auth0Domain,
+			Tenant:                 auth0Tenant,
+			Domain:                 auth0Domain,
+			LFXProfileClientID:     os.Getenv(constants.Auth0LFXProfileClientIDEnvKey),
+			LFXProfileClientSecret: os.Getenv(constants.Auth0LFXProfileClientSecretEnvKey),
+			LFXOneClientID:         os.Getenv(constants.Auth0LFXOneClientIDEnvKey),
 		}
 
 		slog.DebugContext(ctx, "Auth0 client initialized with M2M token support",
@@ -189,6 +192,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithEmailHandlerForMessageHandler(userReaderWriter),
 		service.WithIdentityLinkerForMessageHandler(userReaderWriter),
 		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
+		service.WithPasswordHandlerForMessageHandler(userReaderWriter),
 	}
 
 	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
@@ -223,13 +227,15 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserUsernameToSubSubject:            messageHandlerService.HandleMessage,
 		constants.UserMetadataReadSubject:             messageHandlerService.HandleMessage,
 		constants.UserEmailReadSubject:                messageHandlerService.HandleMessage,
+		constants.UserEmailSetPrimarySubject:          messageHandlerService.HandleMessage,
 		constants.EmailLinkingSendVerificationSubject: messageHandlerService.HandleMessage,
 		constants.EmailLinkingVerifySubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
+		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
+		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,
-		// Add more subjects here as needed
 	}
 
 	for subject, handler := range subjects {

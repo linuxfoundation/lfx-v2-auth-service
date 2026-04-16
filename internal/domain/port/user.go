@@ -15,6 +15,7 @@ type UserReaderWriter interface {
 	UserWriter
 	EmailHandler
 	IdentityLinker
+	PasswordHandler
 }
 
 // UserReader defines the behavior of the user reader
@@ -27,6 +28,7 @@ type UserReader interface {
 // UserWriter defines the behavior of the user writer
 type UserWriter interface {
 	UpdateUser(ctx context.Context, user *model.User) (*model.User, error)
+	SetPrimaryEmail(ctx context.Context, userID string, email string) error
 }
 
 // IdentityLinker defines the behavior of the identity linker
@@ -40,4 +42,10 @@ type IdentityLinker interface {
 type EmailHandler interface {
 	SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error
 	VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error)
+}
+
+// PasswordHandler defines the behavior of the password handler
+type PasswordHandler interface {
+	ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error
+	SendResetPasswordLink(ctx context.Context, user *model.User) error
 }

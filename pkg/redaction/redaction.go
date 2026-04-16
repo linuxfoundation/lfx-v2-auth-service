@@ -23,9 +23,16 @@ var jwtPattern = regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-
 //   - Redact("ab") → "**"
 //   - Redact("abc") → "a****"
 //   - Redact("johndoe123") → "joh****"
+//   - Redact("auth0|johndoe123") → "auth0|joh****"
 func Redact(sensitive string) string {
 	if len(sensitive) == 0 {
 		return ""
+	}
+
+	// Handle Auth0 user IDs before length-based checks so that short suffixes
+	// (e.g. "auth0|ab") are redacted as "auth0|**" rather than "aut****".
+	if suffix, ok := strings.CutPrefix(sensitive, "auth0|"); ok {
+		return "auth0|" + Redact(suffix)
 	}
 
 	runes := []rune(sensitive)

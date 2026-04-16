@@ -71,6 +71,10 @@ const (
 
 	// Auth0LFXProfileClientSecretEnvKey is the environment variable key for the LFX Profile Auth0 client secret
 	Auth0LFXProfileClientSecretEnvKey = "AUTH0_LFX_PROFILE_CLIENT_SECRET"
+
+	// Auth0 LFX One Client configuration (Regular Web Application — user-facing SSR app)
+	// Auth0LFXOneClientIDEnvKey is the environment variable key for the LFX One Auth0 client ID
+	Auth0LFXOneClientIDEnvKey = "AUTH0_LFX_ONE_CLIENT_ID"
 )
 
 const (

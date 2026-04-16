@@ -32,6 +32,7 @@ type messageHandlerOrchestrator struct {
 	emailHandler     port.EmailHandler
 	identityLinker   port.IdentityLinker
 	identityUnlinker port.IdentityLinker
+	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
 }
 
@@ -70,6 +71,13 @@ func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) Mes
 func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityUnlinker = identityUnlinker
+	}
+}
+
+// WithPasswordHandlerForMessageHandler sets the password handler for the message handler orchestrator
+func WithPasswordHandlerForMessageHandler(passwordHandler port.PasswordHandler) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.passwordHandler = passwordHandler
 	}
 }
 
@@ -600,6 +608,144 @@ func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg por
 	return responseJSON, nil
 }
 
+// ChangePassword handles password change requests
+func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil || m.userReader == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ChangePasswordRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal change password request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+	if strings.TrimSpace(request.CurrentPassword) == "" {
+		return m.errorResponse("current_password is required"), nil
+	}
+	if strings.TrimSpace(request.NewPassword) == "" {
+		return m.errorResponse("new_password is required"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
+	if errChange != nil {
+		return m.errorResponse(errChange.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// SendResetPasswordLink handles password reset link requests
+func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil || m.userReader == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ResetPasswordLinkRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal reset password link request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
+	if errReset != nil {
+		return m.errorResponse(errReset.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password reset link sent successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// setPrimaryEmailRequest represents the JSON payload for set_primary email requests
+type setPrimaryEmailRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Email string `json:"email"`
+}
+
+// SetPrimaryEmail handles requests to swap an alternate email to become the user's primary email
+func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userWriter == nil || m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	var request setPrimaryEmailRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal set primary email request"), nil
+	}
+
+	if strings.TrimSpace(request.User.AuthToken) == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+	email := strings.ToLower(strings.TrimSpace(request.Email))
+	if email == "" {
+		return m.errorResponse("email is required"), nil
+	}
+	if !(&model.Email{Email: email}).IsValidEmail() {
+		return m.errorResponse("invalid email format"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, email)
+	if errSetPrimary != nil {
+		return m.errorResponse(errSetPrimary.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "primary email updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
 // impersonationRequest is the JSON payload expected on the NATS subject.
 type impersonationRequest struct {
 	SubjectToken string `json:"subject_token"`
@@ -646,10 +792,12 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 		Success: true,
 		Data:    map[string]string{"access_token": accessToken},
 	}
+
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		return m.errorResponse("failed to marshal response"), nil
 	}
+
 	return responseJSON, nil
 }
 
