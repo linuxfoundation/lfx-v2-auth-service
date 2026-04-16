@@ -35,7 +35,7 @@ The caller must provide a valid JWT token along with the user's current password
 ```json
 {
   "success": true,
-  "message": "password changed successfully"
+  "message": "password updated successfully"
 }
 ```
 
@@ -47,11 +47,27 @@ The caller must provide a valid JWT token along with the user's current password
 }
 ```
 
-**Error Reply (Invalid Token):**
+**Error Reply (Missing Token):**
 ```json
 {
   "success": false,
-  "message": "invalid token"
+  "message": "token is required"
+}
+```
+
+**Error Reply (Missing Current Password):**
+```json
+{
+  "success": false,
+  "message": "current_password is required"
+}
+```
+
+**Error Reply (Missing New Password):**
+```json
+{
+  "success": false,
+  "message": "new_password is required"
 }
 ```
 
@@ -116,15 +132,15 @@ The caller must provide a valid JWT token. The service looks up the user's prima
 ```json
 {
   "success": true,
-  "message": "reset password link sent"
+  "message": "password reset link sent successfully"
 }
 ```
 
-**Error Reply (Invalid Token):**
+**Error Reply (Missing Token):**
 ```json
 {
   "success": false,
-  "message": "invalid token"
+  "message": "token is required"
 }
 ```
 

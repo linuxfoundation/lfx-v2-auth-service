@@ -182,19 +182,35 @@ The caller must provide a valid JWT token and the email address to promote to pr
 }
 ```
 
-**Error Reply (Email Not Found):**
+**Error Reply (Email Not Linked):**
 ```json
 {
   "success": false,
-  "message": "email not found in user's alternate emails"
+  "message": "email is not a linked identity on this account"
 }
 ```
 
-**Error Reply (Invalid Token):**
+**Error Reply (Email Not Verified):**
 ```json
 {
   "success": false,
-  "message": "invalid token"
+  "message": "email is not verified and cannot be set as primary"
+}
+```
+
+**Error Reply (Missing Token):**
+```json
+{
+  "success": false,
+  "message": "auth_token is required"
+}
+```
+
+**Error Reply (Missing Email):**
+```json
+{
+  "success": false,
+  "message": "email is required"
 }
 ```
 
