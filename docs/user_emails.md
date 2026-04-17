@@ -53,9 +53,9 @@ The service returns a structured reply with user email information:
 }
 ```
 
-The `alternate_emails` array contains every email identity linked to the user (Auth0 connection `email`), **including the primary email**. Callers identify the primary by matching an entry's `email` field to the top-level `primary_email`.
+The `alternate_emails` array contains every email identity linked to the user from the Auth0 `email` connection. It includes the primary email only when that same address is present in one of those linked `email` identities. Callers should use the top-level `primary_email` as the authoritative primary address and, when present, may identify the corresponding entry by matching an entry's `email` field to `primary_email`.
 
-**Success Reply (No Email Identities):**
+**Success Reply (No Email Identities in Auth0 `email` Connection):**
 ```json
 {
   "success": true,
