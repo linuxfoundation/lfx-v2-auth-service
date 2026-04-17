@@ -236,27 +236,72 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 	return responseJSON, nil
 }
 
-// GetUserEmails retrieves the user emails based on the input strategy
+// userEmailsRequest represents the input for retrieving user emails
+type userEmailsRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+}
+
+// GetUserEmails retrieves the user emails based on an auth token
 func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
-	user, errGetUser := m.getUserByInput(ctx, msg)
-	if errGetUser != nil {
-		slog.ErrorContext(ctx, "error getting user emails",
-			"error", errGetUser,
-			"input", redaction.Redact(string(msg.Data())),
+	if m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	var request userEmailsRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	slog.DebugContext(ctx, "get user emails",
+		"input", redaction.Redact(authToken),
+	)
+
+	user, err := m.userReader.MetadataLookup(ctx, authToken)
+	if err != nil {
+		slog.ErrorContext(ctx, "error looking up user for email read",
+			"error", err,
 		)
-		return m.errorResponse(errGetUser.Error()), nil
+		return m.errorResponse(err.Error()), nil
+	}
+
+	fullUser, err := m.userReader.GetUser(ctx, user)
+	if err != nil {
+		slog.ErrorContext(ctx, "error getting user for email read",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	alternateEmails := make([]model.Email, 0, len(fullUser.Identities))
+	for _, id := range fullUser.Identities {
+		if id.Connection != constants.EmailConnection {
+			continue
+		}
+		if id.Email == "" {
+			continue
+		}
+		alternateEmails = append(alternateEmails, model.Email{
+			Email:    id.Email,
+			Verified: id.EmailVerified,
+		})
 	}
 
 	response := UserDataResponse{
 		Success: true,
-		Data:    map[string]any{"primary_email": user.PrimaryEmail, "alternate_emails": user.AlternateEmails},
+		Data:    map[string]any{"primary_email": fullUser.PrimaryEmail, "alternate_emails": alternateEmails},
 	}
 
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
-		errorResponseJSON := m.errorResponse("failed to marshal response")
-		return errorResponseJSON, nil
+		return m.errorResponse("failed to marshal response"), nil
 	}
 
 	return responseJSON, nil
@@ -416,8 +461,18 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 				return errs.NewValidation("email already linked")
 			}
 
+			// Authelia and Mock adapters expose linked emails via AlternateEmails;
+			// the Auth0 adapter exposes them as identities with Connection == "email".
 			for _, alternateEmail := range user.AlternateEmails {
 				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.Verified {
+					return errs.NewValidation("email already linked")
+				}
+			}
+			for _, id := range user.Identities {
+				if id.Connection != constants.EmailConnection {
+					continue
+				}
+				if strings.EqualFold(id.Email, email) && id.EmailVerified {
 					return errs.NewValidation("email already linked")
 				}
 			}

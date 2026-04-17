@@ -538,9 +538,12 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 
 	// Verify the email is one of the user's verified linked email identities
 	found := false
-	for _, alt := range fullUser.AlternateEmails {
-		if strings.EqualFold(alt.Email, email) {
-			if !alt.Verified {
+	for _, id := range fullUser.Identities {
+		if id.Connection != constants.EmailConnection {
+			continue
+		}
+		if strings.EqualFold(id.Email, email) {
+			if !id.EmailVerified {
 				return errors.NewValidation("email is not verified and cannot be set as primary")
 			}
 			found = true

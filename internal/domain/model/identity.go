@@ -7,6 +7,7 @@ package model
 type Identity struct {
 	Provider      string `json:"provider"                  yaml:"provider"`                 // e.g. "google-oauth2", "linkedin", "github"
 	IdentityID    string `json:"identity_id"               yaml:"identity_id"`              // provider-specific user ID (part after "|" in Auth0)
+	Connection    string `json:"connection,omitempty"      yaml:"connection,omitempty"`     // Auth0 connection name, e.g. "email", "Username-Password-Authentication"
 	Email         string `json:"email,omitempty"           yaml:"email,omitempty"`          // email from the provider's profileData, if available
 	EmailVerified bool   `json:"email_verified,omitempty"  yaml:"email_verified,omitempty"` // email verification status from the provider's profileData
 	Nickname      string `json:"nickname,omitempty"        yaml:"nickname,omitempty"`       // username/handle from the provider's profileData (e.g. GitHub username)

@@ -116,7 +116,7 @@ func ParseUnverified(ctx context.Context, tokenString string, opts *ParseOptions
 	}
 
 	slog.DebugContext(ctx, "JWT parsed successfully",
-		"subject", claims.Subject,
+		"sub", claims.Subject,
 		"expires_at", claims.ExpiresAt,
 		"scope", claims.Scope)
 
@@ -191,7 +191,7 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 	}
 
 	slog.DebugContext(ctx, "JWT parsed and verified successfully",
-		"subject", claims.Subject,
+		"sub", claims.Subject,
 		"issuer", claims.Issuer,
 		"audience", claims.Audience,
 		"expires_at", claims.ExpiresAt,
@@ -270,7 +270,7 @@ func ExtractSubject(ctx context.Context, tokenString string) (string, error) {
 		return "", errors.NewValidation("missing or invalid 'sub' claim in token")
 	}
 
-	slog.DebugContext(ctx, "extracted subject from JWT", "subject", claims.Subject)
+	slog.DebugContext(ctx, "extracted subject from JWT", "sub", claims.Subject)
 	return claims.Subject, nil
 }
 

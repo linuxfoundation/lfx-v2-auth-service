@@ -551,7 +551,7 @@ func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email s
 }
 
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
-	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
+	slog.DebugContext(ctx, "mock: metadata lookup", "input", redaction.Redact(input))
 
 	// Trim whitespace from input
 	input = strings.TrimSpace(input)

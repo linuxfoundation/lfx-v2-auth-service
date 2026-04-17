@@ -85,23 +85,6 @@ func (u *Auth0User) ToUser() *model.User {
 		}
 	}
 
-	var alternateEmails []model.Email
-	for _, identity := range u.Identities {
-		if identity.Connection != emailAuthenticationFilter {
-			continue
-		}
-		if identity.ProfileData == nil || identity.ProfileData.Email == "" {
-			continue
-		}
-		if identity.ProfileData.Email == u.Email {
-			continue
-		}
-		alternateEmails = append(alternateEmails, model.Email{
-			Email:    identity.ProfileData.Email,
-			Verified: identity.ProfileData.EmailVerified,
-		})
-	}
-
 	var identities []model.Identity
 	for _, auth0Id := range u.Identities {
 		var identityID string
@@ -117,6 +100,7 @@ func (u *Auth0User) ToUser() *model.User {
 		identity := model.Identity{
 			Provider:   auth0Id.Provider,
 			IdentityID: identityID,
+			Connection: auth0Id.Connection,
 			IsSocial:   auth0Id.IsSocial,
 		}
 		if auth0Id.ProfileData != nil {
@@ -129,12 +113,11 @@ func (u *Auth0User) ToUser() *model.User {
 	}
 
 	return &model.User{
-		UserID:          u.UserID,
-		Username:        u.Username,
-		PrimaryEmail:    u.Email,
-		AlternateEmails: alternateEmails,
-		Identities:      identities,
-		UserMetadata:    meta,
+		UserID:       u.UserID,
+		Username:     u.Username,
+		PrimaryEmail: u.Email,
+		Identities:   identities,
+		UserMetadata: meta,
 	}
 }
 
