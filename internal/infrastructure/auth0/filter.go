@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	usernamePasswordAuthenticationFilter = "Username-Password-Authentication"
-	emailAuthenticationFilter            = "email"
+	usernamePasswordAuthenticationFilter = constants.Auth0UsernamePasswordConnection
+	emailAuthenticationFilter            = constants.EmailConnection
 )
 
 var (

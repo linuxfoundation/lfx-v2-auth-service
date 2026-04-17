@@ -209,39 +209,39 @@ func TestAuth0User_ToUser(t *testing.T) {
 			},
 		},
 		{
-			name: "alternate emails are extracted from email identities",
+			name: "Connection field is populated on identities",
 			auth0User: Auth0User{
 				UserID: "auth0|abc123",
 				Email:  "primary@example.com",
 				Identities: []Auth0Identity{
 					{
 						Connection:  "email",
+						Provider:    "email",
+						UserID:      "alt-id-1",
 						ProfileData: &Auth0ProfileData{Email: "alt1@example.com", EmailVerified: true},
 					},
 					{
-						Connection:  "email",
-						ProfileData: &Auth0ProfileData{Email: "alt2@example.com", EmailVerified: false},
-					},
-					{
 						Connection:  "google-oauth2",
+						Provider:    "google-oauth2",
+						UserID:      "g-111",
+						IsSocial:    true,
 						ProfileData: &Auth0ProfileData{Email: "social@example.com", EmailVerified: true},
 					},
 					{
-						Connection:  "email",
-						ProfileData: &Auth0ProfileData{Email: "primary@example.com", EmailVerified: true},
-					},
-					{
-						Connection:  "email",
-						ProfileData: nil,
+						Connection: "Username-Password-Authentication",
+						Provider:   "auth0",
+						UserID:     "db-user",
 					},
 				},
 			},
 			validate: func(t *testing.T, user *model.User) {
-				require.Len(t, user.AlternateEmails, 2)
-				assert.Equal(t, "alt1@example.com", user.AlternateEmails[0].Email)
-				assert.True(t, user.AlternateEmails[0].Verified)
-				assert.Equal(t, "alt2@example.com", user.AlternateEmails[1].Email)
-				assert.False(t, user.AlternateEmails[1].Verified)
+				require.Len(t, user.Identities, 3)
+				assert.Equal(t, "email", user.Identities[0].Connection)
+				assert.Equal(t, "alt1@example.com", user.Identities[0].Email)
+				assert.True(t, user.Identities[0].EmailVerified)
+				assert.Equal(t, "google-oauth2", user.Identities[1].Connection)
+				assert.Equal(t, "Username-Password-Authentication", user.Identities[2].Connection)
+				assert.Nil(t, user.AlternateEmails)
 			},
 		},
 	}

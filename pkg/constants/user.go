@@ -26,4 +26,6 @@ const (
 const (
 	// Auth0UsernamePasswordConnection is the Auth0 database connection name for username/password authentication.
 	Auth0UsernamePasswordConnection = "Username-Password-Authentication"
+	// EmailConnection is the Auth0 connection name for passwordless email identities.
+	EmailConnection = "email"
 )
