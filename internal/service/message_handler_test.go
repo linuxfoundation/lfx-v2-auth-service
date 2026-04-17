@@ -2039,7 +2039,7 @@ func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 				var response struct {
 					Success bool `json:"success"`
 					Data    struct {
-						PrimaryEmail    string       `json:"primary_email"`
+						PrimaryEmail    string        `json:"primary_email"`
 						AlternateEmails []model.Email `json:"alternate_emails"`
 					} `json:"data"`
 				}
