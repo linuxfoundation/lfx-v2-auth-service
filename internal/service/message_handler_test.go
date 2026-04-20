@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1168,6 +1169,218 @@ func TestMessageHandlerOrchestrator_UsernameToSub_NoUserReader(t *testing.T) {
 	if response.Error != "auth service unavailable" {
 		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
 	}
+}
+
+// mockEventPublisher is a mock implementation of port.EventPublisher for testing
+type mockEventPublisher struct {
+	publishFunc func(ctx context.Context, subject string, data []byte) error
+	calls       []mockPublishCall
+}
+
+type mockPublishCall struct {
+	Subject string
+	Data    []byte
+}
+
+func (m *mockEventPublisher) Publish(ctx context.Context, subject string, data []byte) error {
+	m.calls = append(m.calls, mockPublishCall{Subject: subject, Data: data})
+	if m.publishFunc != nil {
+		return m.publishFunc(ctx, subject, data)
+	}
+	return nil
+}
+
+func TestMessageHandlerOrchestrator_UpdateUser_EventPublishing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("publishes event with correct payload on successful update", func(t *testing.T) {
+		publisher := &mockEventPublisher{}
+		mockWriter := &mockUserServiceWriter{
+			updateUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserID: user.UserID,
+					UserMetadata: &model.UserMetadata{
+						Name:     converters.StringPtr("Updated Name"),
+						JobTitle: converters.StringPtr("Engineer"),
+					},
+				}, nil
+			},
+		}
+
+		orchestrator := NewMessageHandlerOrchestrator(
+			WithUserWriterForMessageHandler(mockWriter),
+			WithEventPublisherForMessageHandler(publisher),
+		)
+
+		inputUser := &model.User{
+			Token:    "test-token",
+			Username: "testuser",
+			UserID:   "auth0|testuser",
+			UserMetadata: &model.UserMetadata{
+				Name: converters.StringPtr("Updated Name"),
+			},
+		}
+		data, _ := json.Marshal(inputUser)
+		msg := &mockTransportMessenger{data: data}
+
+		result, err := orchestrator.UpdateUser(ctx, msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify the response is still successful
+		var response UserDataResponse
+		if err := json.Unmarshal(result, &response); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+		if !response.Success {
+			t.Errorf("expected success=true, got error: %s", response.Error)
+		}
+
+		// Verify event was published
+		if len(publisher.calls) != 1 {
+			t.Fatalf("expected 1 publish call, got %d", len(publisher.calls))
+		}
+		if publisher.calls[0].Subject != constants.UserProfileUpdatedSubject {
+			t.Errorf("expected subject %s, got %s", constants.UserProfileUpdatedSubject, publisher.calls[0].Subject)
+		}
+
+		// Verify event payload
+		var event UserProfileUpdatedEvent
+		if err := json.Unmarshal(publisher.calls[0].Data, &event); err != nil {
+			t.Fatalf("failed to unmarshal event: %v", err)
+		}
+		if event.UserID == "" {
+			t.Error("event user_id is empty")
+		}
+		if event.Principal == "" {
+			t.Error("event principal is empty")
+		}
+		if event.Metadata == nil {
+			t.Error("event metadata is nil")
+		}
+		if event.Timestamp.IsZero() {
+			t.Error("event timestamp is zero")
+		}
+	})
+
+	t.Run("publish failure does not affect successful response", func(t *testing.T) {
+		publisher := &mockEventPublisher{
+			publishFunc: func(ctx context.Context, subject string, data []byte) error {
+				return fmt.Errorf("NATS connection lost")
+			},
+		}
+		mockWriter := &mockUserServiceWriter{
+			updateUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserMetadata: &model.UserMetadata{
+						Name: converters.StringPtr("Test"),
+					},
+				}, nil
+			},
+		}
+
+		orchestrator := NewMessageHandlerOrchestrator(
+			WithUserWriterForMessageHandler(mockWriter),
+			WithEventPublisherForMessageHandler(publisher),
+		)
+
+		inputUser := &model.User{
+			Token:    "test-token",
+			Username: "testuser",
+			UserID:   "auth0|testuser",
+			UserMetadata: &model.UserMetadata{
+				Name: converters.StringPtr("Test"),
+			},
+		}
+		data, _ := json.Marshal(inputUser)
+		msg := &mockTransportMessenger{data: data}
+
+		result, err := orchestrator.UpdateUser(ctx, msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var response UserDataResponse
+		if err := json.Unmarshal(result, &response); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+		if !response.Success {
+			t.Errorf("publish failure should not break the response, got error: %s", response.Error)
+		}
+	})
+
+	t.Run("no event published when update fails", func(t *testing.T) {
+		publisher := &mockEventPublisher{}
+		mockWriter := &mockUserServiceWriter{
+			updateUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return nil, errors.NewUnexpected("database error", nil)
+			},
+		}
+
+		orchestrator := NewMessageHandlerOrchestrator(
+			WithUserWriterForMessageHandler(mockWriter),
+			WithEventPublisherForMessageHandler(publisher),
+		)
+
+		inputUser := &model.User{
+			Token:    "test-token",
+			Username: "testuser",
+			UserID:   "auth0|testuser",
+			UserMetadata: &model.UserMetadata{
+				Name: converters.StringPtr("Test"),
+			},
+		}
+		data, _ := json.Marshal(inputUser)
+		msg := &mockTransportMessenger{data: data}
+
+		orchestrator.UpdateUser(ctx, msg)
+
+		if len(publisher.calls) != 0 {
+			t.Errorf("expected no publish calls on update failure, got %d", len(publisher.calls))
+		}
+	})
+
+	t.Run("no event published when publisher is nil", func(t *testing.T) {
+		mockWriter := &mockUserServiceWriter{
+			updateUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserMetadata: &model.UserMetadata{
+						Name: converters.StringPtr("Test"),
+					},
+				}, nil
+			},
+		}
+
+		// No event publisher wired
+		orchestrator := NewMessageHandlerOrchestrator(
+			WithUserWriterForMessageHandler(mockWriter),
+		)
+
+		inputUser := &model.User{
+			Token:    "test-token",
+			Username: "testuser",
+			UserID:   "auth0|testuser",
+			UserMetadata: &model.UserMetadata{
+				Name: converters.StringPtr("Test"),
+			},
+		}
+		data, _ := json.Marshal(inputUser)
+		msg := &mockTransportMessenger{data: data}
+
+		result, err := orchestrator.UpdateUser(ctx, msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var response UserDataResponse
+		if err := json.Unmarshal(result, &response); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+		if !response.Success {
+			t.Errorf("expected success without publisher, got error: %s", response.Error)
+		}
+	})
 }
 
 func TestNewMessageHandlerOrchestrator(t *testing.T) {
