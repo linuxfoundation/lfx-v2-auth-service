@@ -193,6 +193,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithIdentityLinkerForMessageHandler(userReaderWriter),
 		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
 		service.WithPasswordHandlerForMessageHandler(userReaderWriter),
+		service.WithEventPublisherForMessageHandler(natsClient),
 	}
 
 	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
