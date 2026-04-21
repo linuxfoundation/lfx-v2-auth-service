@@ -28,6 +28,15 @@ const (
 
 const (
 
+	// Domain event subjects (fire-and-forget, not request/reply)
+
+	// UserProfileUpdatedSubject is published after a successful user_metadata update.
+	// Consumers use this to sync profile changes to other systems (e.g. v1 platform DB).
+	UserProfileUpdatedSubject = "lfx.user_profile.updated"
+)
+
+const (
+
 	// User read/write subjects
 
 	// UserMetadataUpdateSubject is the subject for the user metadata update event.

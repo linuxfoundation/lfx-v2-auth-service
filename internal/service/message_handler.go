@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -16,6 +17,16 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
+
+// UserProfileUpdatedEvent is published after a successful user_metadata update.
+// Consumers use the full UserMetadata object (not just changed fields) to sync
+// profile state to other systems.
+type UserProfileUpdatedEvent struct {
+	UserID    string              `json:"user_id"`
+	Principal string              `json:"principal"`
+	Metadata  *model.UserMetadata `json:"user_metadata"`
+	Timestamp time.Time           `json:"timestamp"`
+}
 
 // UserDataResponse represents the response structure for user update operations
 type UserDataResponse struct {
@@ -34,6 +45,7 @@ type messageHandlerOrchestrator struct {
 	identityUnlinker port.IdentityLinker
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
+	eventPublisher   port.EventPublisher
 }
 
 // MessageHandlerOrchestratorOption defines a function type for setting options
@@ -88,12 +100,24 @@ func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHa
 	}
 }
 
+// WithEventPublisherForMessageHandler sets the event publisher for the message handler orchestrator
+func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.eventPublisher = eventPublisher
+	}
+}
+
 func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	response := UserDataResponse{
 		Success: false,
 		Error:   error,
 	}
-	responseJSON, _ := json.Marshal(response)
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		slog.Error("failed to marshal error response",
+			"error", err,
+		)
+	}
 	return responseJSON
 }
 
@@ -427,6 +451,30 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 	if err != nil {
 		responseJSON := m.errorResponse(err.Error())
 		return responseJSON, nil
+	}
+
+	// Publish domain event so downstream consumers (e.g. v1-sync-helper) can
+	// react to profile changes. Fire-and-forget: a publish failure must not
+	// block the user-facing response.
+	if m.eventPublisher != nil {
+		event := UserProfileUpdatedEvent{
+			UserID:    user.UserID,
+			Principal: user.UserID, // the JWT subject — identifies the caller
+			Metadata:  updatedUser.UserMetadata,
+			Timestamp: time.Now().UTC(),
+		}
+		eventJSON, jsonErr := json.Marshal(event)
+		if jsonErr != nil {
+			slog.WarnContext(ctx, "failed to marshal user profile updated event",
+				"error", jsonErr,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		} else if pubErr := m.eventPublisher.Publish(ctx, constants.UserProfileUpdatedSubject, eventJSON); pubErr != nil {
+			slog.WarnContext(ctx, "failed to publish user profile updated event",
+				"error", pubErr,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		}
 	}
 
 	// Return success response with user metadata
