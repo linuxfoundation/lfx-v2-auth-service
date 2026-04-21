@@ -112,7 +112,12 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 		Success: false,
 		Error:   error,
 	}
-	responseJSON, _ := json.Marshal(response)
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		slog.Error("failed to marshal error response",
+			"error", err,
+		)
+	}
 	return responseJSON
 }
 
