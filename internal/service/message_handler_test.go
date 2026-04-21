@@ -1293,7 +1293,10 @@ func TestMessageHandlerOrchestrator_UpdateUser_EventPublishing(t *testing.T) {
 				Name: converters.StringPtr("Test"),
 			},
 		}
-		data, _ := json.Marshal(inputUser)
+		data, err := json.Marshal(inputUser)
+		if err != nil {
+			t.Fatalf("failed to marshal input user: %v", err)
+		}
 		msg := &mockTransportMessenger{data: data}
 
 		result, err := orchestrator.UpdateUser(ctx, msg)
@@ -1331,10 +1334,16 @@ func TestMessageHandlerOrchestrator_UpdateUser_EventPublishing(t *testing.T) {
 				Name: converters.StringPtr("Test"),
 			},
 		}
-		data, _ := json.Marshal(inputUser)
+		data, err := json.Marshal(inputUser)
+		if err != nil {
+			t.Fatalf("failed to marshal input user: %v", err)
+		}
 		msg := &mockTransportMessenger{data: data}
 
-		orchestrator.UpdateUser(ctx, msg)
+		_, err = orchestrator.UpdateUser(ctx, msg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
 		if len(publisher.calls) != 0 {
 			t.Errorf("expected no publish calls on update failure, got %d", len(publisher.calls))
@@ -1365,7 +1374,10 @@ func TestMessageHandlerOrchestrator_UpdateUser_EventPublishing(t *testing.T) {
 				Name: converters.StringPtr("Test"),
 			},
 		}
-		data, _ := json.Marshal(inputUser)
+		data, err := json.Marshal(inputUser)
+		if err != nil {
+			t.Fatalf("failed to marshal input user: %v", err)
+		}
 		msg := &mockTransportMessenger{data: data}
 
 		result, err := orchestrator.UpdateUser(ctx, msg)

@@ -462,12 +462,12 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 		if jsonErr != nil {
 			slog.WarnContext(ctx, "failed to marshal user profile updated event",
 				"error", jsonErr,
-				"user_id", user.UserID,
+				"user_id", redaction.Redact(user.UserID),
 			)
 		} else if pubErr := m.eventPublisher.Publish(ctx, constants.UserProfileUpdatedSubject, eventJSON); pubErr != nil {
 			slog.WarnContext(ctx, "failed to publish user profile updated event",
 				"error", pubErr,
-				"user_id", user.UserID,
+				"user_id", redaction.Redact(user.UserID),
 			)
 		}
 	}
