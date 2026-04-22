@@ -938,57 +938,60 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 	tests := []struct {
 		name           string
 		messageData    []byte
-		userReader     *mockUserServiceReader
 		expectError    bool
 		expectedResult string
 		validateResult func(t *testing.T, result []byte)
 	}{
 		{
-			name:        "successful username to sub lookup",
-			messageData: []byte("zephyr.stormwind"),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					if criteria != constants.CriteriaTypeUsername {
-						t.Errorf("Expected criteria %s, got %s", constants.CriteriaTypeUsername, criteria)
-					}
-					if user.Username != "zephyr.stormwind" {
-						t.Errorf("Expected username zephyr.stormwind, got %s", user.Username)
-					}
-					return &model.User{
-						UserID:   "auth0|zephyr001",
-						Username: "zephyr.stormwind",
-					}, nil
-				},
-			},
+			name:           "safe username maps directly",
+			messageData:    []byte("zephyr.stormwind"),
 			expectError:    false,
-			expectedResult: "auth0|zephyr001",
+			expectedResult: "auth0|zephyr.stormwind",
 		},
 		{
-			name:        "username with whitespace is trimmed",
-			messageData: []byte("  mauriciozanetti  "),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					if user.Username != "mauriciozanetti" {
-						t.Errorf("Expected trimmed username mauriciozanetti, got %s", user.Username)
-					}
-					return &model.User{
-						UserID:   "auth0|mauricio001",
-						Username: "mauriciozanetti",
-					}, nil
-				},
-			},
+			name:           "safe username with whitespace is trimmed",
+			messageData:    []byte("  mauriciozanetti  "),
 			expectError:    false,
-			expectedResult: "auth0|mauricio001",
+			expectedResult: "auth0|mauriciozanetti",
+		},
+		{
+			name:           "safe username with hyphens and numbers",
+			messageData:    []byte("john-doe-42"),
+			expectError:    false,
+			expectedResult: "auth0|john-doe-42",
+		},
+		{
+			name:        "hex-like username is hashed",
+			messageData: []byte("abcdef1234567890abcdef12"),
+			expectError: false,
+			validateResult: func(t *testing.T, result []byte) {
+				sub := string(result)
+				if !strings.HasPrefix(sub, "auth0|") {
+					t.Errorf("Expected auth0| prefix, got %q", sub)
+				}
+				// Must not be the raw username — it was hashed
+				if sub == "auth0|abcdef1234567890abcdef12" {
+					t.Errorf("Expected hashed sub for hex username, got raw username in sub")
+				}
+			},
+		},
+		{
+			name:        "username with special chars is hashed",
+			messageData: []byte("user name@example"),
+			expectError: false,
+			validateResult: func(t *testing.T, result []byte) {
+				sub := string(result)
+				if !strings.HasPrefix(sub, "auth0|") {
+					t.Errorf("Expected auth0| prefix, got %q", sub)
+				}
+				if sub == "auth0|user name@example" {
+					t.Errorf("Expected hashed sub for unsafe username, got raw username in sub")
+				}
+			},
 		},
 		{
 			name:        "empty username returns error",
 			messageData: []byte(""),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					t.Error("SearchUser should not be called for empty username")
-					return nil, errors.NewValidation("should not be called")
-				},
-			},
 			expectError: true,
 			validateResult: func(t *testing.T, result []byte) {
 				var response struct {
@@ -1009,12 +1012,6 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 		{
 			name:        "whitespace-only username returns error",
 			messageData: []byte("   "),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					t.Error("SearchUser should not be called for whitespace-only username")
-					return nil, errors.NewValidation("should not be called")
-				},
-			},
 			expectError: true,
 			validateResult: func(t *testing.T, result []byte) {
 				var response struct {
@@ -1032,70 +1029,6 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 				}
 			},
 		},
-		{
-			name:        "user not found error",
-			messageData: []byte("nonexistent.user"),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					return nil, errors.NewNotFound("user not found")
-				},
-			},
-			expectError: true,
-			validateResult: func(t *testing.T, result []byte) {
-				var response struct {
-					Success bool   `json:"success"`
-					Error   string `json:"error"`
-				}
-				if err := json.Unmarshal(result, &response); err != nil {
-					t.Fatalf("Failed to unmarshal error response: %v", err)
-				}
-				if response.Success {
-					t.Error("Expected success=false for user not found")
-				}
-				if response.Error != "user not found" {
-					t.Errorf("Expected error 'user not found', got %s", response.Error)
-				}
-			},
-		},
-		{
-			name:        "search service error",
-			messageData: []byte("service.error.user"),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					return nil, errors.NewUnexpected("database connection failed", nil)
-				},
-			},
-			expectError: true,
-			validateResult: func(t *testing.T, result []byte) {
-				var response struct {
-					Success bool   `json:"success"`
-					Error   string `json:"error"`
-				}
-				if err := json.Unmarshal(result, &response); err != nil {
-					t.Fatalf("Failed to unmarshal error response: %v", err)
-				}
-				if response.Success {
-					t.Error("Expected success=false for service error")
-				}
-				if response.Error != "database connection failed" {
-					t.Errorf("Expected error 'database connection failed', got %s", response.Error)
-				}
-			},
-		},
-		{
-			name:        "user with empty sub",
-			messageData: []byte("empty.sub.user"),
-			userReader: &mockUserServiceReader{
-				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
-					return &model.User{
-						UserID:   "",
-						Username: "empty.sub.user",
-					}, nil
-				},
-			},
-			expectError:    false,
-			expectedResult: "", // Empty string is a valid response
-		},
 	}
 
 	for _, tt := range tests {
@@ -1104,9 +1037,7 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 				data: tt.messageData,
 			}
 
-			orchestrator := NewMessageHandlerOrchestrator(
-				WithUserReaderForMessageHandler(tt.userReader),
-			)
+			orchestrator := NewMessageHandlerOrchestrator()
 
 			result, err := orchestrator.UsernameToSub(ctx, mockMsg)
 
@@ -1120,11 +1051,9 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 				return
 			}
 
-			if tt.expectError {
-				if tt.validateResult != nil {
-					tt.validateResult(t, result)
-				}
-			} else {
+			if tt.validateResult != nil {
+				tt.validateResult(t, result)
+			} else if !tt.expectError {
 				actualResult := string(result)
 				if actualResult != tt.expectedResult {
 					t.Errorf("UsernameToSub() = %q, want %q", actualResult, tt.expectedResult)
@@ -1135,6 +1064,7 @@ func TestMessageHandlerOrchestrator_UsernameToSub(t *testing.T) {
 }
 
 func TestMessageHandlerOrchestrator_UsernameToSub_NoUserReader(t *testing.T) {
+	// UsernameToSub uses local mapping and does not require a userReader.
 	ctx := context.Background()
 
 	orchestrator := NewMessageHandlerOrchestrator()
@@ -1154,20 +1084,8 @@ func TestMessageHandlerOrchestrator_UsernameToSub_NoUserReader(t *testing.T) {
 		t.Fatal("UsernameToSub() returned nil result")
 	}
 
-	var response struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
-	}
-	if err := json.Unmarshal(result, &response); err != nil {
-		t.Fatalf("Failed to unmarshal error response: %v", err)
-	}
-
-	if response.Success {
-		t.Error("Expected success=false when user reader is nil")
-	}
-
-	if response.Error != "auth service unavailable" {
-		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
+	if string(result) != "auth0|someuser" {
+		t.Errorf("UsernameToSub() = %q, want %q", string(result), "auth0|someuser")
 	}
 }
 

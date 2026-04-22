@@ -180,24 +180,14 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 	return []byte(user.UserID), nil
 }
 
-// UsernameToSub converts a username to a sub
-func (m *messageHandlerOrchestrator) UsernameToSub(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
-
-	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
-	}
-
+// UsernameToSub converts a username to a sub using local mapping logic.
+// This derives the Auth0 sub deterministically without an external call.
+func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.TransportMessenger) ([]byte, error) {
 	username := strings.TrimSpace(string(msg.Data()))
 	if username == "" {
 		return m.errorResponse("username is required"), nil
 	}
-
-	user := &model.User{Username: username}
-	user, err := m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
-	if err != nil {
-		return m.errorResponse(err.Error()), nil
-	}
-	return []byte(user.UserID), nil
+	return []byte(mapUsernameToSub(username)), nil
 }
 
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {

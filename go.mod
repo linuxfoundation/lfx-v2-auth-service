@@ -39,6 +39,7 @@ require (
 
 require (
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
+	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f // indirect
 	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
