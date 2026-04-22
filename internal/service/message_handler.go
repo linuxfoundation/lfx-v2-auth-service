@@ -16,6 +16,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // UserProfileUpdatedEvent is published after a successful user_metadata update.
@@ -26,6 +27,12 @@ type UserProfileUpdatedEvent struct {
 	Principal string              `json:"principal"`
 	Metadata  *model.UserMetadata `json:"user_metadata"`
 	Timestamp time.Time           `json:"timestamp"`
+}
+
+// kvCache is the minimal interface used for username→sub caching.
+type kvCache interface {
+	Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error)
+	Put(ctx context.Context, key string, value []byte) (uint64, error)
 }
 
 // UserDataResponse represents the response structure for user update operations
@@ -46,6 +53,7 @@ type messageHandlerOrchestrator struct {
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
 	eventPublisher   port.EventPublisher
+	usernameSubCache kvCache
 }
 
 // MessageHandlerOrchestratorOption defines a function type for setting options
@@ -104,6 +112,13 @@ func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHa
 func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.eventPublisher = eventPublisher
+	}
+}
+
+// WithUsernameSubCacheForMessageHandler sets the KV cache used for username→sub lookups
+func WithUsernameSubCacheForMessageHandler(cache kvCache) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.usernameSubCache = cache
 	}
 }
 
@@ -192,11 +207,27 @@ func (m *messageHandlerOrchestrator) UsernameToSub(ctx context.Context, msg port
 		return m.errorResponse("username is required"), nil
 	}
 
+	// Cache-aside: check the KV cache before hitting Auth0.
+	if m.usernameSubCache != nil {
+		if entry, err := m.usernameSubCache.Get(ctx, username); err == nil {
+			slog.DebugContext(ctx, "username→sub cache hit", "username", redaction.Redact(username))
+			return entry.Value(), nil
+		}
+	}
+
 	user := &model.User{Username: username}
 	user, err := m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
 	if err != nil {
 		return m.errorResponse(err.Error()), nil
 	}
+
+	// Populate the cache for future lookups.
+	if m.usernameSubCache != nil && user.UserID != "" {
+		if _, putErr := m.usernameSubCache.Put(ctx, username, []byte(user.UserID)); putErr != nil {
+			slog.WarnContext(ctx, "failed to cache username→sub", "username", redaction.Redact(username), "error", putErr)
+		}
+	}
+
 	return []byte(user.UserID), nil
 }
 

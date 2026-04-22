@@ -168,24 +168,33 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 		timeout: config.Timeout,
 	}
 
-	var buckets []string
-	// Check if Authelia is enabled by checking the environment variable directly
-	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuthelia {
-		buckets = append(buckets, constants.KVBucketNameAutheliaUsers)
-		buckets = append(buckets, constants.KVBucketNameAutheliaEmailOTP)
+	// The username→sub cache bucket is best-effort: if it doesn't exist or is
+	// unavailable the service still works, just without caching.
+	if err := client.KeyValueStore(ctx, constants.KVBucketNameUsernameSubCache); err != nil {
+		slog.WarnContext(ctx, "username→sub cache bucket unavailable, caching disabled",
+			"error", err,
+			"bucket", constants.KVBucketNameUsernameSubCache,
+		)
+	} else {
+		slog.InfoContext(ctx, "NATS key-value store initialized",
+			"bucket", constants.KVBucketNameUsernameSubCache,
+		)
 	}
 
-	for _, bucketName := range buckets {
-		if err := client.KeyValueStore(ctx, bucketName); err != nil {
-			slog.ErrorContext(ctx, "failed to initialize NATS key-value store",
-				"error", err,
+	// Authelia-specific buckets are required when Authelia is the user repository.
+	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuthelia {
+		for _, bucketName := range []string{constants.KVBucketNameAutheliaUsers, constants.KVBucketNameAutheliaEmailOTP} {
+			if err := client.KeyValueStore(ctx, bucketName); err != nil {
+				slog.ErrorContext(ctx, "failed to initialize NATS key-value store",
+					"error", err,
+					"bucket", bucketName,
+				)
+				return nil, errors.NewServiceUnavailable("failed to initialize NATS key-value store", err)
+			}
+			slog.InfoContext(ctx, "NATS key-value store initialized",
 				"bucket", bucketName,
 			)
-			return nil, errors.NewServiceUnavailable("failed to initialize NATS key-value store", err)
 		}
-		slog.InfoContext(ctx, "NATS key-value store initialized",
-			"bucket", bucketName,
-		)
 	}
 
 	slog.InfoContext(ctx, "NATS client created successfully",
