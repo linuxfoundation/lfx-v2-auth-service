@@ -6,6 +6,7 @@ module github.com/linuxfoundation/lfx-v2-auth-service
 go 1.25.0
 
 require (
+	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
 	github.com/auth0/go-auth0 v1.28.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
@@ -39,7 +40,6 @@ require (
 
 require (
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
-	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f // indirect
 	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
