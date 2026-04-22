@@ -95,6 +95,26 @@ nats:
     # ttl is the time-to-live for entries in the bucket (5 minutes for OTPs)
     ttl: 5m
 
+  username_sub_cache_kv_bucket:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    keep: true
+    # name is the name of the KV bucket for caching username → sub lookups
+    name: auth-service-username-sub-cache
+    # history is the number of history entries to keep (1 is sufficient for a cache)
+    history: 1
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value (sub strings are short)
+    maxValueSize: 512  # 512B
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 10485760  # 10MB
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+    # ttl is the time-to-live for cache entries (7 days)
+    ttl: 168h
+
 # serviceAccount is the configuration for the Kubernetes service account
 ## This will be used only if the USER_REPOSITORY_TYPE is authelia
 serviceAccount:

@@ -196,6 +196,10 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithEventPublisherForMessageHandler(natsClient),
 	}
 
+	if kvStore, ok := natsClient.GetKVStore(constants.KVBucketNameUsernameSubCache); ok {
+		opts = append(opts, service.WithUsernameSubCacheForMessageHandler(kvStore))
+	}
+
 	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
 		auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
 		if auth0Domain == "" {

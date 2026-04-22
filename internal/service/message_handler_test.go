@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	natsjetstream "github.com/nats-io/nats.go/jetstream"
 )
 
 // mockTransportMessenger is a mock implementation of port.TransportMessenger for testing
@@ -1393,6 +1395,110 @@ func TestMessageHandlerOrchestrator_UpdateUser_EventPublishing(t *testing.T) {
 			t.Errorf("expected success without publisher, got error: %s", response.Error)
 		}
 	})
+}
+
+// mockKVEntry is a minimal implementation of jetstream.KeyValueEntry for testing.
+type mockKVEntry struct {
+	value []byte
+}
+
+func (e *mockKVEntry) Value() []byte             { return e.value }
+func (e *mockKVEntry) Key() string               { return "" }
+func (e *mockKVEntry) Bucket() string            { return "" }
+func (e *mockKVEntry) Revision() uint64          { return 0 }
+func (e *mockKVEntry) Delta() uint64             { return 0 }
+func (e *mockKVEntry) Created() time.Time        { return time.Time{} }
+func (e *mockKVEntry) Operation() natsjetstream.KeyValueOp { return 0 }
+
+// mockKVCache is a minimal mock for the kvCache interface.
+type mockKVCache struct {
+	getFunc func(ctx context.Context, key string) (natsjetstream.KeyValueEntry, error)
+	putFunc func(ctx context.Context, key string, value []byte) (uint64, error)
+}
+
+func (m *mockKVCache) Get(ctx context.Context, key string) (natsjetstream.KeyValueEntry, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, key)
+	}
+	return nil, natsjetstream.ErrKeyNotFound
+}
+
+func (m *mockKVCache) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if m.putFunc != nil {
+		return m.putFunc(ctx, key, value)
+	}
+	return 0, nil
+}
+
+func TestMessageHandlerOrchestrator_UsernameToSub_CacheHit(t *testing.T) {
+	ctx := context.Background()
+
+	searchCalled := false
+	cache := &mockKVCache{
+		getFunc: func(_ context.Context, key string) (natsjetstream.KeyValueEntry, error) {
+			if key == "cacheduser" {
+				return &mockKVEntry{value: []byte("auth0|cached001")}, nil
+			}
+			return nil, natsjetstream.ErrKeyNotFound
+		},
+	}
+
+	orchestrator := NewMessageHandlerOrchestrator(
+		WithUserReaderForMessageHandler(&mockUserServiceReader{
+			searchUserFunc: func(_ context.Context, _ *model.User, _ string) (*model.User, error) {
+				searchCalled = true
+				return nil, errors.NewUnexpected("should not be called")
+			},
+		}),
+		WithUsernameSubCacheForMessageHandler(cache),
+	)
+
+	result, err := orchestrator.UsernameToSub(ctx, &mockTransportMessenger{data: []byte("cacheduser")})
+	if err != nil {
+		t.Fatalf("UsernameToSub() unexpected error: %v", err)
+	}
+	if string(result) != "auth0|cached001" {
+		t.Errorf("UsernameToSub() = %q, want %q", string(result), "auth0|cached001")
+	}
+	if searchCalled {
+		t.Error("Auth0 SearchUser should not be called on cache hit")
+	}
+}
+
+func TestMessageHandlerOrchestrator_UsernameToSub_CacheMiss(t *testing.T) {
+	ctx := context.Background()
+
+	putKey, putValue := "", ""
+	cache := &mockKVCache{
+		getFunc: func(_ context.Context, _ string) (natsjetstream.KeyValueEntry, error) {
+			return nil, natsjetstream.ErrKeyNotFound
+		},
+		putFunc: func(_ context.Context, key string, value []byte) (uint64, error) {
+			putKey = key
+			putValue = string(value)
+			return 1, nil
+		},
+	}
+
+	orchestrator := NewMessageHandlerOrchestrator(
+		WithUserReaderForMessageHandler(&mockUserServiceReader{
+			searchUserFunc: func(_ context.Context, user *model.User, _ string) (*model.User, error) {
+				return &model.User{UserID: "auth0|fresh001", Username: user.Username}, nil
+			},
+		}),
+		WithUsernameSubCacheForMessageHandler(cache),
+	)
+
+	result, err := orchestrator.UsernameToSub(ctx, &mockTransportMessenger{data: []byte("freshuser")})
+	if err != nil {
+		t.Fatalf("UsernameToSub() unexpected error: %v", err)
+	}
+	if string(result) != "auth0|fresh001" {
+		t.Errorf("UsernameToSub() = %q, want %q", string(result), "auth0|fresh001")
+	}
+	if putKey != "freshuser" || putValue != "auth0|fresh001" {
+		t.Errorf("cache.Put() called with key=%q value=%q, want key=%q value=%q", putKey, putValue, "freshuser", "auth0|fresh001")
+	}
 }
 
 func TestNewMessageHandlerOrchestrator(t *testing.T) {
