@@ -65,7 +65,7 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	handler = otelhttp.NewHandler(handler, "auth-service",
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			p := r.URL.Path
-			return p != "/healthz" && p != "/livez" && p != "/readyz"
+			return p != authserver.LivezAuthServicePath() && p != authserver.ReadyzAuthServicePath()
 		}),
 	)
 
