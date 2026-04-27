@@ -62,7 +62,12 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 		handler = debug.HTTP()(handler)
 	}
 	// Wrap the handler with OpenTelemetry instrumentation
-	handler = otelhttp.NewHandler(handler, "auth-service")
+	handler = otelhttp.NewHandler(handler, "auth-service",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			p := r.URL.Path
+			return p != authserver.LivezAuthServicePath() && p != authserver.ReadyzAuthServicePath()
+		}),
+	)
 
 	// Start HTTP server using default configuration, change the code to
 	// configure the server as required by your service.
