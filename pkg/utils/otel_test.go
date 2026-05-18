@@ -5,8 +5,10 @@ package utils
 
 import (
 	"context"
-
 	"testing"
+
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestOTelConfigFromEnv_Defaults verifies that OTelConfigFromEnv returns
@@ -524,7 +526,6 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 // supported OTEL_TRACES_SAMPLER values, including the default (empty) case.
 func TestNewSampler(t *testing.T) {
 	cfg := OTelConfig{TracesSampleRatio: 0.5}
-
 	tests := []struct {
 		name    string
 		sampler string
@@ -539,15 +540,17 @@ func TestNewSampler(t *testing.T) {
 		{"parentbased_traceidratio", "parentbased_traceidratio", "0.5"},
 		{"unknown", "unknown", ""},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("OTEL_TRACES_SAMPLER", tt.sampler)
-			t.Setenv("OTEL_TRACES_SAMPLER_ARG", tt.arg)
-
-			s := newSampler(cfg)
+			c := cfg
+			c.TracesSampler = tt.sampler
+			c.TracesSamplerArg = tt.arg
+			s := newSampler(c)
 			if s == nil {
-				t.Errorf("newSampler(%q) returned nil", tt.sampler)
+				t.Fatalf("newSampler(%q) returned nil", tt.sampler)
+			}
+			if s.Description() == "" {
+				t.Errorf("newSampler(%q).Description() is empty", tt.sampler)
 			}
 		})
 	}
@@ -556,12 +559,28 @@ func TestNewSampler(t *testing.T) {
 // TestNewSampler_InvalidArg verifies that an invalid OTEL_TRACES_SAMPLER_ARG
 // falls back to cfg.TracesSampleRatio without panicking.
 func TestNewSampler_InvalidArg(t *testing.T) {
-	cfg := OTelConfig{TracesSampleRatio: 0.5}
-	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
-	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "invalid")
-
+	cfg := OTelConfig{
+		TracesSampleRatio: 0.5,
+		TracesSampler:     "parentbased_traceidratio",
+		TracesSamplerArg:  "invalid",
+	}
 	s := newSampler(cfg)
 	if s == nil {
-		t.Error("newSampler returned nil for invalid OTEL_TRACES_SAMPLER_ARG")
+		t.Fatal("newSampler returned nil for invalid OTEL_TRACES_SAMPLER_ARG")
+	}
+}
+
+// TestNewSampler_ParentHonored verifies that parent-based samplers
+// correctly honor parent span sampling decisions.
+func TestNewSampler_ParentHonored(t *testing.T) {
+	cfg := OTelConfig{TracesSampleRatio: 1.0}
+	s := newSampler(cfg) // default = parentbased_traceidratio
+
+	// With a sampled parent, child should also be sampled
+	sampledParent := oteltrace.SpanContext{}.WithTraceFlags(oteltrace.FlagsSampled)
+	parentCtx := oteltrace.ContextWithRemoteSpanContext(context.Background(), sampledParent)
+	result := s.ShouldSample(trace.SamplingParameters{ParentContext: parentCtx})
+	if result.Decision != trace.RecordAndSample {
+		t.Errorf("expected RecordAndSample with sampled parent, got %v", result.Decision)
 	}
 }
