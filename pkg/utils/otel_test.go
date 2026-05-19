@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel/sdk/trace"
-	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestOTelConfigFromEnv_Defaults verifies that OTelConfigFromEnv returns
@@ -528,13 +527,27 @@ func TestNewSampler_InvalidArg(t *testing.T) {
 // TestNewSampler_ParentHonored verifies that parent-based samplers
 // correctly honor parent span sampling decisions.
 func TestNewSampler_ParentHonored(t *testing.T) {
-	cfg := OTelConfig{}
+	cfg := OTelConfig{
+		TracesSampler:    "parentbased_traceidratio",
+		TracesSamplerArg: "0.0",
+	}
 	s := newSampler(cfg) // default = parentbased_traceidratio
 
-	// With a sampled parent, child should also be sampled
-	sampledParent := oteltrace.SpanContext{}.WithTraceFlags(oteltrace.FlagsSampled)
-	parentCtx := oteltrace.ContextWithRemoteSpanContext(context.Background(), sampledParent)
-	result := s.ShouldSample(trace.SamplingParameters{ParentContext: parentCtx})
+	// Without parent, ratio=0.0 should drop.
+	result := s.ShouldSample(trace.SamplingParameters{ParentContext: context.Background()})
+	if result.Decision != trace.Drop {
+		t.Errorf("expected Drop without parent at ratio 0.0, got %v", result.Decision)
+	}
+
+	// With a sampled parent span (created via tracer), child should also be sampled
+	// even though ratio=0.0, because parent-based sampler honors the parent's decision.
+	tp := trace.NewTracerProvider(trace.WithSampler(trace.AlwaysSample()))
+	defer tp.ForceFlush(context.Background())
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "parent")
+	defer span.End()
+
+	result = s.ShouldSample(trace.SamplingParameters{ParentContext: ctx})
 	if result.Decision != trace.RecordAndSample {
 		t.Errorf("expected RecordAndSample with sampled parent, got %v", result.Decision)
 	}
