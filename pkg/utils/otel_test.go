@@ -131,12 +131,12 @@ func TestOTelConfigFromEnv_InsecureFlag(t *testing.T) {
 // disabled, and that the returned shutdown function works correctly.
 func TestSetupOTelSDKWithConfig_AllDisabled(t *testing.T) {
 	cfg := OTelConfig{
-		ServiceName:    "test-service",
-		ServiceVersion: "1.0.0",
-		Protocol:       OTelProtocolGRPC,
-		TracesExporter: OTelExporterNone,
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		TracesExporter:  OTelExporterNone,
 		MetricsExporter: OTelExporterNone,
-		LogsExporter:   OTelExporterNone,
+		LogsExporter:    OTelExporterNone,
 	}
 
 	ctx := context.Background()
@@ -162,12 +162,12 @@ func TestSetupOTelSDKWithConfig_AllDisabled(t *testing.T) {
 // graceful shutdown scenarios where shutdown may be triggered multiple times.
 func TestSetupOTelSDKWithConfig_ShutdownIdempotent(t *testing.T) {
 	cfg := OTelConfig{
-		ServiceName:    "test-service",
-		ServiceVersion: "1.0.0",
-		Protocol:       OTelProtocolGRPC,
-		TracesExporter: OTelExporterNone,
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		TracesExporter:  OTelExporterNone,
 		MetricsExporter: OTelExporterNone,
-		LogsExporter:   OTelExporterNone,
+		LogsExporter:    OTelExporterNone,
 	}
 
 	ctx := context.Background()
