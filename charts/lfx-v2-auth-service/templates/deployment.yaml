@@ -79,17 +79,14 @@ spec:
             value: {{ $otelTracesExporter | quote }}
           {{- end }}
           {{- $otelTracesSampler := .Values.app.otel.tracesSampler | toString | trim }}
-          {{- $otelTracesSamplerNormalized := $otelTracesSampler | lower }}
           {{- if ne $otelTracesSampler "" }}
           - name: OTEL_TRACES_SAMPLER
             value: {{ $otelTracesSampler | quote }}
-          {{- if or (eq $otelTracesSamplerNormalized "traceidratio") (eq $otelTracesSamplerNormalized "parentbased_traceidratio") }}
+          {{- end }}
           {{- $otelTracesSamplerArg := .Values.app.otel.tracesSamplerArg | toString | trim }}
           {{- if ne $otelTracesSamplerArg "" }}
           - name: OTEL_TRACES_SAMPLER_ARG
             value: {{ $otelTracesSamplerArg | quote }}
-          {{- end }}
-          {{- end }}
           {{- end }}
           {{- $otelMetricsExporter := .Values.app.otel.metricsExporter | toString | trim }}
           {{- if ne $otelMetricsExporter "" }}
