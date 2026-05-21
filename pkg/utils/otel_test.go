@@ -542,7 +542,11 @@ func TestNewSampler_ParentHonored(t *testing.T) {
 	// With a sampled parent span (created via tracer), child should also be sampled
 	// even though ratio=0.0, because parent-based sampler honors the parent's decision.
 	tp := trace.NewTracerProvider(trace.WithSampler(trace.AlwaysSample()))
-	defer tp.ForceFlush(context.Background())
+	defer func() {
+		if err := tp.ForceFlush(context.Background()); err != nil {
+			t.Logf("ForceFlush error: %v", err)
+		}
+	}()
 	tracer := tp.Tracer("test")
 	ctx, span := tracer.Start(context.Background(), "parent")
 	defer span.End()
