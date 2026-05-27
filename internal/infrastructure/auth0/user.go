@@ -578,14 +578,7 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 			"primary_user_id", redaction.Redact(primaryUserID),
 		)
 		// Best-effort rollback: delete the orphaned stub user.
-		apiDelete := httpclient.NewAPIRequest(
-			u.httpClient,
-			httpclient.WithMethod(http.MethodDelete),
-			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUser.UserID))),
-			httpclient.WithToken(m2mToken),
-			httpclient.WithDescription("rollback: delete orphaned stub user"),
-		)
-		if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		if errDel := u.deleteSystemManagedUser(ctx, stubUser.UserID, m2mToken); errDel != nil {
 			slog.WarnContext(ctx, "rollback failed: could not delete orphaned stub user",
 				"error", errDel,
 				"stub_user_id", redaction.Redact(stubUser.UserID),
@@ -729,5 +722,43 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 		"user_id", redaction.Redact(userID),
 	)
 
+	return nil
+}
+
+// deleteSystemManagedUser deletes an Auth0 user but only if its
+// app_metadata.system_managed is true. The pre-flight GET is defense-in-depth:
+// it ensures this helper can never be used to delete a real human account even
+// if a future caller passes the wrong user_id. A non-404 fetch failure or a
+// missing/false system_managed flag aborts the delete.
+func (u *userReaderWriter) deleteSystemManagedUser(ctx context.Context, userID, m2mToken string) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify system-managed before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		return errors.NewUnexpected(fmt.Sprintf("failed to verify system_managed before delete (status %d)", statusCode), errGet)
+	}
+	if target.AppMetadata == nil || !target.AppMetadata.SystemManaged {
+		return errors.NewForbidden("refusing to delete user without app_metadata.system_managed=true")
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete system-managed user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete system-managed user", errDel)
+	}
 	return nil
 }
