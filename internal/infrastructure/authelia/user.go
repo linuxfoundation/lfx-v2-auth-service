@@ -370,14 +370,26 @@ func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 		return errs.NewValidation("identity token is required")
 	}
 
+	// The identity token submitted with link_with.identity_token is the
+	// short-lived ID token this service mints in VerifyEmailLinking, signed
+	// with the service's own RSA key. We must verify the signature; otherwise
+	// any caller holding a valid auth_token can forge an unsigned (alg=none)
+	// JWT with arbitrary sub/email and link any identity to their account.
+	publicKey, err := jwt.GetDefaultTestPublicKey()
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to load identity-token verification key", "error", err)
+		return errs.NewUnexpected("failed to load identity-token verification key", err)
+	}
 	opts := &jwt.ParseOptions{
-		RequireExpiration: false,
+		VerifySignature:   true,
+		SigningKey:        publicKey,
+		RequireExpiration: true,
 		AllowBearerPrefix: true,
 		RequireSubject:    true,
 	}
-	claims, err := jwt.ParseUnverified(ctx, request.LinkWith.IdentityToken, opts)
+	claims, err := jwt.ParseVerified(ctx, request.LinkWith.IdentityToken, opts)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to parse identity token", "error", err)
+		slog.ErrorContext(ctx, "failed to verify identity token", "error", err)
 		return errs.NewValidation("invalid identity token")
 	}
 
