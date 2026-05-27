@@ -62,6 +62,7 @@ func loadUsersFromYAML(ctx context.Context) ([]*model.User, error) {
 	return users, nil
 }
 
+// GetUser fetches a user from the in-memory mock store by user_id.
 func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: getting user", "user", user)
 
@@ -92,6 +93,7 @@ func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User
 	return nil, errors.NewNotFound("user not found")
 }
 
+// SearchUser searches the in-memory mock store for a user matching the given criteria.
 func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: searching user", "user", user, "criteria", criteria)
 
@@ -112,6 +114,7 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	return result, nil
 }
 
+// UpdateUser applies the provided changes to a mock user record.
 func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: updating user", "user", user)
 
@@ -219,6 +222,7 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 	return &updatedUser, nil
 }
 
+// SendVerificationAlternateEmail is a no-op in the mock adapter.
 func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
 
@@ -266,6 +270,7 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 	return nil
 }
 
+// VerifyAlternateEmail simulates verifying an alternate email in the mock store.
 func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
 
@@ -338,11 +343,13 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	}, nil
 }
 
+// ValidateLinkRequest is a no-op in the mock adapter.
 func (u *userWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "no validations for mock request")
 	return nil
 }
 
+// LinkIdentity links a secondary identity onto a mock primary user.
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "mock: linking identity")
 
@@ -450,6 +457,7 @@ func (u *userWriter) linkSocialIdentity(ctx context.Context, request *model.Link
 	return nil
 }
 
+// UnlinkIdentity unlinks an identity from a mock primary user.
 func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
 	slog.DebugContext(ctx, "mock: unlinking identity")
 
@@ -488,6 +496,7 @@ func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkId
 	return nil
 }
 
+// ChangePassword updates the password for a mock user.
 func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
 	if user == nil {
 		return errors.NewValidation("user is required")
@@ -498,6 +507,7 @@ func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, curre
 	return nil
 }
 
+// SendResetPasswordLink is a no-op in the mock adapter.
 func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
 	if user == nil {
 		return errors.NewValidation("user is required")
@@ -508,6 +518,7 @@ func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User
 	return nil
 }
 
+// SetPrimaryEmail updates the primary email on a mock user.
 func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
 	slog.DebugContext(ctx, "mock: setting primary email",
 		"user_id", redaction.Redact(userID),
@@ -574,6 +585,7 @@ func (u *userWriter) AddSystemManagedEmail(_ context.Context, primaryUserID, ema
 	return stubID, nil
 }
 
+// MetadataLookup resolves a user via metadata lookup in the mock store.
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", redaction.Redact(input))
 

@@ -53,6 +53,7 @@ type userReaderWriter struct {
 	errorResponse       *ErrorResponse
 }
 
+// SearchUser searches Auth0 for a user matching the given criteria (email, username, or user_id).
 func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 
 	filterer := newUserFilterer(criteria, user)
@@ -122,6 +123,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 	return nil, errors.NewNotFound("user not found")
 }
 
+// GetUser fetches the full Auth0 user record by user_id.
 func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	slog.DebugContext(ctx, "getting user", "user_id", user.UserID)
@@ -242,6 +244,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	return user, nil
 }
 
+// UpdateUser applies the provided changes to the Auth0 user via PATCH.
 func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	if u.config.JWTVerificationConfig == nil {
@@ -302,6 +305,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	return updatedUser, nil
 }
 
+// SendVerificationAlternateEmail triggers Auth0 to send a verification link for an alternate email.
 func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 
 	if u.emailLinkingFlow == nil {
@@ -318,6 +322,7 @@ func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return nil
 }
 
+// VerifyAlternateEmail completes verification of an alternate email using the provided code/token.
 func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 
 	if u.emailLinkingFlow == nil {
@@ -348,6 +353,7 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	return authResponse, nil
 }
 
+// ValidateLinkRequest performs backend-specific validation on a link-identity request before linking.
 func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
 	if request == nil {
 		return errors.NewValidation("link identity request is required")
@@ -370,6 +376,7 @@ func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *mod
 	return nil
 }
 
+// LinkIdentity links the secondary identity in the request onto the primary Auth0 user.
 func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 
 	if u.identityLinkingFlow == nil {
@@ -413,6 +420,7 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	return nil
 }
 
+// UnlinkIdentity unlinks the identity in the request from the primary Auth0 user, refusing system-managed identities.
 func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
 
 	if u.identityLinkingFlow == nil {

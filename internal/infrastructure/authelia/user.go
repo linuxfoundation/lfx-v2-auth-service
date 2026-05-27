@@ -277,6 +277,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	return existingUser.User, nil
 }
 
+// SendVerificationAlternateEmail triggers an email verification link via the Authelia backend.
 func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "sending alternate email verification",
 		"alternate_email", redaction.RedactEmail(alternateEmail),
@@ -307,6 +308,7 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return nil
 }
 
+// VerifyAlternateEmail completes verification of an alternate email for an Authelia-backed user.
 func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 
 	if email.Email == "" || email.OTP == "" {
@@ -350,11 +352,13 @@ func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	}, nil
 }
 
+// ValidateLinkRequest is a no-op for Authelia; link requests are validated implicitly by LinkIdentity.
 func (a *userReaderWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "no validations for authelia request")
 	return nil
 }
 
+// LinkIdentity links a secondary identity onto an Authelia-backed primary user.
 func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	if request == nil {
 		return errs.NewValidation("request is required")
@@ -490,6 +494,7 @@ func (a *userReaderWriter) linkSocialIdentity(ctx context.Context, request *mode
 	return nil
 }
 
+// UnlinkIdentity unlinks an identity from an Authelia-backed primary user.
 func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
 	if request == nil {
 		return errs.NewValidation("request is required")
@@ -541,14 +546,17 @@ func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	return nil
 }
 
+// ChangePassword is not supported for Authelia users.
 func (a *userReaderWriter) ChangePassword(_ context.Context, _ *model.User, _, _ string) error {
 	return errs.NewValidation("password change is not supported for Authelia users")
 }
 
+// SendResetPasswordLink is not supported for Authelia users.
 func (a *userReaderWriter) SendResetPasswordLink(_ context.Context, _ *model.User) error {
 	return errs.NewValidation("password reset link is not supported for Authelia users")
 }
 
+// SetPrimaryEmail is not supported for Authelia users.
 func (a *userReaderWriter) SetPrimaryEmail(_ context.Context, _ string, _ string) error {
 	return errs.NewValidation("set primary email is not supported for Authelia users")
 }
