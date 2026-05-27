@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -46,6 +47,7 @@ type messageHandlerOrchestrator struct {
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
 	eventPublisher   port.EventPublisher
+	aliasManager     port.AliasManager
 }
 
 // MessageHandlerOrchestratorOption defines a function type for setting options
@@ -104,6 +106,13 @@ func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHa
 func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.eventPublisher = eventPublisher
+	}
+}
+
+// WithAliasManagerForMessageHandler sets the alias manager for the message handler orchestrator
+func WithAliasManagerForMessageHandler(aliasManager port.AliasManager) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.aliasManager = aliasManager
 	}
 }
 
@@ -892,6 +901,118 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 	}
 
 	return responseJSON, nil
+}
+
+// addLcomAliasRequest is the JSON payload for lfx.auth-service.add_lcom_alias
+type addLcomAliasRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Alias string `json:"alias"`
+}
+
+// addLcomAliasResponse is the reply for lfx.auth-service.add_lcom_alias
+type addLcomAliasResponse struct {
+	Success bool   `json:"success"`
+	Email   string `json:"email,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AddLcomAlias claims an @linux.com alias for the authenticated caller by
+// creating a system-managed Auth0 linked identity via the Management API.
+//
+// Flow:
+//  1. Validate JWT (UserUpdateIdentityRequiredScope), extract sub.
+//  2. Reject if caller already has a @linux.com identity (already_claimed).
+//  3. Validate alias local part (alias_invalid / alias_reserved).
+//  4. Search Auth0 to ensure the full address isn't already taken (alias_not_available).
+//  5. Call AddSystemManagedEmail and return the confirmed address.
+func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.aliasManager == nil {
+		return m.errorResponse("alias service unavailable"), nil
+	}
+	if m.userReader == nil {
+		return m.errorResponse("auth service unavailable"), nil
+	}
+
+	var request addLcomAliasRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
+	if errLookup != nil {
+		return m.errorResponse(errLookup.Error()), nil
+	}
+
+	fullUser, errGetUser := m.userReader.GetUser(ctx, user)
+	if errGetUser != nil {
+		return m.errorResponse(errGetUser.Error()), nil
+	}
+
+	// Check if the user already has a @linux.com identity.
+	for _, id := range fullUser.Identities {
+		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), "@linux.com") {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+	for _, alt := range fullUser.AlternateEmails {
+		if strings.HasSuffix(strings.ToLower(alt.Email), "@linux.com") {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+
+	// Parse optional extra reserved names from env (comma-separated).
+	var extraReserved []string
+	if raw := strings.TrimSpace(os.Getenv(constants.LcomAliasReservedExtraEnvKey)); raw != "" {
+		for _, n := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(n); trimmed != "" {
+				extraReserved = append(extraReserved, trimmed)
+			}
+		}
+	}
+
+	normalised, errCode := model.ValidateLcomAlias(request.Alias, extraReserved)
+	if errCode != "" {
+		return m.errorResponse(errCode), nil
+	}
+
+	fullEmail := normalised + "@linux.com"
+
+	// Verify the address isn't already claimed in Auth0.
+	if errExists := m.checkEmailExists(ctx, fullEmail); errExists != nil {
+		slog.DebugContext(ctx, "alias already exists in Auth0",
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse("alias_not_available"), nil
+	}
+
+	stubID, errAdd := m.aliasManager.AddSystemManagedEmail(ctx, fullUser.UserID, fullEmail)
+	if errAdd != nil {
+		slog.ErrorContext(ctx, "failed to add system-managed email",
+			"error", errAdd,
+			"user_id", redaction.Redact(fullUser.UserID),
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse(errAdd.Error()), nil
+	}
+
+	slog.DebugContext(ctx, "lcom alias claimed successfully",
+		"user_id", redaction.Redact(fullUser.UserID),
+		"stub_id", redaction.Redact(stubID),
+		"email", redaction.RedactEmail(fullEmail),
+	)
+
+	resp, err := json.Marshal(addLcomAliasResponse{Success: true, Email: fullEmail})
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+	return resp, nil
 }
 
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern

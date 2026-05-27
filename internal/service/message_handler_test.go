@@ -2978,3 +2978,337 @@ func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
 		})
 	}
 }
+
+// mockAliasManager is a mock implementation of port.AliasManager for testing.
+type mockAliasManager struct {
+	addSystemManagedEmailFunc func(ctx context.Context, primaryUserID, email string) (string, error)
+	// recorded calls for assertion
+	calledWith []struct{ userID, email string }
+}
+
+func (m *mockAliasManager) AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error) {
+	m.calledWith = append(m.calledWith, struct{ userID, email string }{primaryUserID, email})
+	if m.addSystemManagedEmailFunc != nil {
+		return m.addSystemManagedEmailFunc(ctx, primaryUserID, email)
+	}
+	return "email|stub123", nil
+}
+
+func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
+	ctx := context.Background()
+
+	const validToken = "valid-jwt-token"
+	const userID = "auth0|user001"
+
+	defaultReader := func() *mockUserServiceReader {
+		return &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{UserID: userID, Sub: userID}, nil
+			},
+			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+				// no match — alias is available
+				return nil, errors.NewNotFound("not found")
+			},
+		}
+	}
+
+	msgFor := func(token, alias string) *mockTransportMessenger {
+		data, _ := json.Marshal(map[string]interface{}{
+			"user":  map[string]string{"auth_token": token},
+			"alias": alias,
+		})
+		return &mockTransportMessenger{data: data}
+	}
+
+	parseReply := func(t *testing.T, result []byte) map[string]interface{} {
+		t.Helper()
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("failed to parse reply: %v", err)
+		}
+		return out
+	}
+
+	t.Run("alias service unavailable", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias service unavailable" {
+			t.Errorf("expected alias service unavailable, got %v", reply["error"])
+		}
+	})
+
+	t.Run("auth service unavailable", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		handler := NewMessageHandlerOrchestrator(
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "auth service unavailable" {
+			t.Errorf("expected auth service unavailable, got %v", reply["error"])
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		msg := &mockTransportMessenger{data: []byte(`{bad json`)}
+		result, err := handler.AddLcomAlias(ctx, msg)
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "failed to unmarshal request" {
+			t.Errorf("expected unmarshal error, got %v", reply["error"])
+		}
+	})
+
+	t.Run("missing auth_token", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		data, _ := json.Marshal(map[string]interface{}{"alias": "jdoe"})
+		result, err := handler.AddLcomAlias(ctx, &mockTransportMessenger{data: data})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "auth_token is required" {
+			t.Errorf("expected auth_token required, got %v", reply["error"])
+		}
+	})
+
+	t.Run("MetadataLookup fails", func(t *testing.T) {
+		reader := &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return nil, errors.NewValidation("invalid token")
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] == nil || reply["error"] == "" {
+			t.Errorf("expected error from MetadataLookup, got %v", reply)
+		}
+	})
+
+	t.Run("already_claimed via Identities", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		reader := &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserID: userID,
+					Identities: []model.Identity{
+						{
+							Connection:    constants.EmailConnection,
+							Email:         "jdoe@linux.com",
+							EmailVerified: true,
+						},
+					},
+				}, nil
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "other"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "already_claimed" {
+			t.Errorf("expected already_claimed, got %v", reply["error"])
+		}
+		if len(alias.calledWith) != 0 {
+			t.Error("AddSystemManagedEmail must not be called when already_claimed")
+		}
+	})
+
+	t.Run("already_claimed via AlternateEmails", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		reader := &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserID: userID,
+					AlternateEmails: []model.Email{
+						{Email: "jdoe@linux.com", Verified: true},
+					},
+				}, nil
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "other"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "already_claimed" {
+			t.Errorf("expected already_claimed, got %v", reply["error"])
+		}
+	})
+
+	t.Run("alias_invalid — empty alias", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, ""))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias_invalid" {
+			t.Errorf("expected alias_invalid, got %v", reply["error"])
+		}
+	})
+
+	t.Run("alias_invalid — banned char", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "j*doe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias_invalid" {
+			t.Errorf("expected alias_invalid, got %v", reply["error"])
+		}
+	})
+
+	t.Run("alias_reserved", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "admin"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias_reserved" {
+			t.Errorf("expected alias_reserved, got %v", reply["error"])
+		}
+	})
+
+	t.Run("alias_not_available — email already claimed in Auth0", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		reader := &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+				// Simulate another user owns jdoe@linux.com as primary email.
+				if fmt.Sprintf("%v", user.PrimaryEmail) == "jdoe@linux.com" || criteria == constants.CriteriaTypeAlternateEmail {
+					return &model.User{
+						UserID:       "auth0|otheruser",
+						PrimaryEmail: "jdoe@linux.com",
+					}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias_not_available" {
+			t.Errorf("expected alias_not_available, got %v", reply["error"])
+		}
+		if len(alias.calledWith) != 0 {
+			t.Error("AddSystemManagedEmail must not be called when alias not available")
+		}
+	})
+
+	t.Run("AddSystemManagedEmail fails — error propagated", func(t *testing.T) {
+		alias := &mockAliasManager{
+			addSystemManagedEmailFunc: func(ctx context.Context, primaryUserID, email string) (string, error) {
+				return "", errors.NewUnexpected("auth0 create failed", nil)
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] == nil || reply["error"] == "" {
+			t.Errorf("expected error from AddSystemManagedEmail, got %v", reply)
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+
+		if reply["error"] != nil && reply["error"] != "" {
+			t.Errorf("unexpected error: %v", reply["error"])
+		}
+		if reply["success"] != true {
+			t.Errorf("expected success=true, got %v", reply["success"])
+		}
+		if reply["email"] != "jdoe@linux.com" {
+			t.Errorf("expected email=jdoe@linux.com, got %v", reply["email"])
+		}
+		if len(alias.calledWith) != 1 {
+			t.Fatalf("expected 1 call to AddSystemManagedEmail, got %d", len(alias.calledWith))
+		}
+		if alias.calledWith[0].userID != userID {
+			t.Errorf("expected userID=%s, got %s", userID, alias.calledWith[0].userID)
+		}
+		if alias.calledWith[0].email != "jdoe@linux.com" {
+			t.Errorf("expected email=jdoe@linux.com, got %s", alias.calledWith[0].email)
+		}
+	})
+}

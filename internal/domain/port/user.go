@@ -16,6 +16,7 @@ type UserReaderWriter interface {
 	EmailHandler
 	IdentityLinker
 	PasswordHandler
+	AliasManager
 }
 
 // UserReader defines the behavior of the user reader
@@ -48,4 +49,14 @@ type EmailHandler interface {
 type PasswordHandler interface {
 	ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error
 	SendResetPasswordLink(ctx context.Context, user *model.User) error
+}
+
+// AliasManager defines the behavior for managing system-managed email aliases.
+// It is kept separate from IdentityLinker because the link is server-initiated
+// (M2M) and does not require a user-facing identity token.
+type AliasManager interface {
+	// AddSystemManagedEmail creates a stub passwordless user for email, links it
+	// to primaryUserID, and marks it system_managed so it cannot be user-unlinkd.
+	// Returns the stub Auth0 user_id for audit purposes.
+	AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error)
 }

@@ -194,6 +194,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
 		service.WithPasswordHandlerForMessageHandler(userReaderWriter),
 		service.WithEventPublisherForMessageHandler(natsClient),
+		service.WithAliasManagerForMessageHandler(userReaderWriter),
 	}
 
 	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
@@ -234,6 +235,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
+		constants.UserAddLcomAliasSubject:             messageHandlerService.HandleMessage,
 		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
 		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,

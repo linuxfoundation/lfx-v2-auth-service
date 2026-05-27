@@ -553,6 +553,12 @@ func (a *userReaderWriter) SetPrimaryEmail(_ context.Context, _ string, _ string
 	return errs.NewValidation("set primary email is not supported for Authelia users")
 }
 
+// AddSystemManagedEmail is not supported for Authelia users; system-managed
+// aliases require the Auth0 Management API backend.
+func (a *userReaderWriter) AddSystemManagedEmail(_ context.Context, _, _ string) (string, error) {
+	return "", errs.NewValidation("add system managed email is not supported for Authelia users")
+}
+
 // NewUserReaderWriter creates a new Authelia User repository
 func NewUserReaderWriter(ctx context.Context, config map[string]string, natsClient *nats.NATSClient) (port.UserReaderWriter, error) {
 	// Set defaults in case of not set

@@ -550,6 +550,25 @@ func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email s
 	return nil
 }
 
+// AddSystemManagedEmail is a no-op stub for the mock adapter. It records the
+// email as a verified linked identity on the user so tests can verify it
+// surfaces in GetUserEmails / user_emails.read.
+func (u *userWriter) AddSystemManagedEmail(_ context.Context, primaryUserID, email string) (string, error) {
+	user, exists := u.users[primaryUserID]
+	if !exists {
+		return "", errors.NewNotFound("user not found")
+	}
+	stubID := "email|mock-" + email
+	user.Identities = append(user.Identities, model.Identity{
+		Provider:      "email",
+		IdentityID:    "mock-" + email,
+		Connection:    "email",
+		Email:         email,
+		EmailVerified: true,
+	})
+	return stubID, nil
+}
+
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
 	slog.DebugContext(ctx, "mock: metadata lookup", "input", redaction.Redact(input))
 

@@ -444,6 +444,36 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 		"provider", request.Unlink.Provider,
 	)
 
+	// Guard: refuse to unlink system-managed identities (e.g. @linux.com aliases).
+	// Fetch the stub user via M2M to read its app_metadata.
+	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
+	stubUser, errGetStub := u.GetUser(ctx, &model.User{UserID: stubUserID})
+	if errGetStub == nil && stubUser != nil {
+		// We need the raw app_metadata, not the domain model — re-fetch with the
+		// full Auth0User struct instead of going through ToUser() which drops it.
+		m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+		if errToken != nil {
+			return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
+		}
+		apiRequest := httpclient.NewAPIRequest(
+			u.httpClient,
+			httpclient.WithMethod(http.MethodGet),
+			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
+			httpclient.WithToken(m2mToken),
+			httpclient.WithDescription("get stub user for unlink guard"),
+		)
+		var rawStub Auth0User
+		if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
+			slog.WarnContext(ctx, "could not fetch stub user for system-managed check; allowing unlink",
+				"stub_user_id", redaction.Redact(stubUserID),
+				"status_code", statusCode,
+				"error", callErr,
+			)
+		} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
+			return errors.NewForbidden("system_managed_identity")
+		}
+	}
+
 	errUnlinkIdentity := u.identityLinkingFlow.UnlinkIdentityFromUser(
 		ctx,
 		request.User.UserID,
@@ -460,6 +490,116 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	)
 
 	return nil
+}
+
+// AddSystemManagedEmail creates a stub Auth0 passwordless user for email,
+// links it to primaryUserID via the Management API (M2M, no user-facing
+// magic-link), and marks it system_managed so it cannot be user-unlinked.
+// Returns the stub user_id. On link failure a best-effort cleanup of the stub
+// is attempted before the error is returned.
+func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error) {
+	if strings.TrimSpace(primaryUserID) == "" {
+		return "", errors.NewValidation("primary_user_id is required")
+	}
+	if strings.TrimSpace(email) == "" {
+		return "", errors.NewValidation("email is required")
+	}
+
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return "", errors.NewUnexpected("failed to get M2M token for add system managed email", errToken)
+	}
+
+	// Step 1: create the stub passwordless user.
+	createPayload := systemManagedUserPayload{
+		Connection:    constants.EmailConnection,
+		Email:         email,
+		EmailVerified: true, // safe: LF controls the linux.com domain
+		AppMetadata:   &Auth0AppMetadata{SystemManaged: true},
+	}
+
+	apiCreate := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPost),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users", u.config.Domain)),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("create system-managed stub user"),
+		httpclient.WithBody(createPayload),
+	)
+
+	var stubUser Auth0User
+	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
+	if errCreate != nil {
+		slog.ErrorContext(ctx, "failed to create system-managed stub user",
+			"error", errCreate,
+			"status_code", statusCode,
+			"email", redaction.RedactEmail(email),
+		)
+		return "", errors.NewUnexpected("failed to create system-managed stub user", errCreate)
+	}
+
+	if stubUser.UserID == "" {
+		return "", errors.NewUnexpected("Auth0 returned empty user_id for created stub user")
+	}
+
+	slog.DebugContext(ctx, "system-managed stub user created",
+		"stub_user_id", redaction.Redact(stubUser.UserID),
+	)
+
+	// Step 2: link the stub to the primary user.
+	// Auth0's direct-link endpoint expects the provider-local part only (without the "email|" prefix).
+	localID := stubUser.UserID
+	if idx := strings.Index(localID, "|"); idx >= 0 {
+		localID = localID[idx+1:]
+	}
+
+	linkPayload := linkSubIdentityPayload{
+		Provider: constants.EmailConnection,
+		UserID:   localID,
+	}
+
+	apiLink := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPost),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s/identities", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("link system-managed stub to primary user"),
+		httpclient.WithBody(linkPayload),
+	)
+
+	var linkedIdentities []any
+	statusCode, errLink := apiLink.Call(ctx, &linkedIdentities)
+	if errLink != nil {
+		slog.ErrorContext(ctx, "failed to link system-managed stub to primary user; attempting rollback",
+			"error", errLink,
+			"status_code", statusCode,
+			"stub_user_id", redaction.Redact(stubUser.UserID),
+			"primary_user_id", redaction.Redact(primaryUserID),
+		)
+		// Best-effort rollback: delete the orphaned stub user.
+		apiDelete := httpclient.NewAPIRequest(
+			u.httpClient,
+			httpclient.WithMethod(http.MethodDelete),
+			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUser.UserID))),
+			httpclient.WithToken(m2mToken),
+			httpclient.WithDescription("rollback: delete orphaned stub user"),
+		)
+		if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+			slog.WarnContext(ctx, "rollback failed: could not delete orphaned stub user",
+				"error", errDel,
+				"stub_user_id", redaction.Redact(stubUser.UserID),
+			)
+		}
+		return "", errors.NewUnexpected("failed to link system-managed email identity", errLink)
+	}
+
+	slog.DebugContext(ctx, "system-managed email linked successfully",
+		"primary_user_id", redaction.Redact(primaryUserID),
+		"stub_user_id", redaction.Redact(stubUser.UserID),
+		"email", redaction.RedactEmail(email),
+	)
+
+	return stubUser.UserID, nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration

@@ -54,6 +54,11 @@ const (
 	// UserEmailSetPrimarySubject is the subject for setting a user's primary email.
 	// The subject is of the form: lfx.auth-service.user_emails.set_primary
 	UserEmailSetPrimarySubject = "lfx.auth-service.user_emails.set_primary"
+
+	// UserAddLcomAliasSubject is the subject for claiming an `@linux.com` alias
+	// as a system-managed Auth0 linked identity.
+	// The subject is of the form: lfx.auth-service.add_lcom_alias
+	UserAddLcomAliasSubject = "lfx.auth-service.add_lcom_alias"
 )
 
 const (

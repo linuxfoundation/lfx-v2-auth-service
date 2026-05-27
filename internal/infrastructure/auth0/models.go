@@ -23,6 +23,33 @@ type Auth0User struct {
 	Identities     []Auth0Identity    `json:"identities"`
 	AlternateEmail []Auth0ProfileData `json:"alternate_email,omitempty"`
 	UserMetadata   *Auth0UserMetadata `json:"user_metadata"`
+	AppMetadata    *Auth0AppMetadata  `json:"app_metadata,omitempty"`
+}
+
+// Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.
+// Only fields relevant to this service are modeled; unknown keys are ignored.
+type Auth0AppMetadata struct {
+	// SystemManaged marks an identity that was created by this service on behalf
+	// of the user (e.g. an `@linux.com` alias) and must not be unlinked through
+	// the normal user-initiated unlink flow.
+	SystemManaged bool `json:"system_managed,omitempty"`
+}
+
+// systemManagedUserPayload is the body for POST /api/v2/users when creating a
+// stub passwordless user that will be linked as a system-managed identity.
+type systemManagedUserPayload struct {
+	Connection    string            `json:"connection"`
+	Email         string            `json:"email"`
+	EmailVerified bool              `json:"email_verified"`
+	AppMetadata   *Auth0AppMetadata `json:"app_metadata,omitempty"`
+}
+
+// linkSubIdentityPayload is the body for POST /api/v2/users/{id}/identities when
+// linking by `{provider, user_id}` (the M2M direct-link path), as opposed to the
+// passwordless `link_with` ID-token flow used by LinkIdentityPayload.
+type linkSubIdentityPayload struct {
+	Provider string `json:"provider"`
+	UserID   string `json:"user_id"`
 }
 
 // Auth0Identity represents an identity in Auth0
