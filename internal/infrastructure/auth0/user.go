@@ -453,10 +453,23 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	)
 
 	// Guard: refuse to unlink system-managed identities (e.g. @linux.com aliases).
-	// Fetch the stub user via M2M to read its app_metadata. The check fails closed:
-	// any error other than 404 (which means the stub never existed and there is
-	// nothing to protect) blocks the unlink so a transient Auth0 failure cannot
-	// be used to bypass immutability.
+	// Only the passwordless email connection can hold system-managed identities,
+	// so skip the guard entirely for other providers (google, github, etc.) to
+	// avoid making every social-identity unlink depend on the Management API.
+	// For email-connection unlinks, fetch the stub via M2M to read its
+	// app_metadata. The check fails closed: any error other than 404 (which
+	// means the stub never existed and there is nothing to protect) blocks the
+	// unlink so a transient Auth0 failure cannot be used to bypass immutability.
+	if request.Unlink.Provider != constants.EmailConnection {
+		return u.identityLinkingFlow.UnlinkIdentityFromUser(
+			ctx,
+			request.User.UserID,
+			request.User.AuthToken,
+			request.Unlink.Provider,
+			request.Unlink.IdentityID,
+		)
+	}
+
 	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
