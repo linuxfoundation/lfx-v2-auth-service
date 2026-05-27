@@ -744,7 +744,16 @@ func (u *userReaderWriter) deleteSystemManagedUser(ctx context.Context, userID, 
 	)
 	var target Auth0User
 	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
-		return errors.NewUnexpected(fmt.Sprintf("failed to verify system_managed before delete (status %d)", statusCode), errGet)
+		if statusCode == http.StatusNotFound {
+			// Already gone — nothing to clean up.
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to verify system-managed before delete",
+			"user_id", redaction.Redact(userID),
+			"status_code", statusCode,
+			"error", errGet,
+		)
+		return errors.NewUnexpected("failed to verify system_managed before delete", errGet)
 	}
 	if target.AppMetadata == nil || !target.AppMetadata.SystemManaged {
 		return errors.NewForbidden("refusing to delete user without app_metadata.system_managed=true")

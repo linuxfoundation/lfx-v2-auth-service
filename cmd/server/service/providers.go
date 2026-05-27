@@ -194,10 +194,18 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
 		service.WithPasswordHandlerForMessageHandler(userReaderWriter),
 		service.WithEventPublisherForMessageHandler(natsClient),
-		service.WithAliasManagerForMessageHandler(userReaderWriter),
 	}
 
-	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
+	// Only wire the alias manager for backends that meaningfully support
+	// system-managed @linux.com aliases. Authelia returns a backend-specific
+	// validation error; leaving it nil lets AddLcomAlias surface the stable
+	// "alias service unavailable" guard instead.
+	userRepoType := os.Getenv(constants.UserRepositoryTypeEnvKey)
+	if userRepoType == constants.UserRepositoryTypeAuth0 || userRepoType == constants.UserRepositoryTypeMock || userRepoType == "" {
+		opts = append(opts, service.WithAliasManagerForMessageHandler(userReaderWriter))
+	}
+
+	if userRepoType == constants.UserRepositoryTypeAuth0 {
 		auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
 		if auth0Domain == "" {
 			auth0Domain = fmt.Sprintf("%s.auth0.com", os.Getenv(constants.Auth0TenantEnvKey))
