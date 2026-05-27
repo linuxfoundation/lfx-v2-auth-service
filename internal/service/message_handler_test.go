@@ -3282,11 +3282,8 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		reply := parseReply(t, result)
-		if reply["error"] == "alias_not_available" {
-			t.Errorf("operational error must not be masked as alias_not_available")
-		}
-		if reply["error"] == nil || reply["error"] == "" {
-			t.Errorf("expected propagated lookup error, got %v", reply)
+		if reply["error"] != "search backend unavailable" {
+			t.Errorf("expected propagated lookup error %q, got %v", "search backend unavailable", reply["error"])
 		}
 		if len(alias.calledWith) != 0 {
 			t.Error("AddSystemManagedEmail must not be called when availability lookup fails")
