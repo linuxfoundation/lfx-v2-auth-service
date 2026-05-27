@@ -955,7 +955,11 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 
-	// Check if the user already has a @linux.com identity.
+	// Check if the user already has a @linux.com identity. Cover all three
+	// surfaces: primary email, linked identities, and alternate emails.
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), "@linux.com") {
+		return m.errorResponse("already_claimed"), nil
+	}
 	for _, id := range fullUser.Identities {
 		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), "@linux.com") {
 			return m.errorResponse("already_claimed"), nil
@@ -984,12 +988,24 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 
 	fullEmail := normalised + "@linux.com"
 
-	// Verify the address isn't already claimed in Auth0.
+	// Verify the address isn't already claimed in Auth0. checkEmailExists
+	// returns errs.Validation ("email already linked") for a true conflict and
+	// propagates other errors (e.g. Auth0 search outage) — only the former
+	// should be surfaced as alias_not_available, otherwise we'd mask infra
+	// failures behind a misleading user-facing code.
 	if errExists := m.checkEmailExists(ctx, fullEmail); errExists != nil {
-		slog.DebugContext(ctx, "alias already exists in Auth0",
+		var validationErr errs.Validation
+		if errors.As(errExists, &validationErr) {
+			slog.DebugContext(ctx, "alias already exists in Auth0",
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
+		slog.ErrorContext(ctx, "failed to verify alias availability",
+			"error", errExists,
 			"email", redaction.RedactEmail(fullEmail),
 		)
-		return m.errorResponse("alias_not_available"), nil
+		return m.errorResponse(errExists.Error()), nil
 	}
 
 	stubID, errAdd := m.aliasManager.AddSystemManagedEmail(ctx, fullUser.UserID, fullEmail)

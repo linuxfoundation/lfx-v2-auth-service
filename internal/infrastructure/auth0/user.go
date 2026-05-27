@@ -445,33 +445,34 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	)
 
 	// Guard: refuse to unlink system-managed identities (e.g. @linux.com aliases).
-	// Fetch the stub user via M2M to read its app_metadata.
+	// Fetch the stub user via M2M to read its app_metadata. The check fails closed:
+	// any error other than 404 (which means the stub never existed and there is
+	// nothing to protect) blocks the unlink so a transient Auth0 failure cannot
+	// be used to bypass immutability.
 	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
-	stubUser, errGetStub := u.GetUser(ctx, &model.User{UserID: stubUserID})
-	if errGetStub == nil && stubUser != nil {
-		// We need the raw app_metadata, not the domain model — re-fetch with the
-		// full Auth0User struct instead of going through ToUser() which drops it.
-		m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
-		if errToken != nil {
-			return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
-		}
-		apiRequest := httpclient.NewAPIRequest(
-			u.httpClient,
-			httpclient.WithMethod(http.MethodGet),
-			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
-			httpclient.WithToken(m2mToken),
-			httpclient.WithDescription("get stub user for unlink guard"),
-		)
-		var rawStub Auth0User
-		if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
-			slog.WarnContext(ctx, "could not fetch stub user for system-managed check; allowing unlink",
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
+	}
+	apiRequest := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get stub user for unlink guard"),
+	)
+	var rawStub Auth0User
+	if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
+		if statusCode != http.StatusNotFound {
+			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
 				"stub_user_id", redaction.Redact(stubUserID),
 				"status_code", statusCode,
 				"error", callErr,
 			)
-		} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
-			return errors.NewForbidden("system_managed_identity")
+			return errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
 		}
+	} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
+		return errors.NewForbidden("system_managed_identity")
 	}
 
 	errUnlinkIdentity := u.identityLinkingFlow.UnlinkIdentityFromUser(

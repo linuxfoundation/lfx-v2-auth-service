@@ -34,8 +34,11 @@ var lcomReservedNames = map[string]struct{}{
 }
 
 // lcomBannedChars are characters disallowed in an @linux.com alias local part,
-// ported from itx-service-forwards/forwards.go:309-327.
-const lcomBannedChars = `/*$^:()<>[];@\, `
+// ported from itx-service-forwards/forwards.go:309-327. The double-quote is
+// included to prevent reserved-name bypass via RFC 5322 quoted local-parts
+// (e.g. `"admin"@linux.com` would otherwise parse and canonicalize to
+// `admin@linux.com`, slipping past the reserved-name check on the raw alias).
+const lcomBannedChars = `/*$^:()<>[];@\, "`
 
 // ValidateLcomAlias normalises alias (lowercases + trims) and returns
 // ("", "alias_invalid") or ("", "alias_reserved") on failure, or
@@ -51,8 +54,11 @@ func ValidateLcomAlias(alias string, extraReserved []string) (string, string) {
 		return "", "alias_invalid"
 	}
 
-	// RFC 5322 round-trip: ensure the full address parses cleanly.
-	if _, err := mail.ParseAddress(alias + "@linux.com"); err != nil {
+	// Ensure the address parses and that net/mail's canonical form matches the
+	// input verbatim. This catches any other surface (escapes, encoded forms)
+	// that could let a normalised value differ from `alias`.
+	parsed, err := mail.ParseAddress(alias + "@linux.com")
+	if err != nil || !strings.EqualFold(parsed.Address, alias+"@linux.com") {
 		return "", "alias_invalid"
 	}
 

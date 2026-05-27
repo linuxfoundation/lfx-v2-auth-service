@@ -85,6 +85,16 @@ func TestValidateLcomAlias(t *testing.T) {
 
 		// Invalid — banned chars
 		{
+			name:        "double-quoted alias rejected (RFC 5322 bypass guard)",
+			alias:       `"jdoe"`,
+			wantErrCode: "alias_invalid",
+		},
+		{
+			name:        "double-quoted reserved alias rejected",
+			alias:       `"admin"`,
+			wantErrCode: "alias_invalid",
+		},
+		{
 			name:        "slash",
 			alias:       "jane/doe",
 			wantErrCode: "alias_invalid",

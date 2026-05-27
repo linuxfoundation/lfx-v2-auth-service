@@ -56,7 +56,7 @@ type PasswordHandler interface {
 // (M2M) and does not require a user-facing identity token.
 type AliasManager interface {
 	// AddSystemManagedEmail creates a stub passwordless user for email, links it
-	// to primaryUserID, and marks it system_managed so it cannot be user-unlinkd.
+	// to primaryUserID, and marks it system_managed so it cannot be user-unlinked.
 	// Returns the stub Auth0 user_id for audit purposes.
 	AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error)
 }

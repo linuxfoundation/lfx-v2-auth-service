@@ -559,6 +559,11 @@ func (u *userWriter) AddSystemManagedEmail(_ context.Context, primaryUserID, ema
 		return "", errors.NewNotFound("user not found")
 	}
 	stubID := "email|mock-" + email
+	for _, id := range user.Identities {
+		if id.Provider == "email" && strings.EqualFold(id.Email, email) {
+			return "", errors.NewValidation("email is already linked")
+		}
+	}
 	user.Identities = append(user.Identities, model.Identity{
 		Provider:      "email",
 		IdentityID:    "mock-" + email,

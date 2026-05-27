@@ -3260,6 +3260,39 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 		}
 	})
 
+	t.Run("availability lookup operational error is propagated, not alias_not_available", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		reader := &mockUserServiceReader{
+			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{UserID: userID}, nil
+			},
+			searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+				return nil, errors.NewUnexpected("search backend unavailable", nil)
+			},
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] == "alias_not_available" {
+			t.Errorf("operational error must not be masked as alias_not_available")
+		}
+		if reply["error"] == nil || reply["error"] == "" {
+			t.Errorf("expected propagated lookup error, got %v", reply)
+		}
+		if len(alias.calledWith) != 0 {
+			t.Error("AddSystemManagedEmail must not be called when availability lookup fails")
+		}
+	})
+
 	t.Run("AddSystemManagedEmail fails — error propagated", func(t *testing.T) {
 		alias := &mockAliasManager{
 			addSystemManagedEmailFunc: func(ctx context.Context, primaryUserID, email string) (string, error) {
