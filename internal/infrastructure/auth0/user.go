@@ -452,7 +452,7 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 		"provider", request.Unlink.Provider,
 	)
 
-	// Guard: refuse to unlink system-managed identities (e.g. @linux.com aliases).
+	// Guard: refuse to unlink system-managed identities (e.g. aliases).
 	// Only the passwordless email connection can hold system-managed identities,
 	// so skip the guard entirely for other providers (google, github, etc.) to
 	// avoid making every social-identity unlink depend on the Management API.

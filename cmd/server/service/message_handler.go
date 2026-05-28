@@ -43,7 +43,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
 		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
 		// alias management
-		constants.UserAddLcomAliasSubject: mhs.messageHandler.AddLcomAlias,
+		constants.UserAddAliasSubject: mhs.messageHandler.AddAlias,
 		// password management operations
 		constants.PasswordUpdateSubject:    mhs.messageHandler.ChangePassword,
 		constants.PasswordResetLinkSubject: mhs.messageHandler.SendResetPasswordLink,

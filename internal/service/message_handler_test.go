@@ -2994,11 +2994,16 @@ func (m *mockAliasManager) AddSystemManagedEmail(ctx context.Context, primaryUse
 	return "email|stub123", nil
 }
 
-func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
+func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 	ctx := context.Background()
 
 	const validToken = "valid-jwt-token"
 	const userID = "auth0|user001"
+	const testDomain = "linux.com"
+
+	// Default allow-list for the suite. Subtests that need a different value
+	// override with t.Setenv themselves.
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, testDomain)
 
 	defaultReader := func() *mockUserServiceReader {
 		return &mockUserServiceReader{
@@ -3017,8 +3022,9 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 
 	msgFor := func(token, alias string) *mockTransportMessenger {
 		data, _ := json.Marshal(map[string]interface{}{
-			"user":  map[string]string{"auth_token": token},
-			"alias": alias,
+			"user":   map[string]string{"auth_token": token},
+			"alias":  alias,
+			"domain": testDomain,
 		})
 		return &mockTransportMessenger{data: data}
 	}
@@ -3036,7 +3042,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 		handler := NewMessageHandlerOrchestrator(
 			WithUserReaderForMessageHandler(defaultReader()),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3051,7 +3057,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 		handler := NewMessageHandlerOrchestrator(
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3067,7 +3073,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
 		msg := &mockTransportMessenger{data: []byte(`{bad json`)}
-		result, err := handler.AddLcomAlias(ctx, msg)
+		result, err := handler.AddAlias(ctx, msg)
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3083,13 +3089,68 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
 		data, _ := json.Marshal(map[string]interface{}{"alias": "jdoe"})
-		result, err := handler.AddLcomAlias(ctx, &mockTransportMessenger{data: data})
+		result, err := handler.AddAlias(ctx, &mockTransportMessenger{data: data})
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		reply := parseReply(t, result)
 		if reply["error"] != "auth_token is required" {
 			t.Errorf("expected auth_token required, got %v", reply["error"])
+		}
+	})
+
+	t.Run("domain_not_allowed — missing domain", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		data, _ := json.Marshal(map[string]interface{}{
+			"user":  map[string]string{"auth_token": validToken},
+			"alias": "jdoe",
+		})
+		result, err := handler.AddAlias(ctx, &mockTransportMessenger{data: data})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "domain_not_allowed" {
+			t.Errorf("expected domain_not_allowed, got %v", reply["error"])
+		}
+	})
+
+	t.Run("domain_not_allowed — domain not in allow-list", func(t *testing.T) {
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		data, _ := json.Marshal(map[string]interface{}{
+			"user":   map[string]string{"auth_token": validToken},
+			"alias":  "jdoe",
+			"domain": "evil.example",
+		})
+		result, err := handler.AddAlias(ctx, &mockTransportMessenger{data: data})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "domain_not_allowed" {
+			t.Errorf("expected domain_not_allowed, got %v", reply["error"])
+		}
+	})
+
+	t.Run("domain_not_allowed — allow-list env unset disables feature", func(t *testing.T) {
+		t.Setenv(constants.AllowedAliasDomainsEnvKey, "")
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(&mockAliasManager{}),
+		)
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "domain_not_allowed" {
+			t.Errorf("expected domain_not_allowed, got %v", reply["error"])
 		}
 	})
 
@@ -3103,7 +3164,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3136,7 +3197,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "other"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "other"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3168,7 +3229,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "other"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "other"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3183,7 +3244,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(defaultReader()),
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, ""))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, ""))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3198,7 +3259,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(defaultReader()),
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "j*doe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "j*doe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3213,7 +3274,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(defaultReader()),
 			WithAliasManagerForMessageHandler(&mockAliasManager{}),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "admin"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "admin"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3247,7 +3308,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3277,7 +3338,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3300,7 +3361,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(defaultReader()),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
@@ -3316,7 +3377,7 @@ func TestMessageHandlerOrchestrator_AddLcomAlias(t *testing.T) {
 			WithUserReaderForMessageHandler(defaultReader()),
 			WithAliasManagerForMessageHandler(alias),
 		)
-		result, err := handler.AddLcomAlias(ctx, msgFor(validToken, "jdoe"))
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
 		if err != nil {
 			t.Fatalf("unexpected Go error: %v", err)
 		}

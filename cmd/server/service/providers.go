@@ -197,8 +197,8 @@ func QueueSubscriptions(ctx context.Context) error {
 	}
 
 	// Only wire the alias manager for backends that meaningfully support
-	// system-managed @linux.com aliases. Authelia returns a backend-specific
-	// validation error; leaving it nil lets AddLcomAlias surface the stable
+	// system-managed aliases. Authelia returns a backend-specific validation
+	// error; leaving it nil lets AddAlias surface the stable
 	// "alias service unavailable" guard instead.
 	userRepoType := os.Getenv(constants.UserRepositoryTypeEnvKey)
 	if userRepoType == constants.UserRepositoryTypeAuth0 || userRepoType == constants.UserRepositoryTypeMock || userRepoType == "" {
@@ -243,7 +243,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
-		constants.UserAddLcomAliasSubject:             messageHandlerService.HandleMessage,
+		constants.UserAddAliasSubject:                 messageHandlerService.HandleMessage,
 		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
 		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,

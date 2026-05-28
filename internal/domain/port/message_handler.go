@@ -23,7 +23,7 @@ type UserHandler interface {
 
 // AliasMessageHandler defines the behavior of the alias management domain handlers.
 type AliasMessageHandler interface {
-	AddLcomAlias(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	AddAlias(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // UserReadHandler defines the behavior of the user read/lookup domain handlers

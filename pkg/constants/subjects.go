@@ -55,10 +55,11 @@ const (
 	// The subject is of the form: lfx.auth-service.user_emails.set_primary
 	UserEmailSetPrimarySubject = "lfx.auth-service.user_emails.set_primary"
 
-	// UserAddLcomAliasSubject is the subject for claiming an `@linux.com` alias
-	// as a system-managed Auth0 linked identity.
-	// The subject is of the form: lfx.auth-service.add_lcom_alias
-	UserAddLcomAliasSubject = "lfx.auth-service.add_lcom_alias"
+	// UserAddAliasSubject is the subject for claiming an alias (e.g. `@linux.com`)
+	// as a system-managed Auth0 linked identity. The target domain is supplied
+	// in the request and must be present in ALLOWED_ALIAS_DOMAINS.
+	// The subject is of the form: lfx.auth-service.add_alias
+	UserAddAliasSubject = "lfx.auth-service.add_alias"
 )
 
 const (

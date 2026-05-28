@@ -76,11 +76,19 @@ const (
 	// Auth0LFXOneClientIDEnvKey is the environment variable key for the LFX One Auth0 client ID
 	Auth0LFXOneClientIDEnvKey = "AUTH0_LFX_ONE_CLIENT_ID"
 
-	// LcomAliasReservedExtraEnvKey is a comma-separated list of additional reserved
-	// alias local parts that should be rejected by add_lcom_alias on top of the
+	// AliasReservedExtraEnvKey is a comma-separated list of additional reserved
+	// alias local parts that should be rejected by add_alias on top of the
 	// built-in list. Useful for ops to lock down branding-sensitive names without
 	// a code change.
-	LcomAliasReservedExtraEnvKey = "AUTH0_LCOM_ALIAS_RESERVED_EXTRA"
+	AliasReservedExtraEnvKey = "AUTH0_ALIAS_RESERVED_EXTRA"
+)
+
+const (
+	// AllowedAliasDomainsEnvKey is a comma-separated list of domains that are
+	// permitted as the suffix for add_alias claims. Empty/unset means the
+	// feature is effectively disabled — every claim will be rejected with
+	// domain_not_allowed. Matching is case-insensitive.
+	AllowedAliasDomainsEnvKey = "ALLOWED_ALIAS_DOMAINS"
 )
 
 const (

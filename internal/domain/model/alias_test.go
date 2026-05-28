@@ -8,7 +8,9 @@ import (
 	"testing"
 )
 
-func TestValidateLcomAlias(t *testing.T) {
+func TestValidateAlias(t *testing.T) {
+	const testDomain = "linux.com"
+
 	tests := []struct {
 		name          string
 		alias         string
@@ -267,18 +269,18 @@ func TestValidateLcomAlias(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			norm, errCode := ValidateLcomAlias(tt.alias, tt.extraReserved)
+			norm, errCode := ValidateAlias(tt.alias, testDomain, tt.extraReserved)
 
 			if errCode != tt.wantErrCode {
-				t.Errorf("ValidateLcomAlias(%q) errCode = %q, want %q", tt.alias, errCode, tt.wantErrCode)
+				t.Errorf("ValidateAlias(%q) errCode = %q, want %q", tt.alias, errCode, tt.wantErrCode)
 			}
 
 			if tt.wantErrCode == "" && norm != tt.wantNorm {
-				t.Errorf("ValidateLcomAlias(%q) norm = %q, want %q", tt.alias, norm, tt.wantNorm)
+				t.Errorf("ValidateAlias(%q) norm = %q, want %q", tt.alias, norm, tt.wantNorm)
 			}
 
 			if tt.wantErrCode != "" && norm != "" {
-				t.Errorf("ValidateLcomAlias(%q) expected empty norm on error, got %q", tt.alias, norm)
+				t.Errorf("ValidateAlias(%q) expected empty norm on error, got %q", tt.alias, norm)
 			}
 		})
 	}

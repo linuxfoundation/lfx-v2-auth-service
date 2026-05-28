@@ -30,8 +30,8 @@ type Auth0User struct {
 // Only fields relevant to this service are modeled; unknown keys are ignored.
 type Auth0AppMetadata struct {
 	// SystemManaged marks an identity that was created by this service on behalf
-	// of the user (e.g. an `@linux.com` alias) and must not be unlinked through
-	// the normal user-initiated unlink flow.
+	// of the user (e.g. a system-managed alias such as `@linux.com`) and must
+	// not be unlinked through the normal user-initiated unlink flow.
 	SystemManaged bool `json:"system_managed,omitempty"`
 }
 

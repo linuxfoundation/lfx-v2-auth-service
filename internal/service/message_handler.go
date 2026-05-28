@@ -903,31 +903,34 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 	return responseJSON, nil
 }
 
-// addLcomAliasRequest is the JSON payload for lfx.auth-service.add_lcom_alias
-type addLcomAliasRequest struct {
+// addAliasRequest is the JSON payload for lfx.auth-service.add_alias
+type addAliasRequest struct {
 	User struct {
 		AuthToken string `json:"auth_token"`
 	} `json:"user"`
-	Alias string `json:"alias"`
+	Alias  string `json:"alias"`
+	Domain string `json:"domain"`
 }
 
-// addLcomAliasResponse is the reply for lfx.auth-service.add_lcom_alias
-type addLcomAliasResponse struct {
+// addAliasResponse is the reply for lfx.auth-service.add_alias
+type addAliasResponse struct {
 	Success bool   `json:"success"`
 	Email   string `json:"email,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
 
-// AddLcomAlias claims an @linux.com alias for the authenticated caller by
-// creating a system-managed Auth0 linked identity via the Management API.
+// AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
+// @linux.com) by creating a passwordless Auth0 stub user and linking it via
+// the Management API.
 //
 // Flow:
 //  1. Validate JWT (UserUpdateIdentityRequiredScope), extract sub.
-//  2. Reject if caller already has a @linux.com identity (already_claimed).
-//  3. Validate alias local part (alias_invalid / alias_reserved).
-//  4. Search Auth0 to ensure the full address isn't already taken (alias_not_available).
-//  5. Call AddSystemManagedEmail and return the confirmed address.
-func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+//  2. Validate the requested domain is in ALLOWED_ALIAS_DOMAINS.
+//  3. Reject if caller already has an alias on this domain (already_claimed).
+//  4. Validate alias local part (alias_invalid / alias_reserved).
+//  5. Search Auth0 to ensure the full address isn't already taken (alias_not_available).
+//  6. Call AddSystemManagedEmail and return the confirmed address.
+func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 	if m.aliasManager == nil {
 		return m.errorResponse("alias service unavailable"), nil
 	}
@@ -935,7 +938,7 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 		return m.errorResponse("auth service unavailable"), nil
 	}
 
-	var request addLcomAliasRequest
+	var request addAliasRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
 		return m.errorResponse("failed to unmarshal request"), nil
 	}
@@ -943,6 +946,25 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 	authToken := strings.TrimSpace(request.User.AuthToken)
 	if authToken == "" {
 		return m.errorResponse("auth_token is required"), nil
+	}
+
+	// Validate the requested domain against the server-side allow-list.
+	// Empty/unset env means the feature is disabled — fail closed.
+	requestedDomain := strings.ToLower(strings.TrimSpace(request.Domain))
+	if requestedDomain == "" {
+		return m.errorResponse("domain_not_allowed"), nil
+	}
+	allowed := false
+	if raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey)); raw != "" {
+		for _, d := range strings.Split(raw, ",") {
+			if strings.EqualFold(requestedDomain, strings.TrimSpace(d)) {
+				allowed = true
+				break
+			}
+		}
+	}
+	if !allowed {
+		return m.errorResponse("domain_not_allowed"), nil
 	}
 
 	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
@@ -955,25 +977,27 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 
-	// Check if the user already has a @linux.com identity. Cover all three
-	// surfaces: primary email, linked identities, and alternate emails.
-	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), "@linux.com") {
+	// Already-claimed check is scoped to the requested domain: a user may
+	// hold at most one alias per allowed domain. Cover all three surfaces:
+	// primary email, linked identities, and alternate emails.
+	domainSuffix := "@" + requestedDomain
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), domainSuffix) {
 		return m.errorResponse("already_claimed"), nil
 	}
 	for _, id := range fullUser.Identities {
-		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), "@linux.com") {
+		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}
 	for _, alt := range fullUser.AlternateEmails {
-		if strings.HasSuffix(strings.ToLower(alt.Email), "@linux.com") {
+		if strings.HasSuffix(strings.ToLower(alt.Email), domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}
 
 	// Parse optional extra reserved names from env (comma-separated).
 	var extraReserved []string
-	if raw := strings.TrimSpace(os.Getenv(constants.LcomAliasReservedExtraEnvKey)); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv(constants.AliasReservedExtraEnvKey)); raw != "" {
 		for _, n := range strings.Split(raw, ",") {
 			if trimmed := strings.TrimSpace(n); trimmed != "" {
 				extraReserved = append(extraReserved, trimmed)
@@ -981,12 +1005,12 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 		}
 	}
 
-	normalised, errCode := model.ValidateLcomAlias(request.Alias, extraReserved)
+	normalised, errCode := model.ValidateAlias(request.Alias, requestedDomain, extraReserved)
 	if errCode != "" {
 		return m.errorResponse(errCode), nil
 	}
 
-	fullEmail := normalised + "@linux.com"
+	fullEmail := normalised + domainSuffix
 
 	// Verify the address isn't already claimed in Auth0. checkEmailExists
 	// returns errs.Validation ("email already linked") for a true conflict and
@@ -1030,13 +1054,13 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 		return m.errorResponse(errAdd.Error()), nil
 	}
 
-	slog.DebugContext(ctx, "lcom alias claimed successfully",
+	slog.DebugContext(ctx, "alias claimed successfully",
 		"user_id", redaction.Redact(fullUser.UserID),
 		"stub_id", redaction.Redact(stubID),
 		"email", redaction.RedactEmail(fullEmail),
 	)
 
-	resp, err := json.Marshal(addLcomAliasResponse{Success: true, Email: fullEmail})
+	resp, err := json.Marshal(addAliasResponse{Success: true, Email: fullEmail})
 	if err != nil {
 		return m.errorResponse("failed to marshal response"), nil
 	}

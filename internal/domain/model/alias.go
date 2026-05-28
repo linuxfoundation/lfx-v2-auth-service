@@ -8,10 +8,12 @@ import (
 	"strings"
 )
 
-// lcomReservedNames is the canonical set of local parts that may not be claimed
-// as @linux.com aliases. Extended at runtime via the
-// AUTH0_LCOM_ALIAS_RESERVED_EXTRA environment variable.
-var lcomReservedNames = map[string]struct{}{
+// aliasReservedNames is the canonical set of local parts that may not be claimed
+// as system-managed aliases on any allowed domain. Extended at runtime via the
+// AUTH0_ALIAS_RESERVED_EXTRA environment variable. These names are reserved
+// regardless of the requested domain because they are universally sensitive
+// (RFC 2142 mailbox names, LF branding terms, etc.).
+var aliasReservedNames = map[string]struct{}{
 	"postmaster":      {},
 	"abuse":           {},
 	"hostmaster":      {},
@@ -33,36 +35,40 @@ var lcomReservedNames = map[string]struct{}{
 	"itx-system":      {},
 }
 
-// lcomBannedChars are characters disallowed in an @linux.com alias local part,
-// ported from itx-service-forwards/forwards.go:309-327. The double-quote is
-// included to prevent reserved-name bypass via RFC 5322 quoted local-parts
-// (e.g. `"admin"@linux.com` would otherwise parse and canonicalize to
-// `admin@linux.com`, slipping past the reserved-name check on the raw alias).
-const lcomBannedChars = `/*$^:()<>[];@\, "`
+// aliasBannedChars are characters disallowed in an alias local part. The
+// double-quote is included to prevent reserved-name bypass via RFC 5322 quoted
+// local-parts (e.g. `"admin"@<domain>` would otherwise parse and canonicalize
+// to `admin@<domain>`, slipping past the reserved-name check on the raw alias).
+const aliasBannedChars = `/*$^:()<>[];@\, "`
 
-// ValidateLcomAlias normalises alias (lowercases + trims) and returns
+// ValidateAlias normalises alias (lowercases + trims) and validates it as a
+// local part that can be safely appended to "@<domain>". Returns
 // ("", "alias_invalid") or ("", "alias_reserved") on failure, or
-// (normalised, "") on success.
-func ValidateLcomAlias(alias string, extraReserved []string) (string, string) {
+// (normalised, "") on success. The domain is used only for the RFC 5322
+// round-trip canonicalisation check — callers are responsible for verifying
+// the domain itself is allowed before calling this function.
+func ValidateAlias(alias, domain string, extraReserved []string) (string, string) {
 	alias = strings.ToLower(strings.TrimSpace(alias))
+	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	if len(alias) == 0 || len(alias) > 64 {
 		return "", "alias_invalid"
 	}
 
-	if strings.ContainsAny(alias, lcomBannedChars) {
+	if strings.ContainsAny(alias, aliasBannedChars) {
 		return "", "alias_invalid"
 	}
 
 	// Ensure the address parses and that net/mail's canonical form matches the
 	// input verbatim. This catches any other surface (escapes, encoded forms)
 	// that could let a normalised value differ from `alias`.
-	parsed, err := mail.ParseAddress(alias + "@linux.com")
-	if err != nil || !strings.EqualFold(parsed.Address, alias+"@linux.com") {
+	full := alias + "@" + domain
+	parsed, err := mail.ParseAddress(full)
+	if err != nil || !strings.EqualFold(parsed.Address, full) {
 		return "", "alias_invalid"
 	}
 
-	if _, reserved := lcomReservedNames[alias]; reserved {
+	if _, reserved := aliasReservedNames[alias]; reserved {
 		return "", "alias_reserved"
 	}
 	for _, extra := range extraReserved {
