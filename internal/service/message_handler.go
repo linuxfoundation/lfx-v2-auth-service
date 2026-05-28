@@ -1010,6 +1010,18 @@ func (m *messageHandlerOrchestrator) AddLcomAlias(ctx context.Context, msg port.
 
 	stubID, errAdd := m.aliasManager.AddSystemManagedEmail(ctx, fullUser.UserID, fullEmail)
 	if errAdd != nil {
+		// A validation error here means the address was claimed between the
+		// availability check above and the stub creation (TOCTOU race) — map
+		// to the stable alias_not_available code instead of leaking the raw
+		// backend message. Operational failures still propagate.
+		var validationErr errs.Validation
+		if errors.As(errAdd, &validationErr) {
+			slog.DebugContext(ctx, "alias became unavailable during claim",
+				"user_id", redaction.Redact(fullUser.UserID),
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
 		slog.ErrorContext(ctx, "failed to add system-managed email",
 			"error", errAdd,
 			"user_id", redaction.Redact(fullUser.UserID),

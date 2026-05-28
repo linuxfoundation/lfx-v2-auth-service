@@ -557,6 +557,12 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 			"status_code", statusCode,
 			"email", redaction.RedactEmail(email),
 		)
+		// Auth0 returns 409 when the email is already registered on the
+		// connection. Surface this as a validation error so the handler can
+		// map it to alias_not_available instead of a generic infra failure.
+		if statusCode == http.StatusConflict {
+			return "", errors.NewValidation("email already linked")
+		}
 		return "", errors.NewUnexpected("failed to create system-managed stub user", errCreate)
 	}
 

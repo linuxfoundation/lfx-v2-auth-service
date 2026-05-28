@@ -476,6 +476,15 @@ func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkId
 
 	switch request.Unlink.Provider {
 	case "email":
+		// Parity with the Auth0 adapter: an email-connection entry in
+		// user.Identities is by construction a system-managed alias (only
+		// AddSystemManagedEmail writes there). Refuse to unlink it so the
+		// mock enforces the same immutability invariant as Auth0.
+		for _, id := range user.Identities {
+			if id.Provider == "email" && strings.EqualFold(id.Email, request.Unlink.IdentityID) {
+				return errors.NewForbidden("system_managed_identity")
+			}
+		}
 		user.AlternateEmails = collections.RemoveFromSlice(user.AlternateEmails, func(e model.Email) bool {
 			return strings.EqualFold(e.Email, request.Unlink.IdentityID)
 		})
