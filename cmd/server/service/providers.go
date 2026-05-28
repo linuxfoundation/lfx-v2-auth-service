@@ -196,7 +196,16 @@ func QueueSubscriptions(ctx context.Context) error {
 		service.WithEventPublisherForMessageHandler(natsClient),
 	}
 
-	if os.Getenv(constants.UserRepositoryTypeEnvKey) == constants.UserRepositoryTypeAuth0 {
+	// Only wire the alias manager for backends that meaningfully support
+	// system-managed aliases. Authelia returns a backend-specific validation
+	// error; leaving it nil lets AddAlias surface the stable
+	// "alias_service_unavailable" guard instead.
+	userRepoType := os.Getenv(constants.UserRepositoryTypeEnvKey)
+	if userRepoType == constants.UserRepositoryTypeAuth0 || userRepoType == constants.UserRepositoryTypeMock || userRepoType == "" {
+		opts = append(opts, service.WithAliasManagerForMessageHandler(userReaderWriter))
+	}
+
+	if userRepoType == constants.UserRepositoryTypeAuth0 {
 		auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
 		if auth0Domain == "" {
 			auth0Domain = fmt.Sprintf("%s.auth0.com", os.Getenv(constants.Auth0TenantEnvKey))
@@ -234,6 +243,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
 		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
+		constants.UserAddAliasSubject:                 messageHandlerService.HandleMessage,
 		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
 		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,

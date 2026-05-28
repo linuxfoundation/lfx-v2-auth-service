@@ -236,3 +236,13 @@ The Mock implementation follows the same sub-prefix dispatch and storage targets
 ## Email Verification Flow
 
 When linking an email identity, `lfx.auth-service.user_identity.link` is used as the final step after completing the OTP verification. For the complete flow see [Email Verification Documentation](email_verification.md#complete-email-verification-and-linking-flow).
+
+---
+
+## Alias Flow (system-managed)
+
+Claiming a system-managed alias (e.g. `@linux.com`) does **not** go through `lfx.auth-service.user_identity.link`. It uses a dedicated subject (`lfx.auth-service.add_alias`) that creates a passwordless Auth0 stub user with `app_metadata.system_managed=true` and links it via the Management API — no user-facing OTP, no client-side identity token. The resulting identity is **immutable**: the unlink guard refuses to remove it.
+
+The target domain is caller-supplied and validated against the server-side `ALLOWED_ALIAS_DOMAINS` allow-list.
+
+See [alias.md](alias.md) for the full specification, validation rules, error codes, and required Auth0 scopes.
