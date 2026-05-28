@@ -133,7 +133,7 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
 func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria string, email string) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("auth service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	slog.DebugContext(ctx, "search by email",
@@ -201,7 +201,7 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("auth service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	input := strings.TrimSpace(string(msg.Data()))
@@ -270,12 +270,12 @@ type userEmailsRequest struct {
 func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request userEmailsRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
-		return m.errorResponse("failed to unmarshal request"), nil
+		return m.errorResponse("failed_to_unmarshal_request"), nil
 	}
 
 	authToken := strings.TrimSpace(request.User.AuthToken)
@@ -356,12 +356,12 @@ type identityProfileData struct {
 func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request identityListRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
-		return m.errorResponse("failed to unmarshal request"), nil
+		return m.errorResponse("failed_to_unmarshal_request"), nil
 	}
 
 	authToken := strings.TrimSpace(request.User.AuthToken)
@@ -424,7 +424,7 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	user := &model.User{}
@@ -619,13 +619,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityLinker == nil {
-		slog.ErrorContext(ctx, "auth service unavailable")
-		return m.errorResponse("auth service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		slog.ErrorContext(ctx, "auth service unavailable")
-		return m.errorResponse("auth service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	linkRequest := &model.LinkIdentity{}
@@ -673,11 +673,11 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityUnlinker == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	unlinkRequest := &model.UnlinkIdentity{}
@@ -806,7 +806,7 @@ type setPrimaryEmailRequest struct {
 func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil || m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request setPrimaryEmailRequest
@@ -932,15 +932,15 @@ type addAliasResponse struct {
 //  6. Call AddSystemManagedEmail and return the confirmed address.
 func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 	if m.aliasManager == nil {
-		return m.errorResponse("alias service unavailable"), nil
+		return m.errorResponse("alias_service_unavailable"), nil
 	}
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request addAliasRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
-		return m.errorResponse("failed to unmarshal request"), nil
+		return m.errorResponse("failed_to_unmarshal_request"), nil
 	}
 
 	authToken := strings.TrimSpace(request.User.AuthToken)

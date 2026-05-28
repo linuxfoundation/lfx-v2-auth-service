@@ -137,108 +137,6 @@ func TestValidateAlias(t *testing.T) {
 			wantErrCode: "alias_invalid",
 		},
 
-		// Reserved names — all 19
-		{
-			name:        "postmaster reserved",
-			alias:       "postmaster",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "abuse reserved",
-			alias:       "abuse",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "hostmaster reserved",
-			alias:       "hostmaster",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "admin reserved",
-			alias:       "admin",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "administrator reserved",
-			alias:       "administrator",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "noreply reserved",
-			alias:       "noreply",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "no-reply reserved",
-			alias:       "no-reply",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "root reserved",
-			alias:       "root",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "mailer-daemon reserved",
-			alias:       "mailer-daemon",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "linux reserved",
-			alias:       "linux",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "linuxfoundation reserved",
-			alias:       "linuxfoundation",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "lf reserved",
-			alias:       "lf",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "security reserved",
-			alias:       "security",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "support reserved",
-			alias:       "support",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "info reserved",
-			alias:       "info",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "webmaster reserved",
-			alias:       "webmaster",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "ops reserved",
-			alias:       "ops",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "devops reserved",
-			alias:       "devops",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "itx-system reserved",
-			alias:       "itx-system",
-			wantErrCode: "alias_reserved",
-		},
-		{
-			name:        "reserved name case-insensitive",
-			alias:       "ADMIN",
-			wantErrCode: "alias_reserved",
-		},
-
 		// Extra reserved
 		{
 			name:          "extra reserved name blocked",
@@ -281,6 +179,24 @@ func TestValidateAlias(t *testing.T) {
 
 			if tt.wantErrCode != "" && norm != "" {
 				t.Errorf("ValidateAlias(%q) expected empty norm on error, got %q", tt.alias, norm)
+			}
+		})
+	}
+
+	// Loop over the canonical reserved set so any future additions to
+	// aliasReservedNames are automatically covered without updating this file.
+	for name := range aliasReservedNames {
+		name := name
+		t.Run(name+" reserved (builtin)", func(t *testing.T) {
+			_, code := ValidateAlias(name, testDomain, nil)
+			if code != "alias_reserved" {
+				t.Errorf("expected alias_reserved for built-in reserved name %q, got %q", name, code)
+			}
+		})
+		t.Run(name+" reserved uppercase (builtin)", func(t *testing.T) {
+			_, code := ValidateAlias(strings.ToUpper(name), testDomain, nil)
+			if code != "alias_reserved" {
+				t.Errorf("expected alias_reserved for upper-cased built-in reserved name %q, got %q", strings.ToUpper(name), code)
 			}
 		})
 	}

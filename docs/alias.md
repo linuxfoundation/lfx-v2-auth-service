@@ -60,10 +60,10 @@ The returned `email` is the canonical, lowercased form of the claimed alias.
 | `alias_reserved` | The alias matches a reserved name (built-in list or `AUTH0_ALIAS_RESERVED_EXTRA`) |
 | `alias_not_available` | The full `<alias>@<domain>` address is already linked to another user (also returned on a race during claim) |
 | `already_claimed` | The caller already has an alias on this domain as primary, linked identity, or alternate email |
-| `alias service unavailable` | The current backend does not support alias claims (e.g. Authelia) |
-| `auth service unavailable` | The user reader is not wired |
+| `alias_service_unavailable` | The current backend does not support alias claims (e.g. Authelia) |
+| `auth_service_unavailable` | The user reader is not wired |
 | `auth_token is required` | Missing `user.auth_token` in the request |
-| `failed to unmarshal request` | Request JSON is malformed |
+| `failed_to_unmarshal_request` | Request JSON is malformed |
 
 Operational errors from the backend (Auth0 outage, M2M token failure, etc.) propagate their raw message rather than mapping to one of the codes above.
 

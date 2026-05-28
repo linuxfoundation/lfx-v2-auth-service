@@ -667,8 +667,8 @@ func TestMessageHandlerOrchestrator_EmailToUsername_NoUserReader(t *testing.T) {
 		t.Error("Expected success=false when user reader is nil")
 	}
 
-	if response.Error != "auth service unavailable" {
-		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
+	if response.Error != "auth_service_unavailable" {
+		t.Errorf("Expected error 'auth_service_unavailable', got %s", response.Error)
 	}
 }
 
@@ -927,8 +927,8 @@ func TestMessageHandlerOrchestrator_EmailToSub_NoUserReader(t *testing.T) {
 		t.Error("Expected success=false when user reader is nil")
 	}
 
-	if response.Error != "auth service unavailable" {
-		t.Errorf("Expected error 'auth service unavailable', got %s", response.Error)
+	if response.Error != "auth_service_unavailable" {
+		t.Errorf("Expected error 'auth_service_unavailable', got %s", response.Error)
 	}
 }
 
@@ -1830,8 +1830,8 @@ func TestMessageHandlerOrchestrator_GetUserMetadata_NoUserReader(t *testing.T) {
 	if userResponse.Success {
 		t.Errorf("Expected error but got success")
 	}
-	if userResponse.Error != "auth service unavailable" {
-		t.Errorf("Expected 'auth service unavailable' error, got: %s", userResponse.Error)
+	if userResponse.Error != "auth_service_unavailable" {
+		t.Errorf("Expected 'auth_service_unavailable' error, got: %s", userResponse.Error)
 	}
 }
 
@@ -1859,7 +1859,7 @@ func TestMessageHandlerOrchestrator_UnlinkIdentity(t *testing.T) {
 			messageData: validPayload("linkedin", "QhNK44iR6W"),
 			userReader:  &mockUserServiceReader{},
 			validateResult: func(t *testing.T, result []byte) {
-				assertErrorResponse(t, result, "auth service unavailable")
+				assertErrorResponse(t, result, "auth_service_unavailable")
 			},
 		},
 		{
@@ -1867,7 +1867,7 @@ func TestMessageHandlerOrchestrator_UnlinkIdentity(t *testing.T) {
 			messageData:      validPayload("linkedin", "QhNK44iR6W"),
 			identityUnlinker: &mockIdentityLinker{},
 			validateResult: func(t *testing.T, result []byte) {
-				assertErrorResponse(t, result, "auth service unavailable")
+				assertErrorResponse(t, result, "auth_service_unavailable")
 			},
 		},
 		{
@@ -2295,14 +2295,14 @@ func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 			messageData:   []byte(`not-json`),
 			mockReader:    &mockUserServiceReader{},
 			expectSuccess: false,
-			expectError:   "failed to unmarshal request",
+			expectError:   "failed_to_unmarshal_request",
 		},
 		{
 			name:          "reader unavailable",
 			messageData:   []byte(`{"user":{"auth_token":"token"}}`),
 			mockReader:    nil,
 			expectSuccess: false,
-			expectError:   "auth service unavailable",
+			expectError:   "auth_service_unavailable",
 		},
 		{
 			name:        "metadata lookup failure",
@@ -2458,14 +2458,14 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 			messageData:   []byte(`not-json`),
 			mockReader:    &mockUserServiceReader{},
 			expectSuccess: false,
-			expectError:   "failed to unmarshal request",
+			expectError:   "failed_to_unmarshal_request",
 		},
 		{
 			name:          "reader unavailable",
 			messageData:   []byte(`{"user":{"auth_token":"token"}}`),
 			mockReader:    nil, // handler created without WithUserReaderForMessageHandler
 			expectSuccess: false,
-			expectError:   "auth service unavailable",
+			expectError:   "auth_service_unavailable",
 		},
 		{
 			name:        "metadata lookup failure",
@@ -2851,7 +2851,7 @@ func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
 			messageData: validPayload(),
 			userReader:  &mockUserServiceReader{},
 			validateResult: func(t *testing.T, result []byte) {
-				assertErrorResponse(t, result, "auth service unavailable")
+				assertErrorResponse(t, result, "auth_service_unavailable")
 			},
 		},
 		{
@@ -2859,7 +2859,7 @@ func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
 			messageData: validPayload(),
 			userWriter:  &mockUserServiceWriter{},
 			validateResult: func(t *testing.T, result []byte) {
-				assertErrorResponse(t, result, "auth service unavailable")
+				assertErrorResponse(t, result, "auth_service_unavailable")
 			},
 		},
 		{
@@ -3038,7 +3038,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		return out
 	}
 
-	t.Run("alias service unavailable", func(t *testing.T) {
+	t.Run("alias_service_unavailable", func(t *testing.T) {
 		handler := NewMessageHandlerOrchestrator(
 			WithUserReaderForMessageHandler(defaultReader()),
 		)
@@ -3047,12 +3047,12 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		reply := parseReply(t, result)
-		if reply["error"] != "alias service unavailable" {
-			t.Errorf("expected alias service unavailable, got %v", reply["error"])
+		if reply["error"] != "alias_service_unavailable" {
+			t.Errorf("expected alias_service_unavailable, got %v", reply["error"])
 		}
 	})
 
-	t.Run("auth service unavailable", func(t *testing.T) {
+	t.Run("auth_service_unavailable", func(t *testing.T) {
 		alias := &mockAliasManager{}
 		handler := NewMessageHandlerOrchestrator(
 			WithAliasManagerForMessageHandler(alias),
@@ -3062,8 +3062,8 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		reply := parseReply(t, result)
-		if reply["error"] != "auth service unavailable" {
-			t.Errorf("expected auth service unavailable, got %v", reply["error"])
+		if reply["error"] != "auth_service_unavailable" {
+			t.Errorf("expected auth_service_unavailable, got %v", reply["error"])
 		}
 	})
 
@@ -3078,7 +3078,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 			t.Fatalf("unexpected Go error: %v", err)
 		}
 		reply := parseReply(t, result)
-		if reply["error"] != "failed to unmarshal request" {
+		if reply["error"] != "failed_to_unmarshal_request" {
 			t.Errorf("expected unmarshal error, got %v", reply["error"])
 		}
 	})
