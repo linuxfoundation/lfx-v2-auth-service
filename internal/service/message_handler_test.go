@@ -3373,8 +3373,34 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		alias := &mockAliasManager{}
+
+		// Override MetadataLookup to return a non-empty Token, simulating a real
+		// caller JWT. This makes the assertion below a genuine regression guard:
+		// if GetUser were called with the MetadataLookup user (pre-fix behaviour),
+		// it would forward "caller-jwt" to the Auth0 adapter — the empty-Token
+		// snapshot below would then fail, catching the regression.
+		reader := defaultReader()
+		reader.metadataLookupFunc = func(_ context.Context, _ string) (*model.User, error) {
+			return &model.User{UserID: userID, Sub: userID, Token: "caller-jwt"}, nil
+		}
+
+		// Snapshot Token and UserID at call time (not via pointer, which the adapter
+		// may mutate after the call). The snapshots are what we assert on.
+		var (
+			capturedToken  string
+			capturedUserID string
+			getUserCalled  bool
+		)
+		inner := reader.getUserFunc
+		reader.getUserFunc = func(ctx context.Context, user *model.User) (*model.User, error) {
+			getUserCalled = true
+			capturedToken = user.Token // snapshot before inner can mutate
+			capturedUserID = user.UserID
+			return inner(ctx, user)
+		}
+
 		handler := NewMessageHandlerOrchestrator(
-			WithUserReaderForMessageHandler(defaultReader()),
+			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
 		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
@@ -3400,6 +3426,20 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		}
 		if alias.calledWith[0].email != "jdoe@linux.com" {
 			t.Errorf("expected email=jdoe@linux.com, got %s", alias.calledWith[0].email)
+		}
+		// GetUser must be called with an empty Token so the Auth0 adapter uses
+		// the service's M2M credentials (read:users), not the caller's JWT.
+		// The MetadataLookup override above sets Token="caller-jwt", so if the
+		// pre-fix code path (GetUser(ctx, user)) were used, capturedToken would
+		// be non-empty and this assertion would catch the regression.
+		if !getUserCalled {
+			t.Fatal("GetUser was not called")
+		}
+		if capturedToken != "" {
+			t.Errorf("GetUser must be called with empty Token (M2M path); got %q", capturedToken)
+		}
+		if capturedUserID != userID {
+			t.Errorf("GetUser must be called with UserID=%s; got %q", userID, capturedUserID)
 		}
 	})
 }
