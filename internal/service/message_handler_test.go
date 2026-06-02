@@ -3373,8 +3373,19 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		alias := &mockAliasManager{}
+
+		// Capture the model.User passed to GetUser to assert M2M semantics:
+		// Token must be empty so the adapter uses M2M, not the caller's JWT.
+		var getUserArg *model.User
+		reader := defaultReader()
+		inner := reader.getUserFunc
+		reader.getUserFunc = func(ctx context.Context, user *model.User) (*model.User, error) {
+			getUserArg = user
+			return inner(ctx, user)
+		}
+
 		handler := NewMessageHandlerOrchestrator(
-			WithUserReaderForMessageHandler(defaultReader()),
+			WithUserReaderForMessageHandler(reader),
 			WithAliasManagerForMessageHandler(alias),
 		)
 		result, err := handler.AddAlias(ctx, msgFor(validToken, "jdoe"))
@@ -3400,6 +3411,17 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		}
 		if alias.calledWith[0].email != "jdoe@linux.com" {
 			t.Errorf("expected email=jdoe@linux.com, got %s", alias.calledWith[0].email)
+		}
+		// GetUser must be called with an empty Token so the Auth0 adapter uses the
+		// service's M2M credentials (read:users), not the caller's JWT.
+		if getUserArg == nil {
+			t.Fatal("GetUser was not called")
+		}
+		if getUserArg.Token != "" {
+			t.Errorf("GetUser must be called with empty Token (M2M path); got %q", getUserArg.Token)
+		}
+		if getUserArg.UserID != userID {
+			t.Errorf("GetUser must be called with UserID=%s; got %q", userID, getUserArg.UserID)
 		}
 	})
 }

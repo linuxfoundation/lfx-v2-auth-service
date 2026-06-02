@@ -972,7 +972,11 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 		return m.errorResponse(errLookup.Error()), nil
 	}
 
-	fullUser, errGetUser := m.userReader.GetUser(ctx, user)
+	// Fetch the canonical record with the service's M2M credentials (read:users),
+	// not the caller's JWT. add_alias only requires update:current_user_identities,
+	// so we must not depend on the caller token also carrying read:current_user.
+	// Passing a UserID-only user (empty Token) routes GetUser to its M2M branch.
+	fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{UserID: user.UserID})
 	if errGetUser != nil {
 		return m.errorResponse(errGetUser.Error()), nil
 	}
