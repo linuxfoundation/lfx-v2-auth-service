@@ -3394,7 +3394,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		inner := reader.getUserFunc
 		reader.getUserFunc = func(ctx context.Context, user *model.User) (*model.User, error) {
 			getUserCalled = true
-			capturedToken = user.Token   // snapshot before inner can mutate
+			capturedToken = user.Token // snapshot before inner can mutate
 			capturedUserID = user.UserID
 			return inner(ctx, user)
 		}
