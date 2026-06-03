@@ -759,6 +759,119 @@ func TestUserReaderWriter_MetadataLookup(t *testing.T) {
 	}
 }
 
+func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		primaryUserID string
+		email         string
+		wantErrMsg    string
+	}{
+		{
+			name:          "empty primaryUserID",
+			primaryUserID: "",
+			email:         "jdoe@linux.com",
+			wantErrMsg:    "primary_user_id is required",
+		},
+		{
+			name:          "whitespace-only primaryUserID",
+			primaryUserID: "   ",
+			email:         "jdoe@linux.com",
+			wantErrMsg:    "primary_user_id is required",
+		},
+		{
+			name:          "empty email",
+			primaryUserID: "auth0|test123",
+			email:         "",
+			wantErrMsg:    "email is required",
+		},
+		{
+			name:          "whitespace-only email",
+			primaryUserID: "auth0|test123",
+			email:         "   ",
+			wantErrMsg:    "email is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rw := &userReaderWriter{
+				httpClient: httpclient.NewClient(httpclient.DefaultConfig()),
+				config: Config{
+					Tenant: "test-tenant",
+					Domain: "test-tenant.auth0.com",
+				},
+			}
+
+			stubID, err := rw.AddSystemManagedEmail(ctx, tt.primaryUserID, tt.email)
+
+			require.Error(t, err, "expected validation error")
+			assert.Empty(t, stubID)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+		})
+	}
+}
+
+func TestUserReaderWriter_UnlinkIdentity_ValidationGuard(t *testing.T) {
+	ctx := context.Background()
+
+	rw := &userReaderWriter{
+		httpClient:          httpclient.NewClient(httpclient.DefaultConfig()),
+		identityLinkingFlow: newIdentityLinkingFlow("test-tenant.auth0.com", httpclient.NewClient(httpclient.DefaultConfig())),
+		config: Config{
+			Tenant: "test-tenant",
+			Domain: "test-tenant.auth0.com",
+		},
+	}
+
+	makeRequest := func(raw string) *model.UnlinkIdentity {
+		var req model.UnlinkIdentity
+		_ = json.Unmarshal([]byte(raw), &req)
+		return &req
+	}
+
+	tests := []struct {
+		name       string
+		request    *model.UnlinkIdentity
+		wantErrMsg string
+	}{
+		{
+			name:       "nil request",
+			request:    nil,
+			wantErrMsg: "unlink identity request is required",
+		},
+		{
+			name:       "missing user_id",
+			request:    makeRequest(`{"user":{"auth_token":"tok"},"unlink":{"provider":"google-oauth2","identity_id":"123"}}`),
+			wantErrMsg: "user_id is required",
+		},
+		{
+			name:       "missing auth_token",
+			request:    makeRequest(`{"user":{"user_id":"auth0|abc"},"unlink":{"provider":"google-oauth2","identity_id":"123"}}`),
+			wantErrMsg: "user_token is required",
+		},
+		{
+			name:       "missing provider",
+			request:    makeRequest(`{"user":{"user_id":"auth0|abc","auth_token":"tok"},"unlink":{"identity_id":"123"}}`),
+			wantErrMsg: "provider is required",
+		},
+		{
+			name:       "missing identity_id",
+			request:    makeRequest(`{"user":{"user_id":"auth0|abc","auth_token":"tok"},"unlink":{"provider":"google-oauth2"}}`),
+			wantErrMsg: "identity_id is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := rw.UnlinkIdentity(ctx, tt.request)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+		})
+	}
+}
+
 // Helper function to check if a string contains a substring
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||

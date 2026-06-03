@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -46,6 +47,7 @@ type messageHandlerOrchestrator struct {
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
 	eventPublisher   port.EventPublisher
+	aliasManager     port.AliasManager
 }
 
 // MessageHandlerOrchestratorOption defines a function type for setting options
@@ -107,6 +109,13 @@ func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) Mes
 	}
 }
 
+// WithAliasManagerForMessageHandler sets the alias manager for the message handler orchestrator
+func WithAliasManagerForMessageHandler(aliasManager port.AliasManager) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.aliasManager = aliasManager
+	}
+}
+
 func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	response := UserDataResponse{
 		Success: false,
@@ -124,7 +133,7 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
 func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria string, email string) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("auth service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	slog.DebugContext(ctx, "search by email",
@@ -192,7 +201,7 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("auth service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	input := strings.TrimSpace(string(msg.Data()))
@@ -261,12 +270,12 @@ type userEmailsRequest struct {
 func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request userEmailsRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
-		return m.errorResponse("failed to unmarshal request"), nil
+		return m.errorResponse("failed_to_unmarshal_request"), nil
 	}
 
 	authToken := strings.TrimSpace(request.User.AuthToken)
@@ -347,12 +356,12 @@ type identityProfileData struct {
 func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request identityListRequest
 	if err := json.Unmarshal(msg.Data(), &request); err != nil {
-		return m.errorResponse("failed to unmarshal request"), nil
+		return m.errorResponse("failed_to_unmarshal_request"), nil
 	}
 
 	authToken := strings.TrimSpace(request.User.AuthToken)
@@ -415,7 +424,7 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	user := &model.User{}
@@ -610,13 +619,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityLinker == nil {
-		slog.ErrorContext(ctx, "auth service unavailable")
-		return m.errorResponse("auth service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		slog.ErrorContext(ctx, "auth service unavailable")
-		return m.errorResponse("auth service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	linkRequest := &model.LinkIdentity{}
@@ -664,11 +673,11 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityUnlinker == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	unlinkRequest := &model.UnlinkIdentity{}
@@ -797,7 +806,7 @@ type setPrimaryEmailRequest struct {
 func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil || m.userReader == nil {
-		return m.errorResponse("auth service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	var request setPrimaryEmailRequest
@@ -892,6 +901,174 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 	}
 
 	return responseJSON, nil
+}
+
+// addAliasRequest is the JSON payload for lfx.auth-service.add_alias
+type addAliasRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Alias  string `json:"alias"`
+	Domain string `json:"domain"`
+}
+
+// addAliasResponse is the reply for lfx.auth-service.add_alias
+type addAliasResponse struct {
+	Success bool   `json:"success"`
+	Email   string `json:"email,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
+// @linux.com) by creating a passwordless Auth0 stub user and linking it via
+// the Management API.
+//
+// Flow:
+//  1. Validate JWT (UserUpdateIdentityRequiredScope), extract sub.
+//  2. Validate the requested domain is in ALLOWED_ALIAS_DOMAINS.
+//  3. Reject if caller already has an alias on this domain (already_claimed).
+//  4. Validate alias local part (alias_invalid / alias_reserved).
+//  5. Search Auth0 to ensure the full address isn't already taken (alias_not_available).
+//  6. Call AddSystemManagedEmail and return the confirmed address.
+func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.aliasManager == nil {
+		return m.errorResponse("alias_service_unavailable"), nil
+	}
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	var request addAliasRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed_to_unmarshal_request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	// Validate the requested domain against the server-side allow-list.
+	// Empty/unset env means the feature is disabled — fail closed.
+	requestedDomain := strings.ToLower(strings.TrimSpace(request.Domain))
+	if requestedDomain == "" {
+		return m.errorResponse("domain_not_allowed"), nil
+	}
+	allowed := false
+	if raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey)); raw != "" {
+		for _, d := range strings.Split(raw, ",") {
+			if strings.EqualFold(requestedDomain, strings.TrimSpace(d)) {
+				allowed = true
+				break
+			}
+		}
+	}
+	if !allowed {
+		return m.errorResponse("domain_not_allowed"), nil
+	}
+
+	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
+	if errLookup != nil {
+		return m.errorResponse(errLookup.Error()), nil
+	}
+
+	// Fetch the canonical record with the service's M2M credentials (read:users),
+	// not the caller's JWT. add_alias only requires update:current_user_identities,
+	// so we must not depend on the caller token also carrying read:current_user.
+	// Passing a UserID-only user (empty Token) routes GetUser to its M2M branch.
+	fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{UserID: user.UserID})
+	if errGetUser != nil {
+		return m.errorResponse(errGetUser.Error()), nil
+	}
+
+	// Already-claimed check is scoped to the requested domain: a user may
+	// hold at most one alias per allowed domain. Cover all three surfaces:
+	// primary email, linked identities, and alternate emails.
+	domainSuffix := "@" + requestedDomain
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), domainSuffix) {
+		return m.errorResponse("already_claimed"), nil
+	}
+	for _, id := range fullUser.Identities {
+		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), domainSuffix) {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+	for _, alt := range fullUser.AlternateEmails {
+		if strings.HasSuffix(strings.ToLower(alt.Email), domainSuffix) {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+
+	// Parse optional extra reserved names from env (comma-separated).
+	var extraReserved []string
+	if raw := strings.TrimSpace(os.Getenv(constants.AliasReservedExtraEnvKey)); raw != "" {
+		for _, n := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(n); trimmed != "" {
+				extraReserved = append(extraReserved, trimmed)
+			}
+		}
+	}
+
+	normalised, errCode := model.ValidateAlias(request.Alias, requestedDomain, extraReserved)
+	if errCode != "" {
+		return m.errorResponse(errCode), nil
+	}
+
+	fullEmail := normalised + domainSuffix
+
+	// Verify the address isn't already claimed in Auth0. checkEmailExists
+	// returns errs.Validation ("email already linked") for a true conflict and
+	// propagates other errors (e.g. Auth0 search outage) — only the former
+	// should be surfaced as alias_not_available, otherwise we'd mask infra
+	// failures behind a misleading user-facing code.
+	if errExists := m.checkEmailExists(ctx, fullEmail); errExists != nil {
+		var validationErr errs.Validation
+		if errors.As(errExists, &validationErr) {
+			slog.DebugContext(ctx, "alias already exists in Auth0",
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
+		slog.ErrorContext(ctx, "failed to verify alias availability",
+			"error", errExists,
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse(errExists.Error()), nil
+	}
+
+	stubID, errAdd := m.aliasManager.AddSystemManagedEmail(ctx, fullUser.UserID, fullEmail)
+	if errAdd != nil {
+		// A validation error here means the address was claimed between the
+		// availability check above and the stub creation (TOCTOU race) — map
+		// to the stable alias_not_available code instead of leaking the raw
+		// backend message. Operational failures still propagate.
+		var validationErr errs.Validation
+		if errors.As(errAdd, &validationErr) {
+			slog.DebugContext(ctx, "alias became unavailable during claim",
+				"user_id", redaction.Redact(fullUser.UserID),
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
+		slog.ErrorContext(ctx, "failed to add system-managed email",
+			"error", errAdd,
+			"user_id", redaction.Redact(fullUser.UserID),
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse(errAdd.Error()), nil
+	}
+
+	slog.DebugContext(ctx, "alias claimed successfully",
+		"user_id", redaction.Redact(fullUser.UserID),
+		"stub_id", redaction.Redact(stubID),
+		"email", redaction.RedactEmail(fullEmail),
+	)
+
+	resp, err := json.Marshal(addAliasResponse{Success: true, Email: fullEmail})
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+	return resp, nil
 }
 
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern
