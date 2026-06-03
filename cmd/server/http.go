@@ -52,7 +52,9 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 							if labeler, ok := otelhttp.LabelerFromContext(r.Context()); ok {
 								labeler.Add(semconv.HTTPRoute(routePattern))
 							}
-							trace.SpanFromContext(r.Context()).SetName(r.Method + " " + routePattern)
+							span := trace.SpanFromContext(r.Context())
+							span.SetAttributes(semconv.HTTPRoute(routePattern))
+							span.SetName(r.Method + " " + routePattern)
 						}
 					}
 				}()
