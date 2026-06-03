@@ -8,21 +8,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
-const (
-	userUpdateRequiredScope         = "update:current_user_metadata"
-	userUpdateIdentityRequiredScope = "update:current_user_identities"
-	userReadRequiredScope           = "read:current_user"
-)
+const auth0SubPrefix = "auth0|"
 
 // Config holds the configuration for Auth0 Management API
 type Config struct {
@@ -32,6 +30,14 @@ type Config struct {
 	M2MTokenManager *TokenManager
 	// JWTVerificationConfig for JWT signature verification
 	JWTVerificationConfig *JWTVerificationConfig
+	// LFXProfileClientID is the Auth0 client ID for the LFX Profile app,
+	// used to validate current passwords via Resource Owner Password Grant.
+	LFXProfileClientID string
+	// LFXProfileClientSecret is the Auth0 client secret for the LFX Profile app.
+	LFXProfileClientSecret string
+	// LFXOneClientID is the Auth0 client ID for the LFX One app,
+	// used as the audience when sending password reset links.
+	LFXOneClientID string
 }
 
 // userUpdateRequest represents the request body for updating a user in Auth0
@@ -47,6 +53,7 @@ type userReaderWriter struct {
 	errorResponse       *ErrorResponse
 }
 
+// SearchUser searches Auth0 for a user matching the given criteria (email, username, or user_id).
 func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 
 	filterer := newUserFilterer(criteria, user)
@@ -116,6 +123,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 	return nil, errors.NewNotFound("user not found")
 }
 
+// GetUser fetches the full Auth0 user record by user_id.
 func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	slog.DebugContext(ctx, "getting user", "user_id", user.UserID)
@@ -236,13 +244,14 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	return user, nil
 }
 
+// UpdateUser applies the provided changes to the Auth0 user via PATCH.
 func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 
 	if u.config.JWTVerificationConfig == nil {
 		return nil, errors.NewValidation("JWT verification configuration is required")
 	}
 
-	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, userUpdateRequiredScope)
+	claims, errJwtVerify := u.config.JWTVerificationConfig.JWTVerify(ctx, user.Token, constants.UserUpdateMetadataRequiredScope)
 	if errJwtVerify != nil {
 		slog.ErrorContext(ctx, "jwt verify failed", "error", errJwtVerify)
 		return nil, errJwtVerify
@@ -296,6 +305,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	return updatedUser, nil
 }
 
+// SendVerificationAlternateEmail triggers Auth0 to send a verification link for an alternate email.
 func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 
 	if u.emailLinkingFlow == nil {
@@ -312,6 +322,7 @@ func (u *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return nil
 }
 
+// VerifyAlternateEmail completes verification of an alternate email using the provided code/token.
 func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 
 	if u.emailLinkingFlow == nil {
@@ -342,6 +353,30 @@ func (u *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	return authResponse, nil
 }
 
+// ValidateLinkRequest performs backend-specific validation on a link-identity request before linking.
+func (u *userReaderWriter) ValidateLinkRequest(ctx context.Context, request *model.LinkIdentity) error {
+	if request == nil {
+		return errors.NewValidation("link identity request is required")
+	}
+
+	if request.LinkWith.IdentityToken == "" {
+		return errors.NewValidation("link_with identity token is required")
+	}
+
+	sub, err := jwt.ExtractSubject(ctx, request.LinkWith.IdentityToken)
+	if err != nil {
+		return errors.NewValidation("invalid identity token: unable to extract subject")
+	}
+
+	if strings.HasPrefix(sub, auth0SubPrefix) {
+		slog.WarnContext(ctx, "identity token belongs to a database (LFID) user; rejecting link request")
+		return errors.NewValidation("the provided identity token belongs to an existing LFID account and cannot be linked")
+	}
+
+	return nil
+}
+
+// LinkIdentity links the secondary identity in the request onto the primary Auth0 user.
 func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 
 	if u.identityLinkingFlow == nil {
@@ -383,6 +418,209 @@ func (u *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 	)
 
 	return nil
+}
+
+// UnlinkIdentity unlinks the identity in the request from the primary Auth0 user, refusing system-managed identities.
+func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+
+	if u.identityLinkingFlow == nil {
+		return errors.NewUnexpected("identity linking flow not configured")
+	}
+
+	if request == nil {
+		return errors.NewValidation("unlink identity request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	if request.User.AuthToken == "" {
+		return errors.NewValidation("user_token is required")
+	}
+
+	if request.Unlink.Provider == "" {
+		return errors.NewValidation("provider is required")
+	}
+
+	if request.Unlink.IdentityID == "" {
+		return errors.NewValidation("identity_id is required")
+	}
+
+	slog.DebugContext(ctx, "unlinking identity from user",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", request.Unlink.Provider,
+	)
+
+	// Guard: refuse to unlink system-managed identities (e.g. aliases).
+	// Only the passwordless email connection can hold system-managed identities,
+	// so skip the guard entirely for other providers (google, github, etc.) to
+	// avoid making every social-identity unlink depend on the Management API.
+	// For email-connection unlinks, fetch the stub via M2M to read its
+	// app_metadata. The check fails closed: any error other than 404 (which
+	// means the stub never existed and there is nothing to protect) blocks the
+	// unlink so a transient Auth0 failure cannot be used to bypass immutability.
+	if request.Unlink.Provider != constants.EmailConnection {
+		return u.identityLinkingFlow.UnlinkIdentityFromUser(
+			ctx,
+			request.User.UserID,
+			request.User.AuthToken,
+			request.Unlink.Provider,
+			request.Unlink.IdentityID,
+		)
+	}
+
+	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
+	}
+	apiRequest := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get stub user for unlink guard"),
+	)
+	var rawStub Auth0User
+	if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
+		if statusCode != http.StatusNotFound {
+			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
+				"stub_user_id", redaction.Redact(stubUserID),
+				"status_code", statusCode,
+				"error", callErr,
+			)
+			return errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+		}
+	} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
+		return errors.NewForbidden("system_managed_identity")
+	}
+
+	errUnlinkIdentity := u.identityLinkingFlow.UnlinkIdentityFromUser(
+		ctx,
+		request.User.UserID,
+		request.User.AuthToken,
+		request.Unlink.Provider,
+		request.Unlink.IdentityID,
+	)
+	if errUnlinkIdentity != nil {
+		return errUnlinkIdentity
+	}
+
+	slog.DebugContext(ctx, "identity unlinked successfully via user reader writer",
+		"user_id", redaction.Redact(request.User.UserID),
+	)
+
+	return nil
+}
+
+// AddSystemManagedEmail creates a stub Auth0 passwordless user for email,
+// links it to primaryUserID via the Management API (M2M, no user-facing
+// magic-link), and marks it system_managed so it cannot be user-unlinked.
+// Returns the stub user_id. On link failure a best-effort cleanup of the stub
+// is attempted before the error is returned.
+func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error) {
+	if strings.TrimSpace(primaryUserID) == "" {
+		return "", errors.NewValidation("primary_user_id is required")
+	}
+	if strings.TrimSpace(email) == "" {
+		return "", errors.NewValidation("email is required")
+	}
+
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return "", errors.NewUnexpected("failed to get M2M token for add system managed email", errToken)
+	}
+
+	// Step 1: create the stub passwordless user.
+	createPayload := systemManagedUserPayload{
+		Connection:    constants.EmailConnection,
+		Email:         email,
+		EmailVerified: true, // safe: LF controls the linux.com domain
+		AppMetadata:   &Auth0AppMetadata{SystemManaged: true},
+	}
+
+	apiCreate := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPost),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users", u.config.Domain)),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("create system-managed stub user"),
+		httpclient.WithBody(createPayload),
+	)
+
+	var stubUser Auth0User
+	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
+	if errCreate != nil {
+		slog.ErrorContext(ctx, "failed to create system-managed stub user",
+			"error", errCreate,
+			"status_code", statusCode,
+			"email", redaction.RedactEmail(email),
+		)
+		// Auth0 returns 409 when the email is already registered on the
+		// connection. Surface this as a validation error so the handler can
+		// map it to alias_not_available instead of a generic infra failure.
+		if statusCode == http.StatusConflict {
+			return "", errors.NewValidation("email already linked")
+		}
+		return "", errors.NewUnexpected("failed to create system-managed stub user", errCreate)
+	}
+
+	if stubUser.UserID == "" {
+		return "", errors.NewUnexpected("Auth0 returned empty user_id for created stub user")
+	}
+
+	slog.DebugContext(ctx, "system-managed stub user created",
+		"stub_user_id", redaction.Redact(stubUser.UserID),
+	)
+
+	// Step 2: link the stub to the primary user.
+	// Auth0's direct-link endpoint expects the provider-local part only (without the "email|" prefix).
+	localID := stubUser.UserID
+	if idx := strings.Index(localID, "|"); idx >= 0 {
+		localID = localID[idx+1:]
+	}
+
+	linkPayload := linkSubIdentityPayload{
+		Provider: constants.EmailConnection,
+		UserID:   localID,
+	}
+
+	apiLink := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPost),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s/identities", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("link system-managed stub to primary user"),
+		httpclient.WithBody(linkPayload),
+	)
+
+	var linkedIdentities []any
+	statusCode, errLink := apiLink.Call(ctx, &linkedIdentities)
+	if errLink != nil {
+		slog.ErrorContext(ctx, "failed to link system-managed stub to primary user; attempting rollback",
+			"error", errLink,
+			"status_code", statusCode,
+			"stub_user_id", redaction.Redact(stubUser.UserID),
+			"primary_user_id", redaction.Redact(primaryUserID),
+		)
+		// Best-effort rollback: delete the orphaned stub user.
+		if errDel := u.deleteSystemManagedUser(ctx, stubUser.UserID, m2mToken); errDel != nil {
+			slog.WarnContext(ctx, "rollback failed: could not delete orphaned stub user",
+				"error", errDel,
+				"stub_user_id", redaction.Redact(stubUser.UserID),
+			)
+		}
+		return "", errors.NewUnexpected("failed to link system-managed email identity", errLink)
+	}
+
+	slog.DebugContext(ctx, "system-managed email linked successfully",
+		"primary_user_id", redaction.Redact(primaryUserID),
+		"stub_user_id", redaction.Redact(stubUser.UserID),
+		"email", redaction.RedactEmail(email),
+	)
+
+	return stubUser.UserID, nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
@@ -430,4 +668,133 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 		httpClient:          httpClient,
 		errorResponse:       NewErrorResponse(),
 	}, nil
+}
+
+// setPrimaryEmailRequest represents the request body for updating a user's primary email in Auth0
+type setPrimaryEmailRequest struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+// SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
+// The email must already be a verified linked identity on the user's account.
+func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user ID is required")
+	}
+	if strings.TrimSpace(email) == "" {
+		return errors.NewValidation("email is required")
+	}
+
+	// Fetch the user to validate the requested email is a verified linked identity
+	fullUser, errGetUser := u.GetUser(ctx, &model.User{UserID: userID})
+	if errGetUser != nil {
+		slog.ErrorContext(ctx, "failed to get user for set primary email",
+			"error", errGetUser,
+			"user_id", redaction.Redact(userID),
+		)
+		return errors.NewUnexpected("failed to get user for set primary email", errGetUser)
+	}
+
+	// Verify the email is one of the user's verified linked email identities
+	found := false
+	for _, id := range fullUser.Identities {
+		if id.Connection != constants.EmailConnection {
+			continue
+		}
+		if strings.EqualFold(id.Email, email) {
+			if !id.EmailVerified {
+				return errors.NewValidation("email is not verified and cannot be set as primary")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.NewValidation("email is not a linked identity on this account")
+	}
+
+	m2mToken, errGetToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errGetToken != nil {
+		return errors.NewUnexpected("failed to get M2M token for set primary email", errGetToken)
+	}
+
+	payload := setPrimaryEmailRequest{
+		Email:         email,
+		EmailVerified: true,
+	}
+
+	apiRequest := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPatch),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("set primary email"),
+		httpclient.WithBody(payload),
+	)
+
+	var patchResponse map[string]any
+	statusCode, errCall := apiRequest.Call(ctx, &patchResponse)
+	if errCall != nil {
+		slog.ErrorContext(ctx, "failed to set primary email in Auth0",
+			"error", errCall,
+			"status_code", statusCode,
+			"user_id", redaction.Redact(userID),
+		)
+		return errors.NewUnexpected("failed to set primary email", errCall)
+	}
+
+	slog.DebugContext(ctx, "primary email updated successfully",
+		"user_id", redaction.Redact(userID),
+	)
+
+	return nil
+}
+
+// deleteSystemManagedUser deletes an Auth0 user but only if its
+// app_metadata.system_managed is true. The pre-flight GET is defense-in-depth:
+// it ensures this helper can never be used to delete a real human account even
+// if a future caller passes the wrong user_id. A non-404 fetch failure or a
+// missing/false system_managed flag aborts the delete.
+func (u *userReaderWriter) deleteSystemManagedUser(ctx context.Context, userID, m2mToken string) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify system-managed before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			// Already gone — nothing to clean up.
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to verify system-managed before delete",
+			"user_id", redaction.Redact(userID),
+			"status_code", statusCode,
+			"error", errGet,
+		)
+		return errors.NewUnexpected("failed to verify system_managed before delete", errGet)
+	}
+	if target.AppMetadata == nil || !target.AppMetadata.SystemManaged {
+		return errors.NewForbidden("refusing to delete user without app_metadata.system_managed=true")
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete system-managed user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete system-managed user", errDel)
+	}
+	return nil
 }

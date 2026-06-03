@@ -20,6 +20,19 @@ const (
 	// UserEmailToSubSubject is the subject for the user email to sub event.
 	// The subject is of the form: lfx.auth-service.email_to_sub
 	UserEmailToSubSubject = "lfx.auth-service.email_to_sub"
+
+	// UserUsernameToSubSubject is the subject for the username to sub event.
+	// The subject is of the form: lfx.auth-service.username_to_sub
+	UserUsernameToSubSubject = "lfx.auth-service.username_to_sub"
+)
+
+const (
+
+	// Domain event subjects (fire-and-forget, not request/reply)
+
+	// UserProfileUpdatedSubject is published after a successful user_metadata update.
+	// Consumers use this to sync profile changes to other systems (e.g. v1 platform DB).
+	UserProfileUpdatedSubject = "lfx.user_profile.updated"
 )
 
 const (
@@ -37,6 +50,25 @@ const (
 	// UserEmailReadSubject is the subject for the user email read event.
 	// The subject is of the form: lfx.auth-service.user_emails.read
 	UserEmailReadSubject = "lfx.auth-service.user_emails.read"
+
+	// UserEmailSetPrimarySubject is the subject for setting a user's primary email.
+	// The subject is of the form: lfx.auth-service.user_emails.set_primary
+	UserEmailSetPrimarySubject = "lfx.auth-service.user_emails.set_primary"
+
+	// UserAddAliasSubject is the subject for claiming an alias (e.g. `@linux.com`)
+	// as a system-managed Auth0 linked identity. The target domain is supplied
+	// in the request and must be present in ALLOWED_ALIAS_DOMAINS.
+	// The subject is of the form: lfx.auth-service.add_alias
+	UserAddAliasSubject = "lfx.auth-service.add_alias"
+)
+
+const (
+
+	// Impersonation subjects
+
+	// ImpersonationTokenExchangeSubject is the subject for the impersonation token exchange.
+	// The subject is of the form: lfx.auth-service.impersonation.token_exchange
+	ImpersonationTokenExchangeSubject = "lfx.auth-service.impersonation.token_exchange"
 )
 
 const (
@@ -54,4 +86,25 @@ const (
 	// UserIdentityLinkSubject is the subject for the user identity linking event.
 	// The subject is of the form: lfx.auth-service.user_identity.link
 	UserIdentityLinkSubject = "lfx.auth-service.user_identity.link"
+
+	// UserIdentityUnlinkSubject is the subject for the user identity unlinking event.
+	// The subject is of the form: lfx.auth-service.user_identity.unlink
+	UserIdentityUnlinkSubject = "lfx.auth-service.user_identity.unlink"
+
+	// UserIdentityListSubject is the subject for listing user identities.
+	// The subject is of the form: lfx.auth-service.user_identity.list
+	UserIdentityListSubject = "lfx.auth-service.user_identity.list"
+)
+
+const (
+
+	// Password management subjects
+
+	// PasswordUpdateSubject is the subject for updating a user's password.
+	// The subject is of the form: lfx.auth-service.password.update
+	PasswordUpdateSubject = "lfx.auth-service.password.update"
+
+	// PasswordResetLinkSubject is the subject for sending a password reset link.
+	// The subject is of the form: lfx.auth-service.password.reset_link
+	PasswordResetLinkSubject = "lfx.auth-service.password.reset_link"
 )

@@ -14,6 +14,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/collections"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/password"
@@ -61,6 +62,7 @@ func loadUsersFromYAML(ctx context.Context) ([]*model.User, error) {
 	return users, nil
 }
 
+// GetUser fetches a user from the in-memory mock store by user_id.
 func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: getting user", "user", user)
 
@@ -91,6 +93,7 @@ func (u *userWriter) GetUser(ctx context.Context, user *model.User) (*model.User
 	return nil, errors.NewNotFound("user not found")
 }
 
+// SearchUser searches the in-memory mock store for a user matching the given criteria.
 func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: searching user", "user", user, "criteria", criteria)
 
@@ -111,6 +114,7 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	return result, nil
 }
 
+// UpdateUser applies the provided changes to a mock user record.
 func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: updating user", "user", user)
 
@@ -218,6 +222,7 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 	return &updatedUser, nil
 }
 
+// SendVerificationAlternateEmail is a no-op in the mock adapter.
 func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
 
@@ -265,6 +270,7 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 	return nil
 }
 
+// VerifyAlternateEmail simulates verifying an alternate email in the mock store.
 func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
 
@@ -319,8 +325,8 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
 
-	// Generate an identity token for the verified email
-	idToken, err := jwt.GenerateSimpleTestIdentityToken(email.Email, 1*time.Hour)
+	// Generate an identity token for the verified email using email| sub prefix
+	idToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(email.Email, fmt.Sprintf("email|%s", normalizedEmail), 1*time.Hour)
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to generate identity token", err)
 	}
@@ -337,6 +343,13 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	}, nil
 }
 
+// ValidateLinkRequest is a no-op in the mock adapter.
+func (u *userWriter) ValidateLinkRequest(ctx context.Context, _ *model.LinkIdentity) error {
+	slog.DebugContext(ctx, "no validations for mock request")
+	return nil
+}
+
+// LinkIdentity links a secondary identity onto a mock primary user.
 func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdentity) error {
 	slog.DebugContext(ctx, "mock: linking identity")
 
@@ -352,42 +365,36 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 		return errors.NewValidation("identity_token is required")
 	}
 
-	// Extract email from the identity token
-	email, err := jwt.ExtractEmail(ctx, request.LinkWith.IdentityToken)
+	sub, err := jwt.ExtractSubject(ctx, request.LinkWith.IdentityToken)
 	if err != nil {
-		return errors.NewValidation("failed to extract email from identity token")
+		return errors.NewValidation("failed to extract subject from identity token")
 	}
 
-	if email == "" {
-		return errors.NewValidation("identity token does not contain email claim")
+	if strings.HasPrefix(sub, "email|") {
+		email := strings.TrimPrefix(sub, "email|")
+		return u.linkEmailIdentity(ctx, request, email)
 	}
+	return u.linkSocialIdentity(ctx, request, sub, request.LinkWith.IdentityToken)
+}
 
+func (u *userWriter) linkEmailIdentity(ctx context.Context, request *model.LinkIdentity, email string) error {
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
 
-	slog.InfoContext(ctx, "mock: linking email to user",
-		"user_id", redaction.Redact(request.User.UserID),
-		"email", redaction.Redact(email),
-	)
-
-	// Find the user by user_id
 	user, exists := u.users[request.User.UserID]
 	if !exists {
 		return errors.NewNotFound("user not found")
 	}
 
-	// Check if email is already the primary email
 	if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
 		return errors.NewValidation("email is already the primary email")
 	}
 
-	// Check if email is already in alternate emails
 	for _, altEmail := range user.AlternateEmails {
 		if strings.ToLower(altEmail.Email) == normalizedEmail {
 			return errors.NewValidation("email is already linked as alternate email")
 		}
 	}
 
-	// Check if this email is linked to any other user
 	for _, otherUser := range u.users {
 		if otherUser.UserID == user.UserID {
 			continue
@@ -402,23 +409,194 @@ func (u *userWriter) LinkIdentity(ctx context.Context, request *model.LinkIdenti
 		}
 	}
 
-	// Add email to alternate emails
 	user.AlternateEmails = append(user.AlternateEmails, model.Email{
 		Email:    email,
 		Verified: true,
 	})
 
-	slog.InfoContext(ctx, "mock: identity linked successfully",
+	slog.InfoContext(ctx, "mock: email identity linked successfully",
 		"user_id", redaction.Redact(request.User.UserID),
 		"email", redaction.Redact(email),
-		"total_alternate_emails", len(user.AlternateEmails),
 	)
 
 	return nil
 }
 
+func (u *userWriter) linkSocialIdentity(ctx context.Context, request *model.LinkIdentity, sub, identityToken string) error {
+	parts := strings.SplitN(sub, "|", 2)
+	if len(parts) != 2 {
+		return errors.NewValidation("invalid identity token subject format")
+	}
+	provider, identityID := parts[0], parts[1]
+
+	email, _ := jwt.ExtractEmail(ctx, identityToken)
+
+	user, exists := u.users[request.User.UserID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	for _, id := range user.Identities {
+		if id.Provider == provider && id.IdentityID == identityID {
+			return errors.NewValidation("identity is already linked")
+		}
+	}
+
+	user.Identities = append(user.Identities, model.Identity{
+		Provider:   provider,
+		IdentityID: identityID,
+		Email:      email,
+		IsSocial:   true,
+	})
+
+	slog.InfoContext(ctx, "mock: social identity linked successfully",
+		"user_id", redaction.Redact(request.User.UserID),
+		"provider", provider,
+	)
+
+	return nil
+}
+
+// UnlinkIdentity unlinks an identity from a mock primary user.
+func (u *userWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
+	slog.DebugContext(ctx, "mock: unlinking identity")
+
+	if request == nil {
+		return errors.NewValidation("unlink identity request is required")
+	}
+
+	if request.User.UserID == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	user, exists := u.users[request.User.UserID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	switch request.Unlink.Provider {
+	case "email":
+		// Parity with the Auth0 adapter: an email-connection entry in
+		// user.Identities is by construction a system-managed alias (only
+		// AddSystemManagedEmail writes there). Refuse to unlink it so the
+		// mock enforces the same immutability invariant as Auth0.
+		for _, id := range user.Identities {
+			if id.Provider == "email" && strings.EqualFold(id.Email, request.Unlink.IdentityID) {
+				return errors.NewForbidden("system_managed_identity")
+			}
+		}
+		user.AlternateEmails = collections.RemoveFromSlice(user.AlternateEmails, func(e model.Email) bool {
+			return strings.EqualFold(e.Email, request.Unlink.IdentityID)
+		})
+		slog.InfoContext(ctx, "mock: email identity unlinked",
+			"user_id", redaction.Redact(request.User.UserID),
+			"email", redaction.Redact(request.Unlink.IdentityID),
+		)
+	default:
+		user.Identities = collections.RemoveFromSlice(user.Identities, func(id model.Identity) bool {
+			return id.Provider == request.Unlink.Provider && id.IdentityID == request.Unlink.IdentityID
+		})
+		slog.InfoContext(ctx, "mock: social identity unlinked",
+			"user_id", redaction.Redact(request.User.UserID),
+			"provider", request.Unlink.Provider,
+		)
+	}
+
+	return nil
+}
+
+// ChangePassword updates the password for a mock user.
+func (u *userWriter) ChangePassword(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
+	slog.DebugContext(ctx, "mock: changing password",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
+// SendResetPasswordLink is a no-op in the mock adapter.
+func (u *userWriter) SendResetPasswordLink(ctx context.Context, user *model.User) error {
+	if user == nil {
+		return errors.NewValidation("user is required")
+	}
+	slog.DebugContext(ctx, "mock: sending reset password link",
+		"user_id", redaction.Redact(user.UserID),
+	)
+	return nil
+}
+
+// SetPrimaryEmail updates the primary email on a mock user.
+func (u *userWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
+	slog.DebugContext(ctx, "mock: setting primary email",
+		"user_id", redaction.Redact(userID),
+	)
+
+	existingUser, exists := u.users[userID]
+	if !exists {
+		return errors.NewNotFound("user not found")
+	}
+
+	oldPrimary := existingUser.PrimaryEmail
+	existingUser.PrimaryEmail = email
+
+	// Move the old primary email into alternate emails if not already present
+	if oldPrimary != "" {
+		found := false
+		for _, alt := range existingUser.AlternateEmails {
+			if strings.EqualFold(alt.Email, oldPrimary) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existingUser.AlternateEmails = append(existingUser.AlternateEmails, model.Email{
+				Email:    oldPrimary,
+				Verified: true,
+			})
+		}
+	}
+
+	// Remove the new primary from alternate emails
+	filtered := make([]model.Email, 0, len(existingUser.AlternateEmails))
+	for _, alt := range existingUser.AlternateEmails {
+		if !strings.EqualFold(alt.Email, email) {
+			filtered = append(filtered, alt)
+		}
+	}
+	existingUser.AlternateEmails = filtered
+
+	return nil
+}
+
+// AddSystemManagedEmail is a no-op stub for the mock adapter. It records the
+// email as a verified linked identity on the user so tests can verify it
+// surfaces in GetUserEmails / user_emails.read.
+func (u *userWriter) AddSystemManagedEmail(_ context.Context, primaryUserID, email string) (string, error) {
+	user, exists := u.users[primaryUserID]
+	if !exists {
+		return "", errors.NewNotFound("user not found")
+	}
+	stubID := "email|mock-" + email
+	for _, id := range user.Identities {
+		if id.Provider == "email" && strings.EqualFold(id.Email, email) {
+			return "", errors.NewValidation("email is already linked")
+		}
+	}
+	user.Identities = append(user.Identities, model.Identity{
+		Provider:      "email",
+		IdentityID:    "mock-" + email,
+		Connection:    "email",
+		Email:         email,
+		EmailVerified: true,
+	})
+	return stubID, nil
+}
+
+// MetadataLookup resolves a user via metadata lookup in the mock store.
 func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
-	slog.DebugContext(ctx, "mock: metadata lookup", "input", input)
+	slog.DebugContext(ctx, "mock: metadata lookup", "input", redaction.Redact(input))
 
 	// Trim whitespace from input
 	input = strings.TrimSpace(input)

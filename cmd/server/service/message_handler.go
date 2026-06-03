@@ -27,17 +27,28 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 
 	handlers := map[string]func(ctx context.Context, msg port.TransportMessenger) ([]byte, error){
 		// user read/write operations
-		constants.UserMetadataUpdateSubject: mhs.messageHandler.UpdateUser,
-		constants.UserMetadataReadSubject:   mhs.messageHandler.GetUserMetadata,
-		constants.UserEmailReadSubject:      mhs.messageHandler.GetUserEmails,
+		constants.UserMetadataUpdateSubject:  mhs.messageHandler.UpdateUser,
+		constants.UserMetadataReadSubject:    mhs.messageHandler.GetUserMetadata,
+		constants.UserEmailReadSubject:       mhs.messageHandler.GetUserEmails,
+		constants.UserEmailSetPrimarySubject: mhs.messageHandler.SetPrimaryEmail,
 		// lookup operations
-		constants.UserEmailToUserSubject: mhs.messageHandler.EmailToUsername,
-		constants.UserEmailToSubSubject:  mhs.messageHandler.EmailToSub,
+		constants.UserEmailToUserSubject:   mhs.messageHandler.EmailToUsername,
+		constants.UserEmailToSubSubject:    mhs.messageHandler.EmailToSub,
+		constants.UserUsernameToSubSubject: mhs.messageHandler.UsernameToSub,
 		// email linking operations
 		constants.EmailLinkingSendVerificationSubject: mhs.messageHandler.StartEmailLinking,
 		constants.EmailLinkingVerifySubject:           mhs.messageHandler.VerifyEmailLinking,
-		// identity linking operations
-		constants.UserIdentityLinkSubject: mhs.messageHandler.LinkIdentity,
+		// identity linking/unlinking/listing operations
+		constants.UserIdentityLinkSubject:   mhs.messageHandler.LinkIdentity,
+		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
+		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
+		// alias management
+		constants.UserAddAliasSubject: mhs.messageHandler.AddAlias,
+		// password management operations
+		constants.PasswordUpdateSubject:    mhs.messageHandler.ChangePassword,
+		constants.PasswordResetLinkSubject: mhs.messageHandler.SendResetPasswordLink,
+		// impersonation
+		constants.ImpersonationTokenExchangeSubject: mhs.messageHandler.ImpersonateUser,
 	}
 
 	handler, ok := handlers[subject]

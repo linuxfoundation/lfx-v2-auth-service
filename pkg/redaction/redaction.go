@@ -7,8 +7,12 @@
 package redaction
 
 import (
+	"regexp"
 	"strings"
 )
+
+// jwtPattern matches JWT tokens (three base64url segments separated by dots)
+var jwtPattern = regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)
 
 // Redact redacts sensitive information for logging and output purposes.
 // Shows the first 3 characters when the string has more than 5 characters,
@@ -19,9 +23,16 @@ import (
 //   - Redact("ab") → "**"
 //   - Redact("abc") → "a****"
 //   - Redact("johndoe123") → "joh****"
+//   - Redact("auth0|johndoe123") → "auth0|joh****"
 func Redact(sensitive string) string {
 	if len(sensitive) == 0 {
 		return ""
+	}
+
+	// Handle Auth0 user IDs before length-based checks so that short suffixes
+	// (e.g. "auth0|ab") are redacted as "auth0|**" rather than "aut****".
+	if suffix, ok := strings.CutPrefix(sensitive, "auth0|"); ok {
+		return "auth0|" + Redact(suffix)
 	}
 
 	runes := []rune(sensitive)
@@ -39,6 +50,12 @@ func Redact(sensitive string) string {
 
 	// For longer strings (>5 runes), show first 3 runes + asterisks
 	return string(runes[:3]) + "****"
+}
+
+// RedactJWTs replaces any JWT tokens found in the input string with a redacted placeholder.
+// Useful for sanitizing request/response bodies before logging.
+func RedactJWTs(s string) string {
+	return jwtPattern.ReplaceAllString(s, "[REDACTED]")
 }
 
 // RedactEmail redacts email addresses for logging and output purposes.

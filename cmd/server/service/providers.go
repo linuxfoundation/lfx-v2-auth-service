@@ -110,8 +110,11 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 		}
 
 		auth0Config := auth0.Config{
-			Tenant: auth0Tenant,
-			Domain: auth0Domain,
+			Tenant:                 auth0Tenant,
+			Domain:                 auth0Domain,
+			LFXProfileClientID:     os.Getenv(constants.Auth0LFXProfileClientIDEnvKey),
+			LFXProfileClientSecret: os.Getenv(constants.Auth0LFXProfileClientSecretEnvKey),
+			LFXOneClientID:         os.Getenv(constants.Auth0LFXOneClientIDEnvKey),
 		}
 
 		slog.DebugContext(ctx, "Auth0 client initialized with M2M token support",
@@ -183,22 +186,42 @@ func QueueSubscriptions(ctx context.Context) error {
 
 	userReaderWriter := newUserReaderWriter(ctx)
 
-	messageHandlerService := &MessageHandlerService{
-		messageHandler: service.NewMessageHandlerOrchestrator(
-			service.WithUserWriterForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithUserReaderForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithEmailHandlerForMessageHandler(
-				userReaderWriter,
-			),
-			service.WithIdentityLinkerForMessageHandler(
-				userReaderWriter,
-			),
-		),
+	opts := []service.MessageHandlerOrchestratorOption{
+		service.WithUserWriterForMessageHandler(userReaderWriter),
+		service.WithUserReaderForMessageHandler(userReaderWriter),
+		service.WithEmailHandlerForMessageHandler(userReaderWriter),
+		service.WithIdentityLinkerForMessageHandler(userReaderWriter),
+		service.WithIdentityUnlinkerForMessageHandler(userReaderWriter),
+		service.WithPasswordHandlerForMessageHandler(userReaderWriter),
+		service.WithEventPublisherForMessageHandler(natsClient),
 	}
+
+	// Only wire the alias manager for backends that meaningfully support
+	// system-managed aliases. Authelia returns a backend-specific validation
+	// error; leaving it nil lets AddAlias surface the stable
+	// "alias_service_unavailable" guard instead.
+	userRepoType := os.Getenv(constants.UserRepositoryTypeEnvKey)
+	if userRepoType == constants.UserRepositoryTypeAuth0 || userRepoType == constants.UserRepositoryTypeMock || userRepoType == "" {
+		opts = append(opts, service.WithAliasManagerForMessageHandler(userReaderWriter))
+	}
+
+	if userRepoType == constants.UserRepositoryTypeAuth0 {
+		auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
+		if auth0Domain == "" {
+			auth0Domain = fmt.Sprintf("%s.auth0.com", os.Getenv(constants.Auth0TenantEnvKey))
+		}
+
+		impersonationFlow, err := auth0.NewImpersonationFlow(ctx, auth0Domain)
+		if err != nil {
+			slog.WarnContext(ctx, "impersonation flow unavailable", "error", err)
+		} else {
+			opts = append(opts, service.WithImpersonatorForMessageHandler(impersonationFlow))
+		}
+	}
+
+	messageHandlerService := NewMessageHandlerService(
+		service.NewMessageHandlerOrchestrator(opts...),
+	)
 
 	// Get the NATS client - we need to access it directly
 	natsClient := getNATSClient()
@@ -211,12 +234,19 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.UserMetadataUpdateSubject:           messageHandlerService.HandleMessage,
 		constants.UserEmailToUserSubject:              messageHandlerService.HandleMessage,
 		constants.UserEmailToSubSubject:               messageHandlerService.HandleMessage,
+		constants.UserUsernameToSubSubject:            messageHandlerService.HandleMessage,
 		constants.UserMetadataReadSubject:             messageHandlerService.HandleMessage,
 		constants.UserEmailReadSubject:                messageHandlerService.HandleMessage,
+		constants.UserEmailSetPrimarySubject:          messageHandlerService.HandleMessage,
 		constants.EmailLinkingSendVerificationSubject: messageHandlerService.HandleMessage,
 		constants.EmailLinkingVerifySubject:           messageHandlerService.HandleMessage,
 		constants.UserIdentityLinkSubject:             messageHandlerService.HandleMessage,
-		// Add more subjects here as needed
+		constants.UserIdentityUnlinkSubject:           messageHandlerService.HandleMessage,
+		constants.UserIdentityListSubject:             messageHandlerService.HandleMessage,
+		constants.UserAddAliasSubject:                 messageHandlerService.HandleMessage,
+		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
+		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
+		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,
 	}
 
 	for subject, handler := range subjects {

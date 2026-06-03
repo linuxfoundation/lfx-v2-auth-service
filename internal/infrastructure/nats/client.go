@@ -87,6 +87,15 @@ func (c *NATSClient) GetKVStore(bucketName string) (jetstream.KeyValue, bool) {
 	return kvStore, exists
 }
 
+// Publish publishes a message to a NATS subject. Used for fire-and-forget
+// domain events (not request/reply).
+func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) error {
+	if err := c.IsReady(ctx); err != nil {
+		return err
+	}
+	return c.conn.Publish(subject, data)
+}
+
 // SubscribeWithTransportMessenger subscribes to a subject with proper TransportMessenger handling
 func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subject string, queueName string, handler func(context.Context, port.TransportMessenger)) (*nats.Subscription, error) {
 

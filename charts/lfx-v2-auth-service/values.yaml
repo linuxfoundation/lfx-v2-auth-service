@@ -16,6 +16,13 @@ podAnnotations: {}
 #   environment: production
 podLabels: {}
 
+# podDisruptionBudget configures a PodDisruptionBudget for the deployment.
+# Only one of minAvailable or maxUnavailable may be set (not both).
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  # maxUnavailable: 1
+
 image:
   repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/server
   # tag is the container image tag (overrides appVersion from Chart.yaml)
@@ -131,11 +138,17 @@ app:
       value: null
     AUTH0_AUDIENCE:
       value: null
+    AUTH0_MANAGEMENT_AUDIENCE:
+      value: null
     # Auth0 LFX Profile Client configuration (Regular Web Application for passwordless flows)
     ## Required when using passwordless email linking flow
     AUTH0_LFX_PROFILE_CLIENT_ID:
       value: null
     AUTH0_LFX_PROFILE_CLIENT_SECRET:
+      value: null
+    # Auth0 LFX One Client configuration (user-facing SSR app)
+    ## Required for sending password reset links
+    AUTH0_LFX_ONE_CLIENT_ID:
       value: null
 
     # Authelia configuration
@@ -174,10 +187,14 @@ app:
     # tracesExporter specifies the traces exporter: "otlp" or "none"
     # (default: "none")
     tracesExporter: "none"
-    # tracesSampleRatio specifies the sampling ratio for traces (0.0 to 1.0)
-    # A value of 1.0 means all traces are sampled, 0.5 means 50% are sampled
-    # (default: "1.0")
-    tracesSampleRatio: "1.0"
+    # tracesSampler specifies the OTEL_TRACES_SAMPLER type. Supported values:
+    # "always_on", "always_off", "traceidratio", "parentbased_always_on",
+    # "parentbased_always_off", "parentbased_traceidratio".
+    # When empty, the application defaults to parentbased_traceidratio.
+    tracesSampler: ""
+    # tracesSamplerArg specifies the argument for ratio-based samplers (0.0 to 1.0).
+    # Only used with traceidratio or parentbased_traceidratio samplers.
+    tracesSamplerArg: ""
     # metricsExporter specifies the metrics exporter: "otlp" or "none"
     # (default: "none")
     metricsExporter: "none"

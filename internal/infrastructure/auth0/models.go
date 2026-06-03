@@ -5,7 +5,9 @@ package auth0
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 )
@@ -21,6 +23,33 @@ type Auth0User struct {
 	Identities     []Auth0Identity    `json:"identities"`
 	AlternateEmail []Auth0ProfileData `json:"alternate_email,omitempty"`
 	UserMetadata   *Auth0UserMetadata `json:"user_metadata"`
+	AppMetadata    *Auth0AppMetadata  `json:"app_metadata,omitempty"`
+}
+
+// Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.
+// Only fields relevant to this service are modeled; unknown keys are ignored.
+type Auth0AppMetadata struct {
+	// SystemManaged marks an identity that was created by this service on behalf
+	// of the user (e.g. a system-managed alias such as `@linux.com`) and must
+	// not be unlinked through the normal user-initiated unlink flow.
+	SystemManaged bool `json:"system_managed,omitempty"`
+}
+
+// systemManagedUserPayload is the body for POST /api/v2/users when creating a
+// stub passwordless user that will be linked as a system-managed identity.
+type systemManagedUserPayload struct {
+	Connection    string            `json:"connection"`
+	Email         string            `json:"email"`
+	EmailVerified bool              `json:"email_verified"`
+	AppMetadata   *Auth0AppMetadata `json:"app_metadata,omitempty"`
+}
+
+// linkSubIdentityPayload is the body for POST /api/v2/users/{id}/identities when
+// linking by `{provider, user_id}` (the M2M direct-link path), as opposed to the
+// passwordless `link_with` ID-token flow used by LinkIdentityPayload.
+type linkSubIdentityPayload struct {
+	Provider string `json:"provider"`
+	UserID   string `json:"user_id"`
 }
 
 // Auth0Identity represents an identity in Auth0
@@ -36,6 +65,8 @@ type Auth0Identity struct {
 type Auth0ProfileData struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
+	Nickname      string `json:"nickname"`
+	Name          string `json:"name"`
 }
 
 // Auth0UserMetadata represents the metadata of a user in Auth0.
@@ -81,21 +112,39 @@ func (u *Auth0User) ToUser() *model.User {
 		}
 	}
 
-	var alternateEmails []model.Email
-	for _, alternateEmail := range u.AlternateEmail {
-		alternateEmail := model.Email{
-			Email:    alternateEmail.Email,
-			Verified: alternateEmail.EmailVerified,
+	var identities []model.Identity
+	for _, auth0Id := range u.Identities {
+		var identityID string
+		switch v := auth0Id.UserID.(type) {
+		case float64:
+			identityID = strconv.FormatFloat(v, 'f', -1, 64)
+		case string:
+			identityID = v
+		default:
+			identityID = fmt.Sprintf("%v", v)
 		}
-		alternateEmails = append(alternateEmails, alternateEmail)
+
+		identity := model.Identity{
+			Provider:   auth0Id.Provider,
+			IdentityID: identityID,
+			Connection: auth0Id.Connection,
+			IsSocial:   auth0Id.IsSocial,
+		}
+		if auth0Id.ProfileData != nil {
+			identity.Email = auth0Id.ProfileData.Email
+			identity.EmailVerified = auth0Id.ProfileData.EmailVerified
+			identity.Nickname = auth0Id.ProfileData.Nickname
+			identity.Name = auth0Id.ProfileData.Name
+		}
+		identities = append(identities, identity)
 	}
 
 	return &model.User{
-		UserID:          u.UserID,
-		Username:        u.Username,
-		PrimaryEmail:    u.Email,
-		AlternateEmails: alternateEmails,
-		UserMetadata:    meta,
+		UserID:       u.UserID,
+		Username:     u.Username,
+		PrimaryEmail: u.Email,
+		Identities:   identities,
+		UserMetadata: meta,
 	}
 }
 

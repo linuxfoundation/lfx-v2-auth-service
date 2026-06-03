@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -16,6 +18,16 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
+
+// UserProfileUpdatedEvent is published after a successful user_metadata update.
+// Consumers use the full UserMetadata object (not just changed fields) to sync
+// profile state to other systems.
+type UserProfileUpdatedEvent struct {
+	UserID    string              `json:"user_id"`
+	Principal string              `json:"principal"`
+	Metadata  *model.UserMetadata `json:"user_metadata"`
+	Timestamp time.Time           `json:"timestamp"`
+}
 
 // UserDataResponse represents the response structure for user update operations
 type UserDataResponse struct {
@@ -27,40 +39,80 @@ type UserDataResponse struct {
 
 // messageHandlerOrchestrator orchestrates the message handling process
 type messageHandlerOrchestrator struct {
-	userWriter     port.UserWriter
-	userReader     port.UserReader
-	emailHandler   port.EmailHandler
-	identityLinker port.IdentityLinker
+	userWriter       port.UserWriter
+	userReader       port.UserReader
+	emailHandler     port.EmailHandler
+	identityLinker   port.IdentityLinker
+	identityUnlinker port.IdentityLinker
+	passwordHandler  port.PasswordHandler
+	impersonator     port.Impersonator
+	eventPublisher   port.EventPublisher
+	aliasManager     port.AliasManager
 }
 
-// messageHandlerOrchestratorOption defines a function type for setting options
-type messageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
+// MessageHandlerOrchestratorOption defines a function type for setting options
+type MessageHandlerOrchestratorOption func(*messageHandlerOrchestrator)
 
 // WithUserWriterForMessageHandler sets the user writer for the message handler orchestrator
-func WithUserWriterForMessageHandler(userWriter port.UserWriter) messageHandlerOrchestratorOption {
+func WithUserWriterForMessageHandler(userWriter port.UserWriter) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userWriter = userWriter
 	}
 }
 
 // WithUserReaderForMessageHandler sets the user reader for the message handler orchestrator
-func WithUserReaderForMessageHandler(userReader port.UserReader) messageHandlerOrchestratorOption {
+func WithUserReaderForMessageHandler(userReader port.UserReader) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.userReader = userReader
 	}
 }
 
 // WithEmailHandlerForMessageHandler sets the email handler for the message handler orchestrator
-func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) messageHandlerOrchestratorOption {
+func WithEmailHandlerForMessageHandler(emailHandler port.EmailHandler) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.emailHandler = emailHandler
 	}
 }
 
 // WithIdentityLinkerForMessageHandler sets the identity linker for the message handler orchestrator
-func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) messageHandlerOrchestratorOption {
+func WithIdentityLinkerForMessageHandler(identityLinker port.IdentityLinker) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.identityLinker = identityLinker
+	}
+}
+
+// WithIdentityUnlinkerForMessageHandler sets the identity unlinker for the message handler orchestrator
+func WithIdentityUnlinkerForMessageHandler(identityUnlinker port.IdentityLinker) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.identityUnlinker = identityUnlinker
+	}
+}
+
+// WithPasswordHandlerForMessageHandler sets the password handler for the message handler orchestrator
+func WithPasswordHandlerForMessageHandler(passwordHandler port.PasswordHandler) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.passwordHandler = passwordHandler
+	}
+}
+
+// WithImpersonatorForMessageHandler sets the impersonator for the message handler orchestrator
+func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.impersonator = impersonator
+	}
+}
+
+// WithEventPublisherForMessageHandler sets the event publisher for the message handler orchestrator
+func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.eventPublisher = eventPublisher
+	}
+}
+
+// WithAliasManagerForMessageHandler sets the alias manager for the message handler orchestrator
+func WithAliasManagerForMessageHandler(aliasManager port.AliasManager) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.aliasManager = aliasManager
 	}
 }
 
@@ -69,14 +121,19 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 		Success: false,
 		Error:   error,
 	}
-	responseJSON, _ := json.Marshal(response)
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		slog.Error("failed to marshal error response",
+			"error", err,
+		)
+	}
 	return responseJSON
 }
 
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
 func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria string, email string) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("user service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	slog.DebugContext(ctx, "search by email",
@@ -132,9 +189,19 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 	return []byte(user.UserID), nil
 }
 
+// UsernameToSub converts a username to a sub using local mapping logic.
+// This derives the Auth0 sub deterministically without an external call.
+func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.TransportMessenger) ([]byte, error) {
+	username := strings.TrimSpace(string(msg.Data()))
+	if username == "" {
+		return m.errorResponse("username is required"), nil
+	}
+	return []byte(mapUsernameToSub(username)), nil
+}
+
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	if m.userReader == nil {
-		return nil, errs.NewUnexpected("user service unavailable")
+		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
 	input := strings.TrimSpace(string(msg.Data()))
@@ -192,27 +259,162 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 	return responseJSON, nil
 }
 
-// GetUserEmails retrieves the user emails based on the input strategy
+// userEmailsRequest represents the input for retrieving user emails
+type userEmailsRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+}
+
+// GetUserEmails retrieves the user emails based on an auth token
 func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
-	user, errGetUser := m.getUserByInput(ctx, msg)
-	if errGetUser != nil {
-		slog.ErrorContext(ctx, "error getting user emails",
-			"error", errGetUser,
-			"input", redaction.Redact(string(msg.Data())),
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	var request userEmailsRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed_to_unmarshal_request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	slog.DebugContext(ctx, "get user emails",
+		"input", redaction.Redact(authToken),
+	)
+
+	user, err := m.userReader.MetadataLookup(ctx, authToken)
+	if err != nil {
+		slog.ErrorContext(ctx, "error looking up user for email read",
+			"error", err,
 		)
-		return m.errorResponse(errGetUser.Error()), nil
+		return m.errorResponse(err.Error()), nil
+	}
+
+	fullUser, err := m.userReader.GetUser(ctx, user)
+	if err != nil {
+		slog.ErrorContext(ctx, "error getting user for email read",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	alternateEmails := make([]model.Email, 0, len(fullUser.Identities))
+	for _, id := range fullUser.Identities {
+		if id.Connection != constants.EmailConnection {
+			continue
+		}
+		if id.Email == "" {
+			continue
+		}
+		alternateEmails = append(alternateEmails, model.Email{
+			Email:    id.Email,
+			Verified: id.EmailVerified,
+		})
 	}
 
 	response := UserDataResponse{
 		Success: true,
-		Data:    map[string]any{"primary_email": user.PrimaryEmail, "alternate_emails": user.AlternateEmails},
+		Data:    map[string]any{"primary_email": fullUser.PrimaryEmail, "alternate_emails": alternateEmails},
 	}
 
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
-		errorResponseJSON := m.errorResponse("failed to marshal response")
-		return errorResponseJSON, nil
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// identityListRequest represents the input for listing user identities
+type identityListRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+}
+
+// identityResponse is the response DTO matching the UI's expected format
+type identityResponse struct {
+	Provider    string               `json:"provider"`
+	UserID      string               `json:"user_id"`
+	IsSocial    bool                 `json:"isSocial"`
+	ProfileData *identityProfileData `json:"profileData,omitempty"`
+}
+
+type identityProfileData struct {
+	Email         string `json:"email,omitempty"`
+	EmailVerified bool   `json:"email_verified,omitempty"`
+	Nickname      string `json:"nickname,omitempty"`
+	Name          string `json:"name,omitempty"`
+}
+
+// ListIdentities retrieves the user's linked identities
+func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	var request identityListRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed_to_unmarshal_request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	slog.DebugContext(ctx, "list identities",
+		"input", redaction.Redact(authToken),
+	)
+
+	user, err := m.userReader.MetadataLookup(ctx, authToken)
+	if err != nil {
+		slog.ErrorContext(ctx, "error looking up user for identity list",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	fullUser, err := m.userReader.GetUser(ctx, user)
+	if err != nil {
+		slog.ErrorContext(ctx, "error getting user for identity list",
+			"error", err,
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	identities := make([]identityResponse, 0, len(fullUser.Identities))
+	for _, id := range fullUser.Identities {
+		resp := identityResponse{
+			Provider: id.Provider,
+			UserID:   id.IdentityID,
+			IsSocial: id.IsSocial,
+		}
+		if id.Email != "" || id.Nickname != "" || id.Name != "" {
+			resp.ProfileData = &identityProfileData{
+				Email:         id.Email,
+				EmailVerified: id.EmailVerified,
+				Nickname:      id.Nickname,
+				Name:          id.Name,
+			}
+		}
+		identities = append(identities, resp)
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Data:    identities,
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
 	}
 
 	return responseJSON, nil
@@ -222,7 +424,7 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.userWriter == nil {
-		return m.errorResponse("user service unavailable"), nil
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	user := &model.User{}
@@ -248,6 +450,30 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 	if err != nil {
 		responseJSON := m.errorResponse(err.Error())
 		return responseJSON, nil
+	}
+
+	// Publish domain event so downstream consumers (e.g. v1-sync-helper) can
+	// react to profile changes. Fire-and-forget: a publish failure must not
+	// block the user-facing response.
+	if m.eventPublisher != nil {
+		event := UserProfileUpdatedEvent{
+			UserID:    user.UserID,
+			Principal: user.UserID, // the JWT subject — identifies the caller
+			Metadata:  updatedUser.UserMetadata,
+			Timestamp: time.Now().UTC(),
+		}
+		eventJSON, jsonErr := json.Marshal(event)
+		if jsonErr != nil {
+			slog.WarnContext(ctx, "failed to marshal user profile updated event",
+				"error", jsonErr,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		} else if pubErr := m.eventPublisher.Publish(ctx, constants.UserProfileUpdatedSubject, eventJSON); pubErr != nil {
+			slog.WarnContext(ctx, "failed to publish user profile updated event",
+				"error", pubErr,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		}
 	}
 
 	// Return success response with user metadata
@@ -282,8 +508,18 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 				return errs.NewValidation("email already linked")
 			}
 
+			// Authelia and Mock adapters expose linked emails via AlternateEmails;
+			// the Auth0 adapter exposes them as identities with Connection == "email".
 			for _, alternateEmail := range user.AlternateEmails {
 				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.Verified {
+					return errs.NewValidation("email already linked")
+				}
+			}
+			for _, id := range user.Identities {
+				if id.Connection != constants.EmailConnection {
+					continue
+				}
+				if strings.EqualFold(id.Email, email) && id.EmailVerified {
 					return errs.NewValidation("email already linked")
 				}
 			}
@@ -383,18 +619,28 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.identityLinker == nil {
-		return m.errorResponse("user service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	if m.userReader == nil {
-		return m.errorResponse("user service unavailable"), nil
+		slog.ErrorContext(ctx, "auth_service_unavailable")
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
 	linkRequest := &model.LinkIdentity{}
 	err := json.Unmarshal(msg.Data(), linkRequest)
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to unmarshal link identity request",
+			"error", err,
+		)
 		responseJSON := m.errorResponse("failed to unmarshal link identity request")
 		return responseJSON, nil
+	}
+
+	errValidateLinkRequest := m.identityLinker.ValidateLinkRequest(ctx, linkRequest)
+	if errValidateLinkRequest != nil {
+		return m.errorResponse(errValidateLinkRequest.Error()), nil
 	}
 
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken)
@@ -423,8 +669,410 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 	return responseJSON, nil
 }
 
+// UnlinkIdentity removes a secondary identity from a user account
+func (m *messageHandlerOrchestrator) UnlinkIdentity(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.identityUnlinker == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	unlinkRequest := &model.UnlinkIdentity{}
+	err := json.Unmarshal(msg.Data(), unlinkRequest)
+	if err != nil {
+		return m.errorResponse("failed to unmarshal unlink identity request"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, unlinkRequest.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	unlinkRequest.User.UserID = user.UserID
+
+	errUnlinkIdentity := m.identityUnlinker.UnlinkIdentity(ctx, unlinkRequest)
+	if errUnlinkIdentity != nil {
+		return m.errorResponse(errUnlinkIdentity.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "identity unlinked successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// ChangePassword handles password change requests
+func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil || m.userReader == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ChangePasswordRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal change password request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+	if strings.TrimSpace(request.CurrentPassword) == "" {
+		return m.errorResponse("current_password is required"), nil
+	}
+	if strings.TrimSpace(request.NewPassword) == "" {
+		return m.errorResponse("new_password is required"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
+	if errChange != nil {
+		return m.errorResponse(errChange.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// SendResetPasswordLink handles password reset link requests
+func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.passwordHandler == nil || m.userReader == nil {
+		return m.errorResponse("password service unavailable"), nil
+	}
+
+	var request model.ResetPasswordLinkRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal reset password link request"), nil
+	}
+
+	if strings.TrimSpace(request.Token) == "" {
+		return m.errorResponse("token is required"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
+	if errReset != nil {
+		return m.errorResponse(errReset.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "password reset link sent successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// setPrimaryEmailRequest represents the JSON payload for set_primary email requests
+type setPrimaryEmailRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Email string `json:"email"`
+}
+
+// SetPrimaryEmail handles requests to swap an alternate email to become the user's primary email
+func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+
+	if m.userWriter == nil || m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	var request setPrimaryEmailRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed to unmarshal set primary email request"), nil
+	}
+
+	if strings.TrimSpace(request.User.AuthToken) == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+	email := strings.ToLower(strings.TrimSpace(request.Email))
+	if email == "" {
+		return m.errorResponse("email is required"), nil
+	}
+	if !(&model.Email{Email: email}).IsValidEmail() {
+		return m.errorResponse("invalid email format"), nil
+	}
+
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
+	if errMetadataLookup != nil {
+		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+
+	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, email)
+	if errSetPrimary != nil {
+		return m.errorResponse(errSetPrimary.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Message: "primary email updated successfully",
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// impersonationRequest is the JSON payload expected on the NATS subject.
+type impersonationRequest struct {
+	SubjectToken string `json:"subject_token"`
+	TargetUser   string `json:"target_user"`
+}
+
+// ImpersonateUser handles an impersonation token exchange request over NATS.
+// Request: JSON {"subject_token": "...", "target_user": "email_or_username"}
+// Response: UserDataResponse with Data.AccessToken on success, or Error on failure.
+func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.impersonator == nil {
+		return m.errorResponse("impersonation flow unavailable"), nil
+	}
+
+	var req impersonationRequest
+	if err := json.Unmarshal(msg.Data(), &req); err != nil {
+		return m.errorResponse("invalid request: " + err.Error()), nil
+	}
+
+	req.SubjectToken = strings.TrimSpace(req.SubjectToken)
+	req.TargetUser = strings.TrimSpace(req.TargetUser)
+
+	if req.SubjectToken == "" {
+		return m.errorResponse("subject_token is required"), nil
+	}
+	if req.TargetUser == "" {
+		return m.errorResponse("target_user is required"), nil
+	}
+
+	slog.DebugContext(ctx, "impersonation token exchange requested",
+		"target_user", redaction.RedactEmail(req.TargetUser),
+	)
+
+	accessToken, err := m.impersonator.ImpersonateUser(ctx, req.SubjectToken, req.TargetUser)
+	if err != nil {
+		slog.WarnContext(ctx, "impersonation token exchange failed",
+			"error", err,
+			"target_user", redaction.RedactEmail(req.TargetUser),
+		)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	response := UserDataResponse{
+		Success: true,
+		Data:    map[string]string{"access_token": accessToken},
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+
+	return responseJSON, nil
+}
+
+// addAliasRequest is the JSON payload for lfx.auth-service.add_alias
+type addAliasRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Alias  string `json:"alias"`
+	Domain string `json:"domain"`
+}
+
+// addAliasResponse is the reply for lfx.auth-service.add_alias
+type addAliasResponse struct {
+	Success bool   `json:"success"`
+	Email   string `json:"email,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
+// @linux.com) by creating a passwordless Auth0 stub user and linking it via
+// the Management API.
+//
+// Flow:
+//  1. Validate JWT (UserUpdateIdentityRequiredScope), extract sub.
+//  2. Validate the requested domain is in ALLOWED_ALIAS_DOMAINS.
+//  3. Reject if caller already has an alias on this domain (already_claimed).
+//  4. Validate alias local part (alias_invalid / alias_reserved).
+//  5. Search Auth0 to ensure the full address isn't already taken (alias_not_available).
+//  6. Call AddSystemManagedEmail and return the confirmed address.
+func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.aliasManager == nil {
+		return m.errorResponse("alias_service_unavailable"), nil
+	}
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	var request addAliasRequest
+	if err := json.Unmarshal(msg.Data(), &request); err != nil {
+		return m.errorResponse("failed_to_unmarshal_request"), nil
+	}
+
+	authToken := strings.TrimSpace(request.User.AuthToken)
+	if authToken == "" {
+		return m.errorResponse("auth_token is required"), nil
+	}
+
+	// Validate the requested domain against the server-side allow-list.
+	// Empty/unset env means the feature is disabled — fail closed.
+	requestedDomain := strings.ToLower(strings.TrimSpace(request.Domain))
+	if requestedDomain == "" {
+		return m.errorResponse("domain_not_allowed"), nil
+	}
+	allowed := false
+	if raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey)); raw != "" {
+		for _, d := range strings.Split(raw, ",") {
+			if strings.EqualFold(requestedDomain, strings.TrimSpace(d)) {
+				allowed = true
+				break
+			}
+		}
+	}
+	if !allowed {
+		return m.errorResponse("domain_not_allowed"), nil
+	}
+
+	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
+	if errLookup != nil {
+		return m.errorResponse(errLookup.Error()), nil
+	}
+
+	// Fetch the canonical record with the service's M2M credentials (read:users),
+	// not the caller's JWT. add_alias only requires update:current_user_identities,
+	// so we must not depend on the caller token also carrying read:current_user.
+	// Passing a UserID-only user (empty Token) routes GetUser to its M2M branch.
+	fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{UserID: user.UserID})
+	if errGetUser != nil {
+		return m.errorResponse(errGetUser.Error()), nil
+	}
+
+	// Already-claimed check is scoped to the requested domain: a user may
+	// hold at most one alias per allowed domain. Cover all three surfaces:
+	// primary email, linked identities, and alternate emails.
+	domainSuffix := "@" + requestedDomain
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), domainSuffix) {
+		return m.errorResponse("already_claimed"), nil
+	}
+	for _, id := range fullUser.Identities {
+		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), domainSuffix) {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+	for _, alt := range fullUser.AlternateEmails {
+		if strings.HasSuffix(strings.ToLower(alt.Email), domainSuffix) {
+			return m.errorResponse("already_claimed"), nil
+		}
+	}
+
+	// Parse optional extra reserved names from env (comma-separated).
+	var extraReserved []string
+	if raw := strings.TrimSpace(os.Getenv(constants.AliasReservedExtraEnvKey)); raw != "" {
+		for _, n := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(n); trimmed != "" {
+				extraReserved = append(extraReserved, trimmed)
+			}
+		}
+	}
+
+	normalised, errCode := model.ValidateAlias(request.Alias, requestedDomain, extraReserved)
+	if errCode != "" {
+		return m.errorResponse(errCode), nil
+	}
+
+	fullEmail := normalised + domainSuffix
+
+	// Verify the address isn't already claimed in Auth0. checkEmailExists
+	// returns errs.Validation ("email already linked") for a true conflict and
+	// propagates other errors (e.g. Auth0 search outage) — only the former
+	// should be surfaced as alias_not_available, otherwise we'd mask infra
+	// failures behind a misleading user-facing code.
+	if errExists := m.checkEmailExists(ctx, fullEmail); errExists != nil {
+		var validationErr errs.Validation
+		if errors.As(errExists, &validationErr) {
+			slog.DebugContext(ctx, "alias already exists in Auth0",
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
+		slog.ErrorContext(ctx, "failed to verify alias availability",
+			"error", errExists,
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse(errExists.Error()), nil
+	}
+
+	stubID, errAdd := m.aliasManager.AddSystemManagedEmail(ctx, fullUser.UserID, fullEmail)
+	if errAdd != nil {
+		// A validation error here means the address was claimed between the
+		// availability check above and the stub creation (TOCTOU race) — map
+		// to the stable alias_not_available code instead of leaking the raw
+		// backend message. Operational failures still propagate.
+		var validationErr errs.Validation
+		if errors.As(errAdd, &validationErr) {
+			slog.DebugContext(ctx, "alias became unavailable during claim",
+				"user_id", redaction.Redact(fullUser.UserID),
+				"email", redaction.RedactEmail(fullEmail),
+			)
+			return m.errorResponse("alias_not_available"), nil
+		}
+		slog.ErrorContext(ctx, "failed to add system-managed email",
+			"error", errAdd,
+			"user_id", redaction.Redact(fullUser.UserID),
+			"email", redaction.RedactEmail(fullEmail),
+		)
+		return m.errorResponse(errAdd.Error()), nil
+	}
+
+	slog.DebugContext(ctx, "alias claimed successfully",
+		"user_id", redaction.Redact(fullUser.UserID),
+		"stub_id", redaction.Redact(stubID),
+		"email", redaction.RedactEmail(fullEmail),
+	)
+
+	resp, err := json.Marshal(addAliasResponse{Success: true, Email: fullEmail})
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+	return resp, nil
+}
+
 // NewMessageHandlerOrchestrator creates a new message handler orchestrator using the option pattern
-func NewMessageHandlerOrchestrator(opts ...messageHandlerOrchestratorOption) port.MessageHandler {
+func NewMessageHandlerOrchestrator(opts ...MessageHandlerOrchestratorOption) port.MessageHandler {
 	m := &messageHandlerOrchestrator{}
 	for _, opt := range opts {
 		opt(m)

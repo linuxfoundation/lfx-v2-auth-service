@@ -12,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
 
@@ -74,7 +75,7 @@ func TestJWTVerification(t *testing.T) {
 				Token: tt.token,
 			}
 
-			claims, err := jwtVerify.JWTVerify(ctx, user.Token, userUpdateRequiredScope)
+			claims, err := jwtVerify.JWTVerify(ctx, user.Token, constants.UserUpdateMetadataRequiredScope)
 
 			if tt.expectError {
 				if err == nil {
