@@ -183,23 +183,6 @@ The email verification and linking functionality is exposed via three NATS subje
 - Verifies the token has the required `update:current_user_identities` scope
 - Uses the extracted `user_id` to make the identity linking API call with the `link_with` ID token
 
-### Auth0 Configuration Requirements
-
-To enable email verification, configure the following in your Auth0 tenant:
-
-1. **Enable Passwordless Connection:**
-   - Go to Authentication → Passwordless
-   - Enable the Email connection
-   - Configure email template for OTP delivery
-
-2. **Application Configuration:**
-   - Ensure your Auth0 application has passwordless authentication enabled
-   - Configure callback URLs if needed
-
-3. **Email Template:**
-   - Customize the OTP email template in Authentication → Passwordless → Email
-   - Template should include the `{{ code }}` placeholder for the 6-digit OTP
-
 ### Security & Rate Limiting
 
 **Auth0 Security Features:**
