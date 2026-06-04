@@ -149,6 +149,7 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 					"queue", queueName,
 					"panic", r,
 				)
+				span.SetStatus(codes.Error, "panic in NATS handler")
 				span.End()
 			}
 		}()
