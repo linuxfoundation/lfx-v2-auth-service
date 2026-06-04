@@ -108,6 +108,7 @@ func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) e
 	defer span.End()
 
 	msg := nats.NewMsg(subject)
+	msg.Header = make(nats.Header)
 	msg.Data = data
 	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(msg.Header))
 
