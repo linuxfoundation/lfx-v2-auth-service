@@ -29,7 +29,7 @@ The main server-side rendering client used for user authentication. This is a re
 A **regular web application** client (`app_type: regular_web`) used for Auth0 Management API access and passwordless flows. This client uses the authorization code flow for obtaining Management API access tokens that allow users to update their own profiles and link identities. It also supports the passwordless OTP grant type (`http://auth0.com/oauth/grant-type/passwordless/otp`) for email verification flows. This client implements a dual authentication pattern where users first authenticate with the main LFX One client, then use this client to obtain additional access tokens for specific audiences (Management API) or perform passwordless verification. Used in Flows C, D, and E.
 
 ### LFX V2 Auth Service M2M Client
-A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the client credentials grant type. This client has restricted permissions with only `read:users` scope (but **not** `update:users`) for the Auth0 Management API. It is used exclusively by the Auth Service to perform read-only operations such as profile lookups and checking email-to-username mappings. Used exclusively in Flow A.
+A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the client credentials grant type. This client is granted the `create:users`, `read:users`, `update:users`, and `delete:users` scopes for the Auth0 Management API. In Flow A it performs read-only operations such as profile lookups and checking email-to-username mappings; the broader scopes support additional Auth Service management use cases.
 
 ## Token Overview
 
@@ -37,7 +37,7 @@ A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the 
 |-------|----------|-------|----------|
 | `access_token_m2m_read` | `auth0_mgmt` | `read:users` | Auth Service reading user profiles (Flow A) |
 | `access_token_lfxv2` | `lfxv2` | LFX v2 API | Calling LFX v2 API endpoints (Flow B) |
-| `access_token_mgmt_self` | `auth0_mgmt` | `update:users`* | User updating their own profile (Flow C, D, E) |
+| `access_token_mgmt_self` | `auth0_mgmt` | `update:current_user_metadata` | User updating their own profile (Flow C, D, E) |
 | `access_token_social` | (default) | N/A | Ignored - returned from social auth (Flow D) |
 | `access_token_pwdless` | (default) | N/A | Ignored - returned from passwordless (Flow E) |
 | `id_token_user` | N/A | N/A | User identity from main login (Flow B) |
@@ -68,7 +68,7 @@ All Auth0 Management API calls are abstracted through the Auth Service, which co
 
 ## Security Considerations
 
-1. **Principle of Least Privilege**: Auth Service M2M client only has `read:users`, not `update:users`
+1. **M2M Client Scopes**: The Auth Service M2M client is granted full Management API user scopes (`create:users`, `read:users`, `update:users`, `delete:users`); Flow A performs only read operations
 2. **Subject Validation**: Flow C validates token subjects match before allowing profile updates
 3. **Email Verification**: Flow E validates the email in `id_token_pwdless` matches the requested email before linking
 4. **Token Scoping**: Each access token is scoped to specific audiences and permissions
