@@ -139,6 +139,7 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 				attribute.Int("messaging.message.body.size", len(msg.Data)),
 			),
 		)
+		defer span.End()
 
 		transportMsg := NewTransportMessenger(msg)
 
@@ -150,13 +151,11 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 					"panic", r,
 				)
 				span.SetStatus(codes.Error, "panic in NATS handler")
-				span.End()
 			}
 		}()
 
 		handler(msgCtx, transportMsg)
 		span.SetStatus(codes.Ok, "")
-		span.End()
 	})
 }
 
