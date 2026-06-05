@@ -82,12 +82,12 @@ Retrieve and update user profile metadata using various input types (JWT tokens,
 ---
 
 #### User Emails Operations
-Retrieve user email addresses (primary and alternate emails) using various input types (JWT tokens, subject identifiers, or usernames).
+Retrieve user email addresses (primary and alternate emails) using a JWT token or a subject identifier.
 
 **Subjects:**
 - `lfx.auth-service.user_emails.read` - Retrieve user email addresses
 
-**[View User Emails Documentation](docs/subjects/user_emails.md)** - **Note:** Currently only supported for Authelia
+**[View User Emails Documentation](docs/subjects/user_emails.md)**
 
 ---
 
