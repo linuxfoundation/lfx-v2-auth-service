@@ -93,7 +93,7 @@ nats request lfx.auth-service.password.update \
 - Only supported for Auth0 username-password connection accounts (`auth0|` prefix); social login accounts (Google, GitHub, etc.) cannot use this endpoint
 - The current password is validated via Auth0's Resource Owner Password Grant before the update is applied
 - Password requirements (minimum length, complexity) are enforced by Auth0 and may cause the update to fail if not met
-- For detailed Auth0-specific behavior, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+- For detailed Auth0-specific behavior, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ### Provider Support
 
@@ -167,7 +167,7 @@ nats request lfx.auth-service.password.reset_link \
 - Email delivery is handled by Auth0 via the `/dbconnections/change_password` endpoint
 - The reset link expires according to Auth0 tenant configuration (typically 24 hours)
 - This operation succeeds even if the user's account uses a social login provider; Auth0 will handle the email gracefully
-- For detailed Auth0-specific behavior, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+- For detailed Auth0-specific behavior, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ### Provider Support
 

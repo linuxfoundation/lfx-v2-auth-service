@@ -210,7 +210,7 @@ nats request lfx.auth-service.user_emails.set_primary \
 - The target email must already exist as a verified alternate email on the user's account; it cannot be an arbitrary new address
 - The email input is normalized to lowercase before processing; matching is case-insensitive
 - After a successful update, the previous primary email becomes an alternate email on the account
-- For detailed Auth0-specific behavior, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+- For detailed Auth0-specific behavior, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ### Provider Support
 

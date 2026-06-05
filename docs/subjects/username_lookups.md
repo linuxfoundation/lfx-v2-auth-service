@@ -50,4 +50,4 @@ nats request lfx.auth-service.username_to_sub zephyr.stormwind
 - Leading/trailing whitespace in the request payload is trimmed automatically
 - The service works with Auth0, Authelia, and mock repositories based on configuration
 - The returned subject identifier is the canonical user identifier used throughout the system
-- For Authelia-specific SUB identifier details and how they are populated, see: [`../internal/infrastructure/authelia/README.md`](../internal/infrastructure/authelia/README.md)
+- For Authelia-specific SUB identifier details and how they are populated, see: [`../../internal/infrastructure/authelia/README.md`](../../internal/infrastructure/authelia/README.md)
