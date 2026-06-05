@@ -24,8 +24,8 @@ To retrieve user email addresses (both primary and alternate emails), send a NAT
 ### Request Fields
 
 - `user.auth_token` (string, required): Identifies the user to read emails for. Despite the name, this field accepts either:
-  - a **JWT token** (Auth0) or **Authelia token**, which is validated (signature and required scopes) before the subject identifier is extracted from the verified claims; or
-  - a **subject identifier** (canonical user ID) — an Auth0 `sub` containing `|` (e.g. `auth0|123456789`) or an Authelia UUID — used directly via the service's M2M token (no token verification).
+  - a **JWT token** (Auth0) or **Authelia token**, which is validated before the subject identifier is extracted from the verified claims; or
+  - a **subject identifier** (canonical user ID) — an Auth0 `sub` containing `|` (e.g. `auth0|123456789`) or an Authelia UUID — used directly (no token verification). For Auth0, the service uses its M2M Management API token to read user details once the subject is known.
 
 ### Reply
 
