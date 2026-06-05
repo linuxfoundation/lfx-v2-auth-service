@@ -37,13 +37,15 @@ A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the 
 |-------|----------|-------|----------|
 | `access_token_m2m_read` | `auth0_mgmt` | `read:users` | Auth Service reading user profiles (Flow A) |
 | `access_token_lfxv2` | `lfxv2` | LFX v2 API | Calling LFX v2 API endpoints (Flow B) |
-| `access_token_mgmt_self` | `auth0_mgmt` | `update:current_user_metadata` | User updating their own profile (Flow C, D, E) |
+| `access_token_mgmt_self` | `auth0_mgmt` | `update:current_user_metadata` (Flow C) / `update:current_user_identities` (Flow D, E) | User self-service: profile update (C); identity linking (D, E) |
 | `access_token_social` | (default) | N/A | Ignored - returned from social auth (Flow D) |
 | `access_token_pwdless` | (default) | N/A | Ignored - returned from passwordless (Flow E) |
 | `id_token_user` | N/A | N/A | User identity from main login (Flow B) |
 | `id_token_mgmt` | N/A | N/A | Ignored - returned from mgmt flow (Flow C) |
 | `id_token_social` | N/A | N/A | Social provider identity (Flow D) |
 | `id_token_pwdless` | N/A | N/A | Passwordless email identity (Flow E) |
+
+> **Note:** `auth0_mgmt` and `lfxv2` are conceptual audience labels used throughout these docs. The actual JWT `aud` claim is the Auth0 Management API URL (`https://{domain}/api/v2/`) for `auth0_mgmt`, and the configured LFX v2 API audience for `lfxv2`.
 
 ## Key Architecture Patterns
 

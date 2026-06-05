@@ -57,66 +57,21 @@ The LFX v2 Auth Service operates as a NATS-based microservice that responds to r
 
 ### Available Operations
 
-The service provides the following groups of operations:
+The service exposes NATS request/reply operations grouped by area. Each link
+has the full reference (subjects, payloads, examples):
 
-#### Email Lookup Operations
-Look up users by their email addresses to retrieve usernames or subject identifiers.
+- **[Email Lookups](docs/subjects/email_lookups.md)** — look up a user by email
+- **[Username Lookups](docs/subjects/username_lookups.md)** — look up a subject identifier by username
+- **[User Metadata](docs/subjects/user_metadata.md)** — read and update user profile metadata
+- **[User Emails](docs/subjects/user_emails.md)** — read emails and set the primary email
+- **[Email Verification](docs/subjects/email_verification.md)** — passwordless OTP verification of alternate emails
+- **[Identity Linking](docs/subjects/identity_linking.md)** — link, unlink, and list identities
+- **[Password Management](docs/subjects/password_management.md)** — change password and send reset links
+- **[Impersonation](docs/subjects/impersonation.md)** — exchange a token to act as another user
+- **[Aliases](docs/subjects/alias.md)** — claim a system-managed alias email
+- **[Indexer Contract](docs/indexer-contract.md)** — data sent to the indexer service (currently none)
 
-**Subjects:**
-- `lfx.auth-service.email_to_username` - Look up username by email
-- `lfx.auth-service.email_to_sub` - Look up subject identifier by email
-
-**[View Email Lookup Documentation](docs/subjects/email_lookups.md)**
-
----
-
-#### User Metadata Operations
-Retrieve and update user profile metadata using various input types (JWT tokens, subject identifiers, or usernames).
-
-**Subjects:**
-- `lfx.auth-service.user_metadata.read` - Retrieve user metadata
-- `lfx.auth-service.user_metadata.update` - Update user profile
-
-**[View User Metadata Documentation](docs/subjects/user_metadata.md)**
-
----
-
-#### User Emails Operations
-Retrieve user email addresses (primary and alternate emails) using a JWT token or a subject identifier.
-
-**Subjects:**
-- `lfx.auth-service.user_emails.read` - Retrieve user email addresses
-
-**[View User Emails Documentation](docs/subjects/user_emails.md)**
-
----
-
-#### Email Verification Flow
-Two-step verification flow for verifying ownership of alternate email addresses.
-
-**Subjects:**
-- `lfx.auth-service.email_linking.send_verification` - Send OTP to email
-- `lfx.auth-service.email_linking.verify` - Verify email with OTP
-
-**[View Email Verification Documentation](docs/subjects/email_verification.md)** - Includes complete flow diagram
-
----
-
-#### Identity Linking
-Link verified identities (such as verified email addresses) to user accounts.
-
-**Subjects:**
-- `lfx.auth-service.user_identity.link` - Link verified identity to user
-
-**[View Identity Linking Documentation](docs/subjects/identity_linking.md)**
-
----
-
-#### Indexer Contract
-
-Documents what data this service sends to the indexer service (currently none).
-
-**[View Indexer Contract](docs/indexer-contract.md)**
+For end-to-end authentication flows, see **[Auth Flows](docs/auth-flows/README.md)**.
 
 ---
 

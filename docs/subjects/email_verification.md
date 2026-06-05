@@ -129,7 +129,7 @@ The service sends a one-time password (OTP) to the provided email address and re
 ```json
 {
   "success": false,
-  "error": "alternate email already linked"
+  "error": "email already linked"
 }
 ```
 
@@ -207,7 +207,7 @@ The returned token is an authentication token that can be used to link the verif
 ```json
 {
   "success": false,
-  "error": "alternate email already linked"
+  "error": "email already linked"
 }
 ```
 

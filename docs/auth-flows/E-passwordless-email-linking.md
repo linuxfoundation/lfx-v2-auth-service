@@ -19,7 +19,7 @@ sequenceDiagram
     
     Browser->>SSR: User clicks "Add Email"<br/>and enters new email address
     
-    SSR->>NATS: E1: Publish passwordless<br/>start request with email
+    SSR->>NATS: E1: Publish to lfx.auth-service.email_linking.send_verification<br/>with email
     Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
     NATS->>AuthSvc: Deliver request
     
@@ -38,7 +38,7 @@ sequenceDiagram
     
     Note over SSR: SSR already has<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
 
-    SSR->>NATS: E3: Publish verification request<br/>with code + access_token_mgmt_self
+    SSR->>NATS: E3: Publish to lfx.auth-service.email_linking.verify<br/>with code + access_token_mgmt_self
     NATS->>AuthSvc: Deliver request
 
     AuthSvc->>Auth0: E4: POST /oauth2/token<br/>[passwordless grant]<br/>w/ "LFX One Profile" client credentials<br/>username=new_email@example.com<br/>otp=verification_code<br/>[NO audience]
