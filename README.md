@@ -66,7 +66,7 @@ Look up users by their email addresses to retrieve usernames or subject identifi
 - `lfx.auth-service.email_to_username` - Look up username by email
 - `lfx.auth-service.email_to_sub` - Look up subject identifier by email
 
-**[View Email Lookup Documentation](docs/email_lookups.md)**
+**[View Email Lookup Documentation](docs/subjects/email_lookups.md)**
 
 ---
 
@@ -77,7 +77,7 @@ Retrieve and update user profile metadata using various input types (JWT tokens,
 - `lfx.auth-service.user_metadata.read` - Retrieve user metadata
 - `lfx.auth-service.user_metadata.update` - Update user profile
 
-**[View User Metadata Documentation](docs/user_metadata.md)**
+**[View User Metadata Documentation](docs/subjects/user_metadata.md)**
 
 ---
 
@@ -87,7 +87,7 @@ Retrieve user email addresses (primary and alternate emails) using various input
 **Subjects:**
 - `lfx.auth-service.user_emails.read` - Retrieve user email addresses
 
-**[View User Emails Documentation](docs/user_emails.md)** - **Note:** Currently only supported for Authelia
+**[View User Emails Documentation](docs/subjects/user_emails.md)** - **Note:** Currently only supported for Authelia
 
 ---
 
@@ -98,7 +98,7 @@ Two-step verification flow for verifying ownership of alternate email addresses.
 - `lfx.auth-service.email_linking.send_verification` - Send OTP to email
 - `lfx.auth-service.email_linking.verify` - Verify email with OTP
 
-**[View Email Verification Documentation](docs/email_verification.md)** - Includes complete flow diagram
+**[View Email Verification Documentation](docs/subjects/email_verification.md)** - Includes complete flow diagram
 
 ---
 
@@ -108,7 +108,7 @@ Link verified identities (such as verified email addresses) to user accounts.
 **Subjects:**
 - `lfx.auth-service.user_identity.link` - Link verified identity to user
 
-**[View Identity Linking Documentation](docs/identity_linking.md)**
+**[View Identity Linking Documentation](docs/subjects/identity_linking.md)**
 
 ---
 
