@@ -128,3 +128,7 @@ spec:
               port: web
             failureThreshold: 30
             periodSeconds: 1
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
