@@ -102,7 +102,7 @@ func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) e
 		trace.WithAttributes(
 			attribute.String("messaging.system", "nats"),
 			attribute.String("messaging.destination.name", subject),
-			attribute.String("messaging.operation", "publish"),
+			attribute.String("messaging.operation.type", "publish"),
 			attribute.Int("messaging.message.body.size", len(data)),
 		),
 	)
@@ -137,7 +137,7 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 			trace.WithAttributes(
 				attribute.String("messaging.system", "nats"),
 				attribute.String("messaging.destination.name", subject),
-				attribute.String("messaging.operation", "process"),
+				attribute.String("messaging.operation.type", "process"),
 				attribute.String("messaging.consumer.group.name", queueName),
 				attribute.Int("messaging.message.body.size", len(msg.Data)),
 			),
