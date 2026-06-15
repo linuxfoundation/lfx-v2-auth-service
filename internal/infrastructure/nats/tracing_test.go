@@ -90,7 +90,7 @@ func TestNatsHeaderCarrier_TextMapCarrier(t *testing.T) {
 		var _ propagation.TextMapCarrier = natsHeaderCarrier{}
 	})
 
-	t.Run("inject and extract round-trip via propagator", func(t *testing.T) {
+	t.Run("Set/Get round-trip preserves values", func(t *testing.T) {
 		header := make(natsgo.Header)
 		carrier := natsHeaderCarrier(header)
 

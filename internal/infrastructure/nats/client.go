@@ -118,7 +118,6 @@ func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) e
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
-	span.SetStatus(codes.Ok, "")
 	return nil
 }
 
@@ -158,7 +157,6 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 		}()
 
 		handler(msgCtx, transportMsg)
-		span.SetStatus(codes.Ok, "")
 	})
 }
 
