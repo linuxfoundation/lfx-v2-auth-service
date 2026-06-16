@@ -4,6 +4,7 @@
 package httpclient
 
 import (
+	"net/http"
 	"time"
 )
 
@@ -20,6 +21,12 @@ type Config struct {
 
 	// RetryBackoff enables exponential backoff for retries
 	RetryBackoff bool
+
+	// Transport overrides the base http.RoundTripper used by the client.
+	// When nil, http.DefaultTransport is used. This is primarily a test seam:
+	// it lets callers intercept requests without a live network or matching
+	// the request scheme/host.
+	Transport http.RoundTripper
 }
 
 // DefaultConfig returns a Config with sensible defaults

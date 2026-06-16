@@ -5,6 +5,7 @@ package mock
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -618,6 +619,88 @@ func TestLinkIdentity(t *testing.T) {
 		err = writer.LinkIdentity(ctx, request)
 		if err == nil {
 			t.Error("LinkIdentity() expected error for nonexistent user but got none")
+		}
+	})
+}
+
+// TestUserWriter_SetPrimaryEmail locks the reference behavior the Auth0 adapter
+// must mirror: the previous primary becomes a verified alternate, and the newly
+// promoted email is removed from the alternates list.
+func TestUserWriter_SetPrimaryEmail(t *testing.T) {
+	ctx := context.Background()
+
+	hasEmail := func(emails []model.Email, addr string) (model.Email, bool) {
+		for _, e := range emails {
+			if strings.EqualFold(e.Email, addr) {
+				return e, true
+			}
+		}
+		return model.Email{}, false
+	}
+
+	t.Run("old primary becomes a verified alternate; new primary removed from alternates", func(t *testing.T) {
+		writer := &userWriter{users: map[string]*model.User{
+			"auth0|u1": {
+				UserID:       "auth0|u1",
+				PrimaryEmail: "old@example.com",
+				AlternateEmails: []model.Email{
+					{Email: "new@example.com", Verified: true},
+				},
+			},
+		}}
+
+		err := writer.SetPrimaryEmail(ctx, "auth0|u1", "new@example.com")
+		if err != nil {
+			t.Fatalf("SetPrimaryEmail() unexpected error: %v", err)
+		}
+
+		u := writer.users["auth0|u1"]
+		if u.PrimaryEmail != "new@example.com" {
+			t.Errorf("PrimaryEmail = %q, want %q", u.PrimaryEmail, "new@example.com")
+		}
+		old, ok := hasEmail(u.AlternateEmails, "old@example.com")
+		if !ok {
+			t.Errorf("old primary not preserved as an alternate; alternates = %+v", u.AlternateEmails)
+		} else if !old.Verified {
+			t.Errorf("preserved old primary should be verified")
+		}
+		if _, ok := hasEmail(u.AlternateEmails, "new@example.com"); ok {
+			t.Errorf("new primary should be removed from alternates; alternates = %+v", u.AlternateEmails)
+		}
+	})
+
+	t.Run("old primary already an alternate is not duplicated", func(t *testing.T) {
+		writer := &userWriter{users: map[string]*model.User{
+			"auth0|u2": {
+				UserID:       "auth0|u2",
+				PrimaryEmail: "old@example.com",
+				AlternateEmails: []model.Email{
+					{Email: "old@example.com", Verified: true},
+					{Email: "new@example.com", Verified: true},
+				},
+			},
+		}}
+
+		if err := writer.SetPrimaryEmail(ctx, "auth0|u2", "new@example.com"); err != nil {
+			t.Fatalf("SetPrimaryEmail() unexpected error: %v", err)
+		}
+
+		u := writer.users["auth0|u2"]
+		count := 0
+		for _, e := range u.AlternateEmails {
+			if strings.EqualFold(e.Email, "old@example.com") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("old primary appears %d times in alternates, want 1; alternates = %+v", count, u.AlternateEmails)
+		}
+	})
+
+	t.Run("unknown user returns not found", func(t *testing.T) {
+		writer := &userWriter{users: map[string]*model.User{}}
+		if err := writer.SetPrimaryEmail(ctx, "auth0|missing", "new@example.com"); err == nil {
+			t.Error("SetPrimaryEmail() expected error for unknown user but got none")
 		}
 	})
 }

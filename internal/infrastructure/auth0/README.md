@@ -169,6 +169,34 @@ Content-Type: application/json
 - The `link_with` field contains the ID token from the passwordless verification flow
 - This approach prevents session hijacking by maintaining the user's current authentication state
 
+### Set Primary Email
+
+**Auth0 API Endpoint:** `PATCH https://{auth0-domain}/api/v2/users/{user_id}` with `{"email": "...", "email_verified": true}` (M2M token).
+
+The target email must already be a **verified** linked `email`-connection identity on the account.
+
+**Preserve-then-promote:** the PATCH overwrites the user's root `email`, which would leave the previous
+primary unreachable as an email/OTP login if it was not already backed by a suitable identity. To avoid
+this, before the PATCH the adapter preserves the previous primary:
+
+- No preservation is needed when the previous primary is empty, equals the new email, or is already
+  backed by a **sufficient** identity for that address:
+  - an `email`-connection identity (any verification state) — it is OTP-reachable and self-verifies on
+    the next login, and a duplicate cannot be created, so an existing email identity is always
+    sufficient; or
+  - a **verified** Google (`google-oauth2`) identity — Google has verified the address.
+- Otherwise — an *unverified* Google identity, a non-Google provider (LinkedIn, GitHub, enterprise, …),
+  or no backing identity at all — the adapter creates a stub passwordless `email` user for the previous
+  primary and links it via `POST /api/v2/users/{user_id}/identities` (M2M direct-link) as a
+  **verified, user-removable** identity (no `app_metadata.system_managed`), so the user can later unlink
+  it.
+
+Preservation runs first and is fail-loud: if it fails, the just-created stub is rolled back (best-effort)
+and the PATCH is **not** performed, leaving the account unchanged rather than dropping the old primary.
+
+This shares its create+link mechanics with the system-managed alias flow (`AddSystemManagedEmail`); the
+only difference is that the preserved old primary is **not** marked `system_managed`.
+
 ### NATS Integration
 
 The email verification and linking functionality is exposed via three NATS subjects:
