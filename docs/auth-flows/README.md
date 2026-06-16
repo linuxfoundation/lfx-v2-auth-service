@@ -35,7 +35,7 @@ A **machine-to-machine (M2M)** client named "LFX V2 Auth Service" that uses the 
 
 | Token | Audience | Scope | Used For |
 |-------|----------|-------|----------|
-| `access_token_m2m_read` | `auth0_mgmt` | `read:users` | Auth Service reading user profiles (Flow A) |
+| `access_token_m2m_read` | `auth0_mgmt` | `create:users`, `read:users`, `update:users`, `delete:users` (Flow A uses `read:users`) | Auth Service reading user profiles (Flow A) |
 | `access_token_lfxv2` | `lfxv2` | LFX v2 API | Calling LFX v2 API endpoints (Flow B) |
 | `access_token_mgmt_self` | `auth0_mgmt` | `update:current_user_metadata` (Flow C) / `update:current_user_identities` (Flow D, E) | User self-service: profile update (C); identity linking (D, E) |
 | `access_token_social` | (default) | N/A | Ignored - returned from social auth (Flow D) |
