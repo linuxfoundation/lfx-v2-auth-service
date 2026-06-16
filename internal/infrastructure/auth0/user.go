@@ -709,31 +709,32 @@ type setPrimaryEmailRequest struct {
 }
 
 // hasSufficientPrimaryEmailIdentity reports whether email is already backed by an
-// identity adequate for it to remain reachable after it stops being the root
-// primary, without materializing a new email identity. Two connection types are
-// considered sufficient:
+// identity that keeps it reachable as a verified login after it stops being the
+// root primary, so no new email identity needs to be materialized:
 //
-//   - constants.EmailConnection: a verified passwordless email/OTP identity.
-//   - constants.GoogleOAuth2Connection: a Google social login (Google verifies the
-//     address and it can be used to authenticate).
+//   - constants.EmailConnection (any): a passwordless email/OTP identity. It is
+//     OTP-reachable regardless of its current email_verified flag (Auth0 marks it
+//     verified on the next successful OTP login), and a duplicate cannot be
+//     created — so an existing email identity is always sufficient.
+//   - constants.GoogleOAuth2Connection, verified only: a Google login where Google
+//     has verified the address. An *unverified* Google identity is NOT sufficient.
 //
-// An unverified email identity is NOT sufficient (it is not a usable email/OTP
-// login), and any other identity (LinkedIn, GitHub, enterprise, etc.) is NOT
-// sufficient either: the address would otherwise become unreachable as an
-// email/OTP login, so the old primary must be preserved as a verified email
-// identity before it is replaced. Matching is case-insensitive on the identity's
-// email.
+// Any other identity (LinkedIn, GitHub, enterprise, etc.) — or no backing identity
+// at all — is NOT sufficient, so the old primary must be preserved as a verified
+// email identity before it is replaced. Matching is case-insensitive on the
+// identity's email.
 func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	for _, id := range user.Identities {
 		if !strings.EqualFold(id.Email, email) {
 			continue
 		}
-		// A passwordless email identity only counts when verified.
-		if id.Connection == constants.EmailConnection && id.EmailVerified {
+		// Any passwordless email identity is OTP-reachable and self-verifies on
+		// the next login; a duplicate cannot be created — so it is sufficient.
+		if id.Connection == constants.EmailConnection {
 			return true
 		}
-		// Google verifies the address and it can be used to authenticate.
-		if id.Connection == constants.GoogleOAuth2Connection {
+		// Google is sufficient only when Google has verified the address.
+		if id.Connection == constants.GoogleOAuth2Connection && id.EmailVerified {
 			return true
 		}
 	}
@@ -780,14 +781,14 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	}
 
 	// Preserve the current primary before switching. The root email PATCH below
-	// overwrites the primary, which would leave the old primary unreachable as an
-	// email/OTP login unless it is already backed by a verified email identity or
-	// a Google login. So unless the old primary is sufficiently backed (see
-	// hasSufficientPrimaryEmailIdentity), create+link it as a normal,
-	// user-removable verified email identity first. A primary backed only by a
-	// non-Google provider (LinkedIn, GitHub, enterprise, etc.) is preserved this
-	// way too. Done first so that any failure leaves the account unchanged rather
-	// than silently dropping the old primary.
+	// overwrites the primary, which would leave the old primary unreachable as a
+	// verified login unless it is already backed by a sufficient identity (see
+	// hasSufficientPrimaryEmailIdentity: any email/OTP identity, or a verified
+	// Google login). Otherwise — an unverified Google identity, a non-Google
+	// provider (LinkedIn, GitHub, enterprise, etc.), or no backing identity —
+	// create+link it as a normal, user-removable verified email identity first.
+	// Done first so that any failure leaves the account unchanged rather than
+	// silently dropping the old primary.
 	oldPrimary := fullUser.PrimaryEmail
 	if oldPrimary != "" && !strings.EqualFold(oldPrimary, email) && !hasSufficientPrimaryEmailIdentity(fullUser, oldPrimary) {
 		if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {

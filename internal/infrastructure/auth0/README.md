@@ -180,14 +180,16 @@ primary unreachable as an email/OTP login if it was not already backed by a suit
 this, before the PATCH the adapter preserves the previous primary:
 
 - No preservation is needed when the previous primary is empty, equals the new email, or is already
-  backed by a **sufficient** identity for that address — namely a verified `email`-connection (OTP)
-  identity **or** a Google OAuth (`google-oauth2`) identity. (Google login already covers the address,
-  so it is left as-is.)
-- Otherwise — including when the previous primary is backed only by a non-Google provider (LinkedIn,
-  GitHub, enterprise, …) or by no identity at all — the adapter creates a stub passwordless `email` user
-  for the previous primary and links it via `POST /api/v2/users/{user_id}/identities` (M2M direct-link)
-  as a **verified, user-removable** identity (no `app_metadata.system_managed`), so the user can later
-  unlink it.
+  backed by a **sufficient** identity for that address:
+  - an `email`-connection identity (any verification state) — it is OTP-reachable and self-verifies on
+    the next login, and a duplicate cannot be created, so an existing email identity is always
+    sufficient; or
+  - a **verified** Google (`google-oauth2`) identity — Google has verified the address.
+- Otherwise — an *unverified* Google identity, a non-Google provider (LinkedIn, GitHub, enterprise, …),
+  or no backing identity at all — the adapter creates a stub passwordless `email` user for the previous
+  primary and links it via `POST /api/v2/users/{user_id}/identities` (M2M direct-link) as a
+  **verified, user-removable** identity (no `app_metadata.system_managed`), so the user can later unlink
+  it.
 
 Preservation runs first and is fail-loud: if it fails, the just-created stub is rolled back (best-effort)
 and the PATCH is **not** performed, leaving the account unchanged rather than dropping the old primary.

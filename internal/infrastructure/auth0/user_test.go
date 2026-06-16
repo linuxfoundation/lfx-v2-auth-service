@@ -1115,7 +1115,10 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		}, ft.methodPaths())
 	})
 
-	t.Run("old primary on an UNVERIFIED email identity is not sufficient and is preserved", func(t *testing.T) {
+	t.Run("old primary on an UNVERIFIED email identity skips preservation (OTP self-verifies)", func(t *testing.T) {
+		// An existing email identity is OTP-reachable and self-verifies on next
+		// login; a duplicate cannot be created. So preservation is skipped and the
+		// switch proceeds (this also avoids a 409 abort against real Auth0).
 		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"old@example.com","email_verified":false}}]}`
@@ -1125,8 +1128,34 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
 		require.NoError(t, err)
 
-		// An unverified email identity does not count as sufficient, so preservation runs.
-		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"), "unverified email primary should be preserved")
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "existing email identity should not be re-created")
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+	})
+
+	t.Run("old primary backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
+		// Google has not verified the address, so it is not a sufficient verified
+		// login; materialize a verified email identity for it.
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+		createBody, _ := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		assert.Contains(t, createBody, `"email":"alice@gmail.com"`)
+		assert.Contains(t, createBody, `"email_verified":true`)
 	})
 
 	t.Run("setting primary to the current primary skips preservation", func(t *testing.T) {
