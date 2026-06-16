@@ -28,4 +28,6 @@ const (
 	Auth0UsernamePasswordConnection = "Username-Password-Authentication"
 	// EmailConnection is the Auth0 connection name for passwordless email identities.
 	EmailConnection = "email"
+	// GoogleOAuth2Connection is the Auth0 connection name for Google social logins.
+	GoogleOAuth2Connection = "google-oauth2"
 )

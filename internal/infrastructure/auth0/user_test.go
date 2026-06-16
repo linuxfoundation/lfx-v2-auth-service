@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 // createTestJWTVerificationConfig creates a test JWT verification configuration
@@ -888,4 +891,337 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- Test seams for exercising the Auth0 Management API HTTP flow ---
+
+// fakeTokenSource implements oauth2.TokenSource, returning a fixed valid token
+// so a TokenManager can be used in tests without contacting Auth0.
+type fakeTokenSource struct{ token string }
+
+func (f fakeTokenSource) Token() (*oauth2.Token, error) {
+	return &oauth2.Token{
+		AccessToken: f.token,
+		TokenType:   "Bearer",
+		Expiry:      time.Now().Add(time.Hour),
+	}, nil
+}
+
+// recordedCall captures one intercepted HTTP request.
+type recordedCall struct {
+	method string
+	path   string
+	body   string
+}
+
+// fakeAuth0Transport is an http.RoundTripper that intercepts the Auth0
+// Management API calls made by userReaderWriter and returns canned responses,
+// recording every request so tests can assert call ordering and payloads. It
+// never dials the network, so the https URLs the adapter builds are irrelevant.
+type fakeAuth0Transport struct {
+	primaryUserID string // decoded path id, e.g. "auth0|test123"
+	getUserResp   string // body for GET of the primary user
+	stubGetResp   string // body for GET of the rollback stub
+	createStatus  int    // status for POST /api/v2/users
+	createResp    string // body for POST /api/v2/users
+	linkStatus    int    // status for POST /api/v2/users/{id}/identities
+	patchStatus   int    // status for PATCH /api/v2/users/{id}
+	calls         []recordedCall
+}
+
+func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
+	return &fakeAuth0Transport{
+		primaryUserID: primaryUserID,
+		getUserResp:   getUserResp,
+		stubGetResp:   `{"user_id":"email|stub123","identities":[{"connection":"email","provider":"email"}]}`,
+		createStatus:  http.StatusCreated,
+		createResp:    `{"user_id":"email|stub123"}`,
+		linkStatus:    http.StatusCreated,
+		patchStatus:   http.StatusOK,
+	}
+}
+
+func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+	}
+	f.calls = append(f.calls, recordedCall{method: req.Method, path: req.URL.Path, body: string(bodyBytes)})
+
+	status := http.StatusOK
+	body := "{}"
+	switch {
+	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
+		body = f.getUserResp
+	case req.Method == http.MethodGet:
+		// GET of any other user id is the rollback stub verification.
+		body = f.stubGetResp
+	case req.Method == http.MethodPost && req.URL.Path == "/api/v2/users":
+		status, body = f.createStatus, f.createResp
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/identities"):
+		status, body = f.linkStatus, "[]"
+	case req.Method == http.MethodPatch:
+		status, body = f.patchStatus, "{}"
+	case req.Method == http.MethodDelete:
+		status, body = http.StatusNoContent, ""
+	}
+
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// methodPaths returns the recorded calls as "METHOD path" strings, in order.
+func (f *fakeAuth0Transport) methodPaths() []string {
+	out := make([]string, len(f.calls))
+	for i, c := range f.calls {
+		out[i] = c.method + " " + c.path
+	}
+	return out
+}
+
+// firstBodyFor returns the captured body of the first call matching method+path suffix.
+func (f *fakeAuth0Transport) firstBodyFor(method, pathSuffix string) (string, bool) {
+	for _, c := range f.calls {
+		if c.method == method && strings.HasSuffix(c.path, pathSuffix) {
+			return c.body, true
+		}
+	}
+	return "", false
+}
+
+func (f *fakeAuth0Transport) countFor(method, pathSuffix string) int {
+	n := 0
+	for _, c := range f.calls {
+		if c.method == method && strings.HasSuffix(c.path, pathSuffix) {
+			n++
+		}
+	}
+	return n
+}
+
+// newTestReaderWriter builds a userReaderWriter wired to the given transport and
+// a token manager that returns a fixed valid M2M token.
+func newTestReaderWriter(transport http.RoundTripper) *userReaderWriter {
+	return &userReaderWriter{
+		httpClient: httpclient.NewClient(httpclient.Config{Transport: transport, MaxRetries: 0}),
+		config: Config{
+			Domain:          "test-tenant.auth0.com",
+			M2MTokenManager: &TokenManager{tokenSource: fakeTokenSource{token: "test-m2m-token"}},
+		},
+	}
+}
+
+const testPrimaryUserID = "auth0|test123"
+
+func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("old primary not linked is preserved before promote", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.NoError(t, err)
+
+		// Preserve (create + link old primary) must happen before the PATCH.
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+
+		// The preserved stub is the OLD primary, verified, and NOT system-managed.
+		createBody, ok := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		require.True(t, ok)
+		assert.Contains(t, createBody, `"email":"old@example.com"`)
+		assert.Contains(t, createBody, `"email_verified":true`)
+		assert.NotContains(t, createBody, "app_metadata")
+		assert.NotContains(t, createBody, "system_managed")
+
+		// The PATCH promotes the NEW primary.
+		patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
+		require.True(t, ok)
+		assert.Contains(t, patchBody, `"email":"new@example.com"`)
+	})
+
+	t.Run("old primary backed by Google OAuth is NOT re-created (Google is sufficient)", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
+		require.NoError(t, err)
+
+		// Google login already covers alice@gmail.com, so no email stub is created.
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "Google-backed primary should not be re-created")
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+	})
+
+	t.Run("old primary backed only by a non-Google social identity is preserved as email", func(t *testing.T) {
+		// LinkedIn (or GitHub/Jira/enterprise) is NOT a sufficient email/OTP login,
+		// so the old primary must be materialized as a verified email identity.
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"linkedin","provider":"linkedin","profileData":{"email":"old@example.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+		createBody, _ := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		assert.Contains(t, createBody, `"email":"old@example.com"`)
+		assert.NotContains(t, createBody, "app_metadata")
+	})
+
+	t.Run("old primary already a linked email identity skips preservation", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"old@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub should be created")
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+	})
+
+	t.Run("setting primary to the current primary skips preservation", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"same@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"same@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "SAME@example.com") // case-insensitive
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"))
+		assert.Equal(t, 1, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
+	})
+
+	t.Run("new email not a verified linked identity is rejected before any mutation", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":false}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not verified")
+		// Only the GET happened; nothing was mutated.
+		assert.Equal(t, []string{"GET /api/v2/users/auth0|test123"}, ft.methodPaths())
+	})
+
+	t.Run("unknown email is rejected before any mutation", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"someone@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a linked identity")
+		assert.Equal(t, []string{"GET /api/v2/users/auth0|test123"}, ft.methodPaths())
+	})
+
+	t.Run("preservation failure aborts the switch and rolls back the stub", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		ft.linkStatus = http.StatusInternalServerError // linking the preserved stub fails
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.Error(t, err)
+
+		// The new primary must NOT have been promoted (fail loud, no silent drop).
+		assert.Equal(t, 0, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "PATCH must not run when preservation fails")
+		// The orphaned stub must be rolled back (connection-guarded delete).
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|stub123"), "orphaned stub should be deleted")
+	})
+}
+
+func TestUserReaderWriter_SetPrimaryEmail_Validation(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		userID     string
+		email      string
+		wantErrMsg string
+	}{
+		{name: "empty userID", userID: "", email: "a@b.com", wantErrMsg: "user ID is required"},
+		{name: "whitespace userID", userID: "   ", email: "a@b.com", wantErrMsg: "user ID is required"},
+		{name: "empty email", userID: testPrimaryUserID, email: "", wantErrMsg: "email is required"},
+		{name: "whitespace email", userID: testPrimaryUserID, email: "  ", wantErrMsg: "email is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			rw := newTestReaderWriter(ft)
+
+			err := rw.SetPrimaryEmail(ctx, tt.userID, tt.email)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+			assert.Empty(t, ft.methodPaths(), "validation should fail before any HTTP call")
+		})
+	}
+}
+
+func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("creates a system-managed stub and links it", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		stubID, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, "email|stub123", stubID)
+
+		assert.Equal(t, []string{
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+		}, ft.methodPaths())
+
+		// Unlike the preservation path, this stub IS system-managed.
+		createBody, _ := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		assert.Contains(t, createBody, `"email":"alias@linux.com"`)
+		assert.Contains(t, createBody, `"system_managed":true`)
+	})
+
+	t.Run("conflict on create maps to a validation error", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatus = http.StatusConflict
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "email already linked")
+	})
 }

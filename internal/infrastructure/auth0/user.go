@@ -527,17 +527,37 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		return "", errors.NewValidation("email is required")
 	}
 
+	return u.createAndLinkEmailIdentity(ctx, primaryUserID, email, &Auth0AppMetadata{SystemManaged: true})
+}
+
+// createAndLinkEmailIdentity creates a stub Auth0 passwordless email-connection
+// user for email and links it to primaryUserID via the Management API (M2M
+// direct-link, no user-facing magic-link). It returns the stub user_id.
+//
+// appMetadata controls how the resulting identity is governed:
+//   - nil: a normal, user-removable email identity (no app_metadata is sent).
+//   - non-nil: attached as-is (e.g. {SystemManaged:true} for a system alias that
+//     must not be user-unlinked).
+//
+// EmailVerified is always set: callers guarantee the address is already verified
+// (a system alias on an LF-controlled domain, or the user's current verified
+// primary email being preserved before a switch).
+//
+// On link failure the just-created stub is rolled back on a best-effort basis:
+// system-managed stubs via deleteSystemManagedUser, otherwise via
+// deleteEmailConnectionStub.
+func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, primaryUserID, email string, appMetadata *Auth0AppMetadata) (string, error) {
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
-		return "", errors.NewUnexpected("failed to get M2M token for add system managed email", errToken)
+		return "", errors.NewUnexpected("failed to get M2M token for add email identity", errToken)
 	}
 
 	// Step 1: create the stub passwordless user.
 	createPayload := systemManagedUserPayload{
 		Connection:    constants.EmailConnection,
 		Email:         email,
-		EmailVerified: true, // safe: LF controls the linux.com domain
-		AppMetadata:   &Auth0AppMetadata{SystemManaged: true},
+		EmailVerified: true,
+		AppMetadata:   appMetadata,
 	}
 
 	apiCreate := httpclient.NewAPIRequest(
@@ -545,14 +565,14 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		httpclient.WithMethod(http.MethodPost),
 		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users", u.config.Domain)),
 		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("create system-managed stub user"),
+		httpclient.WithDescription("create email stub user"),
 		httpclient.WithBody(createPayload),
 	)
 
 	var stubUser Auth0User
 	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
 	if errCreate != nil {
-		slog.ErrorContext(ctx, "failed to create system-managed stub user",
+		slog.ErrorContext(ctx, "failed to create email stub user",
 			"error", errCreate,
 			"status_code", statusCode,
 			"email", redaction.RedactEmail(email),
@@ -563,14 +583,14 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		if statusCode == http.StatusConflict {
 			return "", errors.NewValidation("email already linked")
 		}
-		return "", errors.NewUnexpected("failed to create system-managed stub user", errCreate)
+		return "", errors.NewUnexpected("failed to create email stub user", errCreate)
 	}
 
 	if stubUser.UserID == "" {
 		return "", errors.NewUnexpected("Auth0 returned empty user_id for created stub user")
 	}
 
-	slog.DebugContext(ctx, "system-managed stub user created",
+	slog.DebugContext(ctx, "email stub user created",
 		"stub_user_id", redaction.Redact(stubUser.UserID),
 	)
 
@@ -591,36 +611,48 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		httpclient.WithMethod(http.MethodPost),
 		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s/identities", u.config.Domain, url.PathEscape(primaryUserID))),
 		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("link system-managed stub to primary user"),
+		httpclient.WithDescription("link email stub to primary user"),
 		httpclient.WithBody(linkPayload),
 	)
 
 	var linkedIdentities []any
 	statusCode, errLink := apiLink.Call(ctx, &linkedIdentities)
 	if errLink != nil {
-		slog.ErrorContext(ctx, "failed to link system-managed stub to primary user; attempting rollback",
+		slog.ErrorContext(ctx, "failed to link email stub to primary user; attempting rollback",
 			"error", errLink,
 			"status_code", statusCode,
 			"stub_user_id", redaction.Redact(stubUser.UserID),
 			"primary_user_id", redaction.Redact(primaryUserID),
 		)
-		// Best-effort rollback: delete the orphaned stub user.
-		if errDel := u.deleteSystemManagedUser(ctx, stubUser.UserID, m2mToken); errDel != nil {
+		// Best-effort rollback: delete the orphaned stub user. System-managed
+		// stubs use the system_managed-guarded delete; user-removable stubs use
+		// the connection-guarded delete (the system_managed guard would refuse).
+		errDel := u.rollbackEmailStub(ctx, stubUser.UserID, m2mToken, appMetadata)
+		if errDel != nil {
 			slog.WarnContext(ctx, "rollback failed: could not delete orphaned stub user",
 				"error", errDel,
 				"stub_user_id", redaction.Redact(stubUser.UserID),
 			)
 		}
-		return "", errors.NewUnexpected("failed to link system-managed email identity", errLink)
+		return "", errors.NewUnexpected("failed to link email identity", errLink)
 	}
 
-	slog.DebugContext(ctx, "system-managed email linked successfully",
+	slog.DebugContext(ctx, "email identity linked successfully",
 		"primary_user_id", redaction.Redact(primaryUserID),
 		"stub_user_id", redaction.Redact(stubUser.UserID),
 		"email", redaction.RedactEmail(email),
 	)
 
 	return stubUser.UserID, nil
+}
+
+// rollbackEmailStub deletes a just-created stub on link failure, selecting the
+// delete guard that matches how the stub was created.
+func (u *userReaderWriter) rollbackEmailStub(ctx context.Context, userID, m2mToken string, appMetadata *Auth0AppMetadata) error {
+	if appMetadata != nil && appMetadata.SystemManaged {
+		return u.deleteSystemManagedUser(ctx, userID, m2mToken)
+	}
+	return u.deleteEmailConnectionStub(ctx, userID, m2mToken)
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
@@ -676,6 +708,31 @@ type setPrimaryEmailRequest struct {
 	EmailVerified bool   `json:"email_verified"`
 }
 
+// hasSufficientPrimaryEmailIdentity reports whether email is already backed by an
+// identity adequate for it to remain reachable after it stops being the root
+// primary, without materializing a new email identity. Two connection types are
+// considered sufficient:
+//
+//   - constants.EmailConnection: a verified passwordless email/OTP identity.
+//   - constants.GoogleOAuth2Connection: a Google social login (Google verifies the
+//     address and it can be used to authenticate).
+//
+// Any other identity (LinkedIn, GitHub, enterprise, etc.) is NOT sufficient: the
+// address would otherwise become unreachable as an email/OTP login, so the old
+// primary must be preserved as a verified email identity before it is replaced.
+// Matching is case-insensitive on the identity's email.
+func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
+	for _, id := range user.Identities {
+		if !strings.EqualFold(id.Email, email) {
+			continue
+		}
+		if id.Connection == constants.EmailConnection || id.Connection == constants.GoogleOAuth2Connection {
+			return true
+		}
+	}
+	return false
+}
+
 // SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
 // The email must already be a verified linked identity on the user's account.
 func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
@@ -713,6 +770,26 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	}
 	if !found {
 		return errors.NewValidation("email is not a linked identity on this account")
+	}
+
+	// Preserve the current primary before switching. The root email PATCH below
+	// overwrites the primary, which would leave the old primary unreachable as an
+	// email/OTP login unless it is already backed by a verified email identity or
+	// a Google login. So unless the old primary is sufficiently backed (see
+	// hasSufficientPrimaryEmailIdentity), create+link it as a normal,
+	// user-removable verified email identity first. A primary backed only by a
+	// non-Google provider (LinkedIn, GitHub, enterprise, etc.) is preserved this
+	// way too. Done first so that any failure leaves the account unchanged rather
+	// than silently dropping the old primary.
+	oldPrimary := fullUser.PrimaryEmail
+	if oldPrimary != "" && !strings.EqualFold(oldPrimary, email) && !hasSufficientPrimaryEmailIdentity(fullUser, oldPrimary) {
+		if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {
+			slog.ErrorContext(ctx, "failed to preserve old primary email before switching",
+				"error", errPreserve,
+				"user_id", redaction.Redact(userID),
+			)
+			return errPreserve
+		}
 	}
 
 	m2mToken, errGetToken := u.config.M2MTokenManager.GetToken(ctx)
@@ -795,6 +872,60 @@ func (u *userReaderWriter) deleteSystemManagedUser(ctx context.Context, userID, 
 	)
 	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
 		return errors.NewUnexpected("failed to delete system-managed user", errDel)
+	}
+	return nil
+}
+
+// deleteEmailConnectionStub deletes a just-created email-connection stub user on
+// rollback when the stub is NOT system-managed (so deleteSystemManagedUser would
+// refuse it). The pre-flight GET is defense-in-depth: it refuses to delete unless
+// every identity on the user is an email-connection identity, ensuring this helper
+// can never remove a real account that also carries social/DB identities. A 404
+// fetch is treated as already-gone; any other fetch failure or a non-email identity
+// aborts the delete.
+func (u *userReaderWriter) deleteEmailConnectionStub(ctx context.Context, userID, m2mToken string) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify email-connection stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			// Already gone — nothing to clean up.
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to verify email-connection stub before delete",
+			"user_id", redaction.Redact(userID),
+			"status_code", statusCode,
+			"error", errGet,
+		)
+		return errors.NewUnexpected("failed to verify email-connection stub before delete", errGet)
+	}
+	if len(target.Identities) == 0 {
+		return errors.NewForbidden("refusing to delete user with no identities")
+	}
+	for _, id := range target.Identities {
+		if id.Connection != constants.EmailConnection {
+			return errors.NewForbidden("refusing to delete user with a non-email-connection identity")
+		}
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete email-connection stub user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
 	}
 	return nil
 }
