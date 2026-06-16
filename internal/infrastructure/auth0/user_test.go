@@ -949,22 +949,27 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	f.calls = append(f.calls, recordedCall{method: req.Method, path: req.URL.Path, body: string(bodyBytes)})
 
+	// Routes are scoped to the exact Auth0 Management API paths the adapter is
+	// expected to hit; anything else returns 404 so a wrong-path regression fails
+	// the test instead of silently passing.
 	status := http.StatusOK
-	body := "{}"
+	var body string
 	switch {
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		body = f.getUserResp
-	case req.Method == http.MethodGet:
+	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		// GET of any other user id is the rollback stub verification.
 		body = f.stubGetResp
 	case req.Method == http.MethodPost && req.URL.Path == "/api/v2/users":
 		status, body = f.createStatus, f.createResp
 	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/identities"):
 		status, body = f.linkStatus, "[]"
-	case req.Method == http.MethodPatch:
+	case req.Method == http.MethodPatch && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		status, body = f.patchStatus, "{}"
-	case req.Method == http.MethodDelete:
+	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		status, body = http.StatusNoContent, ""
+	default:
+		status, body = http.StatusNotFound, `{"error":"unexpected test route"}`
 	}
 
 	return &http.Response{
@@ -1108,6 +1113,20 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 			"GET /api/v2/users/auth0|test123",
 			"PATCH /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
+	})
+
+	t.Run("old primary on an UNVERIFIED email identity is not sufficient and is preserved", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"old@example.com","email_verified":false}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.NoError(t, err)
+
+		// An unverified email identity does not count as sufficient, so preservation runs.
+		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"), "unverified email primary should be preserved")
 	})
 
 	t.Run("setting primary to the current primary skips preservation", func(t *testing.T) {

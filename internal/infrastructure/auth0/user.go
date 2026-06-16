@@ -717,16 +717,23 @@ type setPrimaryEmailRequest struct {
 //   - constants.GoogleOAuth2Connection: a Google social login (Google verifies the
 //     address and it can be used to authenticate).
 //
-// Any other identity (LinkedIn, GitHub, enterprise, etc.) is NOT sufficient: the
-// address would otherwise become unreachable as an email/OTP login, so the old
-// primary must be preserved as a verified email identity before it is replaced.
-// Matching is case-insensitive on the identity's email.
+// An unverified email identity is NOT sufficient (it is not a usable email/OTP
+// login), and any other identity (LinkedIn, GitHub, enterprise, etc.) is NOT
+// sufficient either: the address would otherwise become unreachable as an
+// email/OTP login, so the old primary must be preserved as a verified email
+// identity before it is replaced. Matching is case-insensitive on the identity's
+// email.
 func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	for _, id := range user.Identities {
 		if !strings.EqualFold(id.Email, email) {
 			continue
 		}
-		if id.Connection == constants.EmailConnection || id.Connection == constants.GoogleOAuth2Connection {
+		// A passwordless email identity only counts when verified.
+		if id.Connection == constants.EmailConnection && id.EmailVerified {
+			return true
+		}
+		// Google verifies the address and it can be used to authenticate.
+		if id.Connection == constants.GoogleOAuth2Connection {
 			return true
 		}
 	}
