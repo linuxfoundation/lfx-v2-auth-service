@@ -217,7 +217,7 @@ nats request lfx.auth-service.user_emails.set_primary \
 - Requires the `update:current_user_identities` scope in the JWT
 - The target email must already exist as a verified alternate email on the user's account; it cannot be an arbitrary new address
 - The email input is normalized to lowercase before processing; matching is case-insensitive
-- After a successful update, the previous primary email becomes an alternate email on the account
+- After a successful update, the previous primary email is kept reachable as a verified login. If it is already backed by an email/OTP identity (which is OTP-reachable and self-verifies on next login) or a **verified** Google login, nothing more is needed. Otherwise — an *unverified* Google identity, a non-Google provider (e.g. LinkedIn), or no backing identity — it is preserved as a verified, **user-removable** alternate identity (not system-managed) so the user can later unlink it like any other alternate email. Preservation happens before the switch: if the previous primary cannot be preserved, the switch is aborted and the account is left unchanged rather than dropping the old primary
 - For detailed Auth0-specific behavior, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ### Provider Support

@@ -15,6 +15,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NATSClient wraps the NATS connection and provides access control operations
@@ -87,13 +91,34 @@ func (c *NATSClient) GetKVStore(bucketName string) (jetstream.KeyValue, bool) {
 	return kvStore, exists
 }
 
-// Publish publishes a message to a NATS subject. Used for fire-and-forget
-// domain events (not request/reply).
+// Publish publishes a message to a NATS subject with an OTel producer span.
 func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) error {
 	if err := c.IsReady(ctx); err != nil {
 		return err
 	}
-	return c.conn.Publish(subject, data)
+
+	ctx, span := tracer.Start(ctx, "nats.publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "nats"),
+			attribute.String("messaging.destination.name", subject),
+			attribute.String("messaging.operation.type", "publish"),
+			attribute.Int("messaging.message.body.size", len(data)),
+		),
+	)
+	defer span.End()
+
+	msg := nats.NewMsg(subject)
+	msg.Header = make(nats.Header)
+	msg.Data = data
+	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(msg.Header))
+
+	if err := c.conn.PublishMsg(msg); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 // SubscribeWithTransportMessenger subscribes to a subject with proper TransportMessenger handling
@@ -104,19 +129,34 @@ func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subjec
 	}
 
 	return c.conn.QueueSubscribe(subject, queueName, func(msg *nats.Msg) {
+		// Extract trace context from incoming message headers and start a consumer span.
+		msgCtx := otel.GetTextMapPropagator().Extract(ctx, natsHeaderCarrier(msg.Header))
+		msgCtx, span := tracer.Start(msgCtx, "nats.process",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination.name", subject),
+				attribute.String("messaging.operation.type", "process"),
+				attribute.String("messaging.consumer.group.name", queueName),
+				attribute.Int("messaging.message.body.size", len(msg.Data)),
+			),
+		)
+		defer span.End()
+
 		transportMsg := NewTransportMessenger(msg)
 
 		defer func() {
 			if r := recover(); r != nil {
-				slog.ErrorContext(ctx, "panic in NATS handler",
+				slog.ErrorContext(msgCtx, "panic in NATS handler",
 					"subject", subject,
 					"queue", queueName,
 					"panic", r,
 				)
+				span.SetStatus(codes.Error, "panic in NATS handler")
 			}
 		}()
 
-		handler(ctx, transportMsg)
+		handler(msgCtx, transportMsg)
 	})
 }
 

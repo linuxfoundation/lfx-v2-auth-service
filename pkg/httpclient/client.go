@@ -102,7 +102,7 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -160,11 +160,15 @@ func (c *Client) Request(ctx context.Context, verb, url string, body io.Reader, 
 // NewClient creates a new HTTP client with the given configuration.
 // The client is instrumented with OpenTelemetry for distributed tracing.
 func NewClient(config Config) *Client {
+	base := config.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
 	return &Client{
 		config: config,
 		httpClient: &http.Client{
 			Timeout:   config.Timeout,
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Transport: otelhttp.NewTransport(base),
 		},
 	}
 }
