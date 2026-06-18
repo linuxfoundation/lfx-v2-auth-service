@@ -162,7 +162,7 @@ These scopes are provisioned via the companion `auth0-terraform` repository — 
 - The domain is caller-supplied and validated against the server-side allow-list — there is no implicit default.
 - Each user may hold at most one alias **per allowed domain**. With multiple domains in the allow-list, a user could in principle claim one alias on each (e.g. `jane@linux.com` and `jane@dev.lfx.example`).
 - A successful claim is immutable from the user's perspective: only an administrator with direct Auth0 access can flip `app_metadata.system_managed` and remove the alias.
-- For detailed Auth0-specific behavior and limitations, see: [`../internal/infrastructure/auth0/README.md`](../internal/infrastructure/auth0/README.md)
+- For detailed Auth0-specific behavior and limitations, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ---
 

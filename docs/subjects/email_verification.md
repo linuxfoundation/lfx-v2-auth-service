@@ -129,9 +129,11 @@ The service sends a one-time password (OTP) to the provided email address and re
 ```json
 {
   "success": false,
-  "error": "alternate email already linked"
+  "error": "email already linked"
 }
 ```
+
+> **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
 
 **Error Reply (Invalid Email):**
 ```json
@@ -207,9 +209,11 @@ The returned token is an authentication token that can be used to link the verif
 ```json
 {
   "success": false,
-  "error": "alternate email already linked"
+  "error": "email already linked"
 }
 ```
+
+> **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
 
 **Error Reply (Invalid Request):**
 ```json
@@ -262,4 +266,6 @@ The Mock flow is fully self-contained — no NATS KV or SMTP is involved:
 1. **Send verification** (`email_linking.send_verification`): Generates a 6-digit OTP stored in-memory with a 5-minute TTL. The OTP is logged to stdout (no email is sent).
 2. **Verify OTP** (`email_linking.verify`): Compares the submitted code against the in-memory entry. On success, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
 3. **Link identity** (`user_identity.link`): Same `email|` dispatch — the verified email is appended to the user's `alternate_emails` in the in-memory store.
+
+> The Mock provider returns `alternate email already linked` (rather than `email already linked`) for an already-linked address — see the note under the error replies above.
 

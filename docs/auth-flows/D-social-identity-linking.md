@@ -35,11 +35,11 @@ sequenceDiagram
     else id_token_social sub is a social identity (e.g. google-oauth2|, github|)
         Note over SSR: SSR uses<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
 
-        SSR->>NATS: D5: Publish link request<br/>with access_token_mgmt_self + id_token_social
+        SSR->>NATS: D5: Publish to lfx.auth-service.user_identity.link<br/>{ user.auth_token: access_token_mgmt_self,<br/>link_with.identity_token: id_token_social }
         Note over NATS,AuthSvc: Auth Service subscribed to NATS subject
         NATS->>AuthSvc: Deliver request
 
-        AuthSvc->>Auth0Mgmt: Link social identity<br/>using access_token_mgmt_self<br/>w/ id_token_social claims
+        AuthSvc->>Auth0Mgmt: POST /api/v2/users/{id}/identities<br/>with access_token_mgmt_self<br/>(update:current_user_identities)<br/>+ id_token_social
 
         Auth0Mgmt-->>AuthSvc: Identity linked successfully
         AuthSvc->>NATS: Publish response
