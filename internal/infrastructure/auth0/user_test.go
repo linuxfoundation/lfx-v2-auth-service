@@ -1057,7 +1057,11 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		assert.Contains(t, patchBody, `"email":"new@example.com"`)
 	})
 
-	t.Run("old primary backed by Google OAuth is NOT re-created (Google is sufficient)", func(t *testing.T) {
+	t.Run("old primary backed only by a verified Google identity is preserved as email", func(t *testing.T) {
+		// A Google login is a login method, not a primary-email candidate, so even a
+		// Google-verified address must be materialized as a verified email identity;
+		// otherwise the old primary disappears from email settings and cannot be
+		// selected again (LFXV2-2497).
 		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
@@ -1067,12 +1071,16 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
 		require.NoError(t, err)
 
-		// Google login already covers alice@gmail.com, so no email stub is created.
-		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "Google-backed primary should not be re-created")
 		assert.Equal(t, []string{
 			"GET /api/v2/users/auth0|test123",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
 			"PATCH /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
+		createBody, ok := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		require.True(t, ok)
+		assert.Contains(t, createBody, `"email":"alice@gmail.com"`)
+		assert.Contains(t, createBody, `"email_verified":true`)
 	})
 
 	t.Run("old primary backed only by a non-Google social identity is preserved as email", func(t *testing.T) {
@@ -1136,8 +1144,9 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	})
 
 	t.Run("old primary backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
-		// Google has not verified the address, so it is not a sufficient verified
-		// login; materialize a verified email identity for it.
+		// A Google identity (verified or not) is never a primary-email candidate, so
+		// the old primary is materialized as a verified email identity regardless of
+		// Google's email_verified flag.
 		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
