@@ -1057,7 +1057,11 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		assert.Contains(t, patchBody, `"email":"new@example.com"`)
 	})
 
-	t.Run("old primary backed by Google OAuth is NOT re-created (Google is sufficient)", func(t *testing.T) {
+	t.Run("old primary backed only by a verified Google identity is preserved as email", func(t *testing.T) {
+		// A Google login is a login method, not a primary-email candidate, so even a
+		// Google-verified address must be materialized as a verified email identity;
+		// otherwise the old primary disappears from email settings and cannot be
+		// selected again (LFXV2-2497).
 		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
@@ -1067,12 +1071,16 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
 		require.NoError(t, err)
 
-		// Google login already covers alice@gmail.com, so no email stub is created.
-		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "Google-backed primary should not be re-created")
 		assert.Equal(t, []string{
 			"GET /api/v2/users/auth0|test123",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
 			"PATCH /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
+		createBody, ok := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
+		require.True(t, ok)
+		assert.Contains(t, createBody, `"email":"alice@gmail.com"`)
+		assert.Contains(t, createBody, `"email_verified":true`)
 	})
 
 	t.Run("old primary backed only by a non-Google social identity is preserved as email", func(t *testing.T) {
@@ -1136,8 +1144,9 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	})
 
 	t.Run("old primary backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
-		// Google has not verified the address, so it is not a sufficient verified
-		// login; materialize a verified email identity for it.
+		// A Google identity (verified or not) is never a primary-email candidate, so
+		// the old primary is materialized as a verified email identity regardless of
+		// Google's email_verified flag.
 		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
@@ -1211,6 +1220,85 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		// The orphaned stub must be rolled back (connection-guarded delete).
 		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|stub123"), "orphaned stub should be deleted")
 	})
+
+	t.Run("preserve-path create conflict aborts the switch before any promote", func(t *testing.T) {
+		// The old primary is backed only by a Google login, so preservation runs.
+		// If that address already exists as a separate email-connection user, Auth0
+		// returns 409 on create; SetPrimaryEmail must fail loud (validation) and
+		// never promote the new primary, leaving the account unchanged.
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		ft.createStatus = http.StatusConflict // old primary already registered as an email user elsewhere
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "email already linked")
+		assert.Equal(t, 0, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "PATCH must not run when preservation create conflicts")
+	})
+}
+
+func TestHasSufficientPrimaryEmailIdentity(t *testing.T) {
+	const target = "old@example.com"
+
+	tests := []struct {
+		name       string
+		identities []model.Identity
+		want       bool
+	}{
+		{
+			name:       "no backing identity is not sufficient",
+			identities: nil,
+			want:       false,
+		},
+		{
+			name:       "verified email-connection identity is sufficient",
+			identities: []model.Identity{{Connection: constants.EmailConnection, Email: target, EmailVerified: true}},
+			want:       true,
+		},
+		{
+			name:       "unverified email-connection identity is sufficient (OTP self-verifies)",
+			identities: []model.Identity{{Connection: constants.EmailConnection, Email: target, EmailVerified: false}},
+			want:       true,
+		},
+		{
+			name:       "email-connection match is case-insensitive",
+			identities: []model.Identity{{Connection: constants.EmailConnection, Email: "OLD@EXAMPLE.COM", EmailVerified: true}},
+			want:       true,
+		},
+		{
+			name:       "verified Google identity is NOT sufficient",
+			identities: []model.Identity{{Connection: constants.GoogleOAuth2Connection, Email: target, EmailVerified: true}},
+			want:       false,
+		},
+		{
+			name:       "non-Google social identity is NOT sufficient",
+			identities: []model.Identity{{Connection: "linkedin", Email: target, EmailVerified: true}},
+			want:       false,
+		},
+		{
+			name:       "email-connection identity for a different address is NOT sufficient",
+			identities: []model.Identity{{Connection: constants.EmailConnection, Email: "other@example.com", EmailVerified: true}},
+			want:       false,
+		},
+		{
+			name: "dual backing (Google + email) is sufficient via the email identity",
+			identities: []model.Identity{
+				{Connection: constants.GoogleOAuth2Connection, Email: target, EmailVerified: true},
+				{Connection: constants.EmailConnection, Email: target, EmailVerified: true},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasSufficientPrimaryEmailIdentity(&model.User{Identities: tt.identities}, target)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestUserReaderWriter_SetPrimaryEmail_Validation(t *testing.T) {

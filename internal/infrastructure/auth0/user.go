@@ -716,13 +716,14 @@ type setPrimaryEmailRequest struct {
 //     OTP-reachable regardless of its current email_verified flag (Auth0 marks it
 //     verified on the next successful OTP login), and a duplicate cannot be
 //     created — so an existing email identity is always sufficient.
-//   - constants.GoogleOAuth2Connection, verified only: a Google login where Google
-//     has verified the address. An *unverified* Google identity is NOT sufficient.
 //
-// Any other identity (LinkedIn, GitHub, enterprise, etc.) — or no backing identity
-// at all — is NOT sufficient, so the old primary must be preserved as a verified
-// email identity before it is replaced. Matching is case-insensitive on the
-// identity's email.
+// Every other case is NOT sufficient. Social and enterprise connections (Google,
+// GitHub, LinkedIn, etc.) are login *methods*, not alternate emails — the auth
+// service only ever offers email-connection identities as primary-email
+// candidates, so a social identity does not keep the address reachable as a
+// selectable verified email. When the only backing is social, or there is no
+// backing at all, the old primary must be preserved as a verified email identity
+// before it is replaced. Matching is case-insensitive on the identity's email.
 func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	for _, id := range user.Identities {
 		if !strings.EqualFold(id.Email, email) {
@@ -731,10 +732,6 @@ func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 		// Any passwordless email identity is OTP-reachable and self-verifies on
 		// the next login; a duplicate cannot be created — so it is sufficient.
 		if id.Connection == constants.EmailConnection {
-			return true
-		}
-		// Google is sufficient only when Google has verified the address.
-		if id.Connection == constants.GoogleOAuth2Connection && id.EmailVerified {
 			return true
 		}
 	}
@@ -782,10 +779,10 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 
 	// Preserve the current primary before switching. The root email PATCH below
 	// overwrites the primary, which would leave the old primary unreachable as a
-	// verified login unless it is already backed by a sufficient identity (see
-	// hasSufficientPrimaryEmailIdentity: any email/OTP identity, or a verified
-	// Google login). Otherwise — an unverified Google identity, a non-Google
-	// provider (LinkedIn, GitHub, enterprise, etc.), or no backing identity —
+	// selectable verified email unless it is already backed by an email-connection
+	// identity (see hasSufficientPrimaryEmailIdentity). Otherwise — backed only by a
+	// social/enterprise identity (Google, GitHub, LinkedIn, etc.), which is a login
+	// method and not a primary-email candidate, or no backing identity at all —
 	// create+link it as a normal, user-removable verified email identity first.
 	// Done first so that any failure leaves the account unchanged rather than
 	// silently dropping the old primary.
