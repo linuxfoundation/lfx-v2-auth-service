@@ -589,6 +589,91 @@ func TestMessageHandlerOrchestrator_EmailToUsername(t *testing.T) {
 			expectError:    false,
 			expectedResult: "test.user.complex",
 		},
+		{
+			name:        "alternate email fallback resolves username",
+			messageData: []byte("testuser+alt@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						switch callCount {
+						case 1:
+							if criteria != constants.CriteriaTypeEmail {
+								t.Errorf("first call: expected criteria %s, got %s", constants.CriteriaTypeEmail, criteria)
+							}
+							return nil, errors.NewNotFound("user not found")
+						case 2:
+							if criteria != constants.CriteriaTypeAlternateEmail {
+								t.Errorf("second call: expected criteria %s, got %s", constants.CriteriaTypeAlternateEmail, criteria)
+							}
+							return &model.User{
+								UserID:   "auth0|testuser001",
+								Username: "testuser",
+							}, nil
+						default:
+							t.Errorf("SearchUser called more than twice (call %d)", callCount)
+							return nil, errors.NewNotFound("unexpected call")
+						}
+					},
+				}
+			}(),
+			expectError:    false,
+			expectedResult: "testuser",
+		},
+		{
+			name:        "primary email hit does not trigger fallback",
+			messageData: []byte("testuser@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						if callCount > 1 {
+							t.Errorf("SearchUser called more than once; fallback should not run when primary succeeds")
+						}
+						return &model.User{
+							UserID:   "auth0|testuser001",
+							Username: "testuser",
+						}, nil
+					},
+				}
+			}(),
+			expectError:    false,
+			expectedResult: "testuser",
+		},
+		{
+			name:        "non-not-found error does not trigger fallback",
+			messageData: []byte("testuser@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						if callCount > 1 {
+							t.Errorf("SearchUser called more than once; fallback should not run on non-not-found error")
+						}
+						return nil, errors.NewUnexpected("database connection failed", nil)
+					},
+				}
+			}(),
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for unexpected error")
+				}
+				if response.Error != "database connection failed" {
+					t.Errorf("Expected error 'database connection failed', got %s", response.Error)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -856,6 +941,91 @@ func TestMessageHandlerOrchestrator_EmailToSub(t *testing.T) {
 			},
 			expectError:    false,
 			expectedResult: "", // Empty string is a valid response
+		},
+		{
+			name:        "alternate email fallback resolves sub",
+			messageData: []byte("testuser+alt@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						switch callCount {
+						case 1:
+							if criteria != constants.CriteriaTypeEmail {
+								t.Errorf("first call: expected criteria %s, got %s", constants.CriteriaTypeEmail, criteria)
+							}
+							return nil, errors.NewNotFound("user not found")
+						case 2:
+							if criteria != constants.CriteriaTypeAlternateEmail {
+								t.Errorf("second call: expected criteria %s, got %s", constants.CriteriaTypeAlternateEmail, criteria)
+							}
+							return &model.User{
+								UserID:   "auth0|testuser001",
+								Username: "testuser",
+							}, nil
+						default:
+							t.Errorf("SearchUser called more than twice (call %d)", callCount)
+							return nil, errors.NewNotFound("unexpected call")
+						}
+					},
+				}
+			}(),
+			expectError:    false,
+			expectedResult: "auth0|testuser001",
+		},
+		{
+			name:        "primary email hit does not trigger fallback",
+			messageData: []byte("testuser@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						if callCount > 1 {
+							t.Errorf("SearchUser called more than once; fallback should not run when primary succeeds")
+						}
+						return &model.User{
+							UserID:   "auth0|testuser001",
+							Username: "testuser",
+						}, nil
+					},
+				}
+			}(),
+			expectError:    false,
+			expectedResult: "auth0|testuser001",
+		},
+		{
+			name:        "non-not-found error does not trigger fallback",
+			messageData: []byte("testuser@example.com"),
+			userReader: func() *mockUserServiceReader {
+				callCount := 0
+				return &mockUserServiceReader{
+					searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+						callCount++
+						if callCount > 1 {
+							t.Errorf("SearchUser called more than once; fallback should not run on non-not-found error")
+						}
+						return nil, errors.NewUnexpected("database connection failed", nil)
+					},
+				}
+			}(),
+			expectError: true,
+			validateResult: func(t *testing.T, result []byte) {
+				var response struct {
+					Success bool   `json:"success"`
+					Error   string `json:"error"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("Failed to unmarshal error response: %v", err)
+				}
+				if response.Success {
+					t.Error("Expected success=false for unexpected error")
+				}
+				if response.Error != "database connection failed" {
+					t.Errorf("Expected error 'database connection failed', got %s", response.Error)
+				}
+			},
 		},
 	}
 

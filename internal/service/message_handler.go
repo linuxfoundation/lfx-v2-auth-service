@@ -147,9 +147,6 @@ func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria
 		user.AlternateEmails = []model.Email{{Email: email}}
 	}
 
-	// SearchUser is used to find “root” user emails, not linked email
-	//
-	// Finding users by alternate emails is NOT available
 	user, err := m.userReader.SearchUser(ctx, user, criteria)
 	if err != nil {
 		return nil, err
@@ -157,6 +154,21 @@ func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria
 
 	return user, nil
 
+}
+
+// searchByEmailWithFallback tries primary email first; if not found, retries with alternate email.
+func (m *messageHandlerOrchestrator) searchByEmailWithFallback(ctx context.Context, email string) (*model.User, error) {
+	user, err := m.searchByEmail(ctx, constants.CriteriaTypeEmail, email)
+	if err == nil {
+		return user, nil
+	}
+
+	var notFound errs.NotFound
+	if !errors.As(err, &notFound) {
+		return nil, err
+	}
+
+	return m.searchByEmail(ctx, constants.CriteriaTypeAlternateEmail, email)
 }
 
 // EmailToUsername converts an email to a username
@@ -167,7 +179,7 @@ func (m *messageHandlerOrchestrator) EmailToUsername(ctx context.Context, msg po
 		return m.errorResponse("email is required"), nil
 	}
 
-	user, err := m.searchByEmail(ctx, constants.CriteriaTypeEmail, email)
+	user, err := m.searchByEmailWithFallback(ctx, email)
 	if err != nil {
 		return m.errorResponse(err.Error()), nil
 	}
@@ -182,7 +194,7 @@ func (m *messageHandlerOrchestrator) EmailToSub(ctx context.Context, msg port.Tr
 		return m.errorResponse("email is required"), nil
 	}
 
-	user, err := m.searchByEmail(ctx, constants.CriteriaTypeEmail, email)
+	user, err := m.searchByEmailWithFallback(ctx, email)
 	if err != nil {
 		return m.errorResponse(err.Error()), nil
 	}
