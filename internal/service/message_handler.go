@@ -319,6 +319,7 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 	if err != nil {
 		slog.ErrorContext(ctx, "error resolving user for email read",
 			"error", err,
+			"input", redaction.Redact(authToken),
 		)
 		return m.errorResponse(err.Error()), nil
 	}

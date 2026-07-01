@@ -2552,6 +2552,20 @@ func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 			expectSuccess: false,
 			expectError:   "user not found",
 		},
+		{
+			name:        "search user failure for LFID username",
+			messageData: []byte(`{"user":{"auth_token":"unknown.user"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{Username: "unknown.user"}, nil
+				},
+				searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+					return nil, errors.NewNotFound("user not found")
+				},
+			},
+			expectSuccess: false,
+			expectError:   "user not found",
+		},
 	}
 
 	for _, tt := range tests {
