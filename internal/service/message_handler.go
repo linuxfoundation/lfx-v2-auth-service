@@ -212,7 +212,10 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 }
 
 // resolveUserFromAuthInput resolves a user from a JWT, Auth0 sub, or LFID username.
-func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
+// Callers that receive a structured JSON payload (e.g. user_emails.read) should
+// extract user.auth_token first; handlers with a raw string body (e.g.
+// user_metadata.read) should use getUserByInput instead.
+func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Context, input string) (*model.User, error) {
 	if m.userReader == nil {
 		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
@@ -222,7 +225,7 @@ func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Contex
 		return nil, errs.NewValidation("input is required")
 	}
 
-	user, err := m.userReader.MetadataLookup(ctx, input, requiredScopes...)
+	user, err := m.userReader.MetadataLookup(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +236,8 @@ func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Contex
 	return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
 }
 
+// getUserByInput resolves a user when the NATS payload is a raw auth input string
+// (no JSON wrapper), as used by user_metadata.read.
 func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	input := strings.TrimSpace(string(msg.Data()))
 	if input == "" {
