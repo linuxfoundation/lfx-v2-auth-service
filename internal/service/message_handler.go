@@ -211,7 +211,9 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 	return []byte(mapUsernameToSub(username)), nil
 }
 
-// resolveUserFromAuthInput resolves a user from a JWT, Auth0 sub, or LFID username.
+// resolveUserFromAuthInput resolves a user from an auth token, subject identifier, or LFID username.
+// Supported inputs follow MetadataLookup: JWT (Auth0 or Authelia), Auth0 sub or Authelia UUID,
+// or a plain LFID username resolved via SearchUser when no UserID is present.
 // Callers that receive a structured JSON payload (e.g. user_emails.read) should
 // extract user.auth_token first; handlers with a raw string body (e.g.
 // user_metadata.read) should use getUserByInput instead.
