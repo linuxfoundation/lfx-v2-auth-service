@@ -90,11 +90,21 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 }
 
 // ImpersonateUser exchanges subjectToken (a valid LFX V2 access token belonging
-// to an authorized impersonator) for a new LFX V2 access token representing
+// to an authorized impersonator) for a new access token representing
 // targetUser (email or username).
-func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, targetUser string) (string, error) {
+//
+// audience is optional: when non-empty it is used as the token exchange audience
+// (e.g. a Crowdfunding API identifier), allowing callers to obtain a CF-scoped
+// token for the target user. When empty, f.lfxV2Audience is used (default behaviour).
+func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, targetUser, audience string) (string, error) {
+	effectiveAudience := f.lfxV2Audience
+	if audience != "" {
+		effectiveAudience = audience
+	}
+
 	slog.DebugContext(ctx, "performing impersonation token exchange",
 		"target_user", redaction.RedactEmail(targetUser),
+		"audience", effectiveAudience,
 	)
 
 	tokenEndpoint := "https://" + f.domain + "/oauth/token"
@@ -112,7 +122,7 @@ func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, t
 		"client_assertion":      {assertion},
 		"subject_token":         {subjectToken},
 		"subject_token_type":    {f.lfxV2Audience},
-		"audience":              {f.lfxV2Audience},
+		"audience":              {effectiveAudience},
 		"target_user":           {targetUser},
 	}
 

@@ -864,6 +864,10 @@ func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg po
 type impersonationRequest struct {
 	SubjectToken string `json:"subject_token"`
 	TargetUser   string `json:"target_user"`
+	// Audience is optional. When non-empty, the token exchange targets this Auth0
+	// audience instead of the default LFX V2 audience. Existing callers that omit
+	// this field continue to receive a primary LFX V2-scoped token unchanged.
+	Audience string `json:"audience,omitempty"`
 }
 
 // ImpersonateUser handles an impersonation token exchange request over NATS.
@@ -891,9 +895,10 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 
 	slog.DebugContext(ctx, "impersonation token exchange requested",
 		"target_user", redaction.RedactEmail(req.TargetUser),
+		"audience", req.Audience,
 	)
 
-	accessToken, err := m.impersonator.ImpersonateUser(ctx, req.SubjectToken, req.TargetUser)
+	accessToken, err := m.impersonator.ImpersonateUser(ctx, req.SubjectToken, req.TargetUser, req.Audience)
 	if err != nil {
 		slog.WarnContext(ctx, "impersonation token exchange failed",
 			"error", err,
