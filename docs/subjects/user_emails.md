@@ -23,11 +23,12 @@ To retrieve user email addresses (both primary and alternate emails), send a NAT
 
 ### Request Fields
 
-- `user.auth_token` (string, required): Identifies the user to read emails for. Despite the name, this field accepts either:
-  - a **JWT token** (Auth0) or **Authelia token**, which is validated before the subject identifier is extracted from the verified claims; or
-  - a **subject identifier** (canonical user ID) — an Auth0 `sub` containing `|` (e.g. `auth0|123456789`) or an Authelia UUID — used directly (no token verification). For Auth0, the service uses its M2M Management API token to read user details once the subject is known.
+- `user.auth_token` (string, required): Identifies the user to read emails for. Despite the name, this field accepts any of the following:
+  - a **JWT token** (Auth0) or **Authelia token**, which is validated before the subject identifier is extracted from the verified claims;
+  - a **subject identifier** (canonical user ID) — an Auth0 `sub` containing `|` (e.g. `auth0|123456789`) or an Authelia UUID — used directly (no token verification); or
+  - an **LFID username** (plain username with no `auth0|` prefix and no `@` character, e.g. `john.doe`) — resolved via username search (no token verification).
 
-> **⚠️ Authorization:** The subject-identifier form performs **no token verification** — any caller able to publish to this subject can read any user's emails by supplying their `sub`/UUID. This operation is therefore intended for **trusted internal services only**; the NATS message bus is not exposed to end users, and the calling service is responsible for authorizing the requesting principal before invoking it. For end-user-initiated requests, pass the JWT/Authelia **token** form so the service verifies the caller from the signed claims.
+> **⚠️ Authorization:** The subject-identifier and LFID-username forms perform **no token verification** — any caller able to publish to this subject can read any user's emails by supplying their `sub`/UUID or LFID username. This operation is therefore intended for **trusted internal services only**; the NATS message bus is not exposed to end users, and the calling service is responsible for authorizing the requesting principal before invoking it. For end-user-initiated requests, pass the JWT/Authelia **token** form so the service verifies the caller from the signed claims.
 
 ### Reply
 
@@ -101,6 +102,9 @@ nats request lfx.auth-service.user_emails.read '{"user":{"auth_token":"eyJhbGciO
 
 # Using a subject identifier (Auth0 sub with "|", or an Authelia UUID)
 nats request lfx.auth-service.user_emails.read '{"user":{"auth_token":"auth0|123456789"}}'
+
+# Using an LFID username (plain username, no auth0| prefix)
+nats request lfx.auth-service.user_emails.read '{"user":{"auth_token":"john.doe"}}'
 ```
 
 ### Example Response Processing
