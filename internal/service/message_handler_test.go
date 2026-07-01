@@ -2373,6 +2373,12 @@ func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 				if len(response.Data.AlternateEmails) != 1 {
 					t.Fatalf("expected 1 alternate email, got %d", len(response.Data.AlternateEmails))
 				}
+				if response.Data.AlternateEmails[0].Email != "john.doe@example.com" {
+					t.Errorf("alternate_emails[0].email = %q, want %q", response.Data.AlternateEmails[0].Email, "john.doe@example.com")
+				}
+				if !response.Data.AlternateEmails[0].Verified {
+					t.Error("expected alternate_emails[0].verified = true")
+				}
 			},
 		},
 		{
