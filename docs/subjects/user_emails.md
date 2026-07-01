@@ -26,7 +26,7 @@ To retrieve user email addresses (both primary and alternate emails), send a NAT
 - `user.auth_token` (string, required): Identifies the user to read emails for. Despite the name, this field accepts any of the following:
   - a **JWT token** (Auth0) or **Authelia token**, which is validated before the subject identifier is extracted from the verified claims;
   - a **subject identifier** (canonical user ID) — an Auth0 `sub` containing `|` (e.g. `auth0|123456789`) or an Authelia UUID — used directly (no token verification); or
-  - an **LFID username** (plain username with no `auth0|` prefix and no `@` character, e.g. `john.doe`) — resolved via username search (no token verification).
+  - an **LFID username** (plain username with no `auth0|` prefix, e.g. `john.doe`) — resolved via username search (no token verification).
 
 > **⚠️ Authorization:** The subject-identifier and LFID-username forms perform **no token verification** — any caller able to publish to this subject can read any user's emails by supplying their `sub`/UUID or LFID username. This operation is therefore intended for **trusted internal services only**; the NATS message bus is not exposed to end users, and the calling service is responsible for authorizing the requesting principal before invoking it. For end-user-initiated requests, pass the JWT/Authelia **token** form so the service verifies the caller from the signed claims.
 
