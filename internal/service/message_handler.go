@@ -211,11 +211,36 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 	return []byte(mapUsernameToSub(username)), nil
 }
 
-func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
+// resolveUserFromAuthInput resolves a user from an auth token, subject identifier, or LFID username.
+// Supported inputs follow MetadataLookup: JWT (Auth0 or Authelia), Auth0 sub or Authelia UUID,
+// or a plain LFID username resolved via SearchUser when no UserID is present.
+// Callers that receive a structured JSON payload (e.g. user_emails.read) should
+// extract user.auth_token first; handlers with a raw string body (e.g.
+// user_metadata.read) should use getUserByInput instead.
+func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Context, input string) (*model.User, error) {
 	if m.userReader == nil {
 		return nil, errs.NewUnexpected("auth_service_unavailable")
 	}
 
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, errs.NewValidation("input is required")
+	}
+
+	user, err := m.userReader.MetadataLookup(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+
+	if user.UserID != "" {
+		return m.userReader.GetUser(ctx, user)
+	}
+	return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+}
+
+// getUserByInput resolves a user when the NATS payload is a raw auth input string
+// (no JSON wrapper), as used by user_metadata.read.
+func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg port.TransportMessenger) (*model.User, error) {
 	input := strings.TrimSpace(string(msg.Data()))
 	if input == "" {
 		return nil, errs.NewValidation("input is required")
@@ -225,23 +250,16 @@ func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg por
 		"input", redaction.Redact(input),
 	)
 
-	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, input)
-	if errMetadataLookup != nil {
+	user, err := m.resolveUserFromAuthInput(ctx, input)
+	if err != nil {
 		slog.ErrorContext(ctx, "error getting user metadata",
-			"error", errMetadataLookup,
+			"error", err,
 			"input", redaction.Redact(input),
 		)
-		return nil, errMetadataLookup
+		return nil, err
 	}
 
-	search := func() (*model.User, error) {
-		if user.UserID != "" {
-			return m.userReader.GetUser(ctx, user)
-		}
-		return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
-	}
-
-	return search()
+	return user, nil
 }
 
 // GetUserMetadata retrieves user metadata based on the input strategy
@@ -299,18 +317,11 @@ func (m *messageHandlerOrchestrator) GetUserEmails(ctx context.Context, msg port
 		"input", redaction.Redact(authToken),
 	)
 
-	user, err := m.userReader.MetadataLookup(ctx, authToken)
+	fullUser, err := m.resolveUserFromAuthInput(ctx, authToken)
 	if err != nil {
-		slog.ErrorContext(ctx, "error looking up user for email read",
+		slog.ErrorContext(ctx, "error resolving user for email read",
 			"error", err,
-		)
-		return m.errorResponse(err.Error()), nil
-	}
-
-	fullUser, err := m.userReader.GetUser(ctx, user)
-	if err != nil {
-		slog.ErrorContext(ctx, "error getting user for email read",
-			"error", err,
+			"input", redaction.Redact(authToken),
 		)
 		return m.errorResponse(err.Error()), nil
 	}
