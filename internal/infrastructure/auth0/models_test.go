@@ -194,15 +194,19 @@ func TestAuth0User_ToUser(t *testing.T) {
 			auth0User: Auth0User{
 				UserID: "auth0|abc123",
 				UserMetadata: &Auth0UserMetadata{
-					Name:      converters.StringPtr("John Doe"),
-					GivenName: converters.StringPtr("John"),
-					Country:   converters.StringPtr("US"),
+					Name:               converters.StringPtr("John Doe"),
+					GivenName:          converters.StringPtr("John"),
+					Organization:       converters.StringPtr("ACME Corp"),
+					OrganizationDomain: converters.StringPtr("acme.com"),
+					Country:            converters.StringPtr("US"),
 				},
 			},
 			validate: func(t *testing.T, user *model.User) {
 				require.NotNil(t, user.UserMetadata)
 				assert.Equal(t, converters.StringPtr("John Doe"), user.UserMetadata.Name)
 				assert.Equal(t, converters.StringPtr("John"), user.UserMetadata.GivenName)
+				assert.Equal(t, converters.StringPtr("ACME Corp"), user.UserMetadata.Organization)
+				assert.Equal(t, converters.StringPtr("acme.com"), user.UserMetadata.OrganizationDomain)
 				assert.Equal(t, converters.StringPtr("US"), user.UserMetadata.Country)
 				assert.Nil(t, user.UserMetadata.FamilyName)
 				assert.Nil(t, user.UserMetadata.Picture)

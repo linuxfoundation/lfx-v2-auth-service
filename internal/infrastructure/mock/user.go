@@ -191,6 +191,9 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 			if user.UserMetadata.Organization != nil {
 				updatedUser.UserMetadata.Organization = user.UserMetadata.Organization
 			}
+			if user.UserMetadata.OrganizationDomain != nil {
+				updatedUser.UserMetadata.OrganizationDomain = user.UserMetadata.OrganizationDomain
+			}
 			if user.UserMetadata.Country != nil {
 				updatedUser.UserMetadata.Country = user.UserMetadata.Country
 			}

@@ -146,20 +146,21 @@ func TestUser_UserSanitize(t *testing.T) {
 				UserID:       "  user-123  ",
 				PrimaryEmail: "  user@example.com  ",
 				UserMetadata: &UserMetadata{
-					Name:          converters.StringPtr("  John Doe  "),
-					GivenName:     converters.StringPtr("  John  "),
-					FamilyName:    converters.StringPtr("  Doe  "),
-					JobTitle:      converters.StringPtr("  Software Engineer  "),
-					Organization:  converters.StringPtr("  ACME Corp  "),
-					Country:       converters.StringPtr("  USA  "),
-					StateProvince: converters.StringPtr("  California  "),
-					City:          converters.StringPtr("  San Francisco  "),
-					Address:       converters.StringPtr("  123 Main St  "),
-					PostalCode:    converters.StringPtr("  94102  "),
-					PhoneNumber:   converters.StringPtr("  +1-555-123-4567  "),
-					TShirtSize:    converters.StringPtr("  M  "),
-					Picture:       converters.StringPtr("  https://example.com/pic.jpg  "),
-					Zoneinfo:      converters.StringPtr("  America/Los_Angeles  "),
+					Name:               converters.StringPtr("  John Doe  "),
+					GivenName:          converters.StringPtr("  John  "),
+					FamilyName:         converters.StringPtr("  Doe  "),
+					JobTitle:           converters.StringPtr("  Software Engineer  "),
+					Organization:       converters.StringPtr("  ACME Corp  "),
+					OrganizationDomain: converters.StringPtr("  acme.com  "),
+					Country:            converters.StringPtr("  USA  "),
+					StateProvince:      converters.StringPtr("  California  "),
+					City:               converters.StringPtr("  San Francisco  "),
+					Address:            converters.StringPtr("  123 Main St  "),
+					PostalCode:         converters.StringPtr("  94102  "),
+					PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
+					TShirtSize:         converters.StringPtr("  M  "),
+					Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
+					Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 				},
 			},
 			expected: &User{
@@ -168,20 +169,21 @@ func TestUser_UserSanitize(t *testing.T) {
 				UserID:       "user-123",
 				PrimaryEmail: "user@example.com",
 				UserMetadata: &UserMetadata{
-					Name:          converters.StringPtr("John Doe"),
-					GivenName:     converters.StringPtr("John"),
-					FamilyName:    converters.StringPtr("Doe"),
-					JobTitle:      converters.StringPtr("Software Engineer"),
-					Organization:  converters.StringPtr("ACME Corp"),
-					Country:       converters.StringPtr("USA"),
-					StateProvince: converters.StringPtr("California"),
-					City:          converters.StringPtr("San Francisco"),
-					Address:       converters.StringPtr("123 Main St"),
-					PostalCode:    converters.StringPtr("94102"),
-					PhoneNumber:   converters.StringPtr("+1-555-123-4567"),
-					TShirtSize:    converters.StringPtr("M"),
-					Picture:       converters.StringPtr("https://example.com/pic.jpg"),
-					Zoneinfo:      converters.StringPtr("America/Los_Angeles"),
+					Name:               converters.StringPtr("John Doe"),
+					GivenName:          converters.StringPtr("John"),
+					FamilyName:         converters.StringPtr("Doe"),
+					JobTitle:           converters.StringPtr("Software Engineer"),
+					Organization:       converters.StringPtr("ACME Corp"),
+					OrganizationDomain: converters.StringPtr("acme.com"),
+					Country:            converters.StringPtr("USA"),
+					StateProvince:      converters.StringPtr("California"),
+					City:               converters.StringPtr("San Francisco"),
+					Address:            converters.StringPtr("123 Main St"),
+					PostalCode:         converters.StringPtr("94102"),
+					PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
+					TShirtSize:         converters.StringPtr("M"),
+					Picture:            converters.StringPtr("https://example.com/pic.jpg"),
+					Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 				},
 			},
 		},
@@ -210,11 +212,12 @@ func TestUser_UserSanitize(t *testing.T) {
 				UserID:       "  user-123  ",
 				PrimaryEmail: "  user@example.com  ",
 				UserMetadata: &UserMetadata{
-					Name:         converters.StringPtr("  John Doe  "),
-					GivenName:    nil,
-					FamilyName:   converters.StringPtr("  Doe  "),
-					JobTitle:     nil,
-					Organization: converters.StringPtr("  ACME Corp  "),
+					Name:               converters.StringPtr("  John Doe  "),
+					GivenName:          nil,
+					FamilyName:         converters.StringPtr("  Doe  "),
+					JobTitle:           nil,
+					Organization:       converters.StringPtr("  ACME Corp  "),
+					OrganizationDomain: converters.StringPtr("  acme.com  "),
 				},
 			},
 			expected: &User{
@@ -223,11 +226,12 @@ func TestUser_UserSanitize(t *testing.T) {
 				UserID:       "user-123",
 				PrimaryEmail: "user@example.com",
 				UserMetadata: &UserMetadata{
-					Name:         converters.StringPtr("John Doe"),
-					GivenName:    nil,
-					FamilyName:   converters.StringPtr("Doe"),
-					JobTitle:     nil,
-					Organization: converters.StringPtr("ACME Corp"),
+					Name:               converters.StringPtr("John Doe"),
+					GivenName:          nil,
+					FamilyName:         converters.StringPtr("Doe"),
+					JobTitle:           nil,
+					Organization:       converters.StringPtr("ACME Corp"),
+					OrganizationDomain: converters.StringPtr("acme.com"),
 				},
 			},
 		},
@@ -287,6 +291,7 @@ func TestUser_UserSanitize(t *testing.T) {
 			checkStringPtr("FamilyName", userCopy.UserMetadata.FamilyName, tt.expected.UserMetadata.FamilyName)
 			checkStringPtr("JobTitle", userCopy.UserMetadata.JobTitle, tt.expected.UserMetadata.JobTitle)
 			checkStringPtr("Organization", userCopy.UserMetadata.Organization, tt.expected.UserMetadata.Organization)
+			checkStringPtr("OrganizationDomain", userCopy.UserMetadata.OrganizationDomain, tt.expected.UserMetadata.OrganizationDomain)
 			checkStringPtr("Country", userCopy.UserMetadata.Country, tt.expected.UserMetadata.Country)
 			checkStringPtr("StateProvince", userCopy.UserMetadata.StateProvince, tt.expected.UserMetadata.StateProvince)
 			checkStringPtr("City", userCopy.UserMetadata.City, tt.expected.UserMetadata.City)
@@ -303,56 +308,59 @@ func TestUser_UserSanitize(t *testing.T) {
 func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 	t.Run("sanitize all fields", func(t *testing.T) {
 		metadata := &UserMetadata{
-			Name:          converters.StringPtr("  John Doe  "),
-			GivenName:     converters.StringPtr("  John  "),
-			FamilyName:    converters.StringPtr("  Doe  "),
-			JobTitle:      converters.StringPtr("  Software Engineer  "),
-			Organization:  converters.StringPtr("  ACME Corp  "),
-			Country:       converters.StringPtr("  USA  "),
-			StateProvince: converters.StringPtr("  California  "),
-			City:          converters.StringPtr("  San Francisco  "),
-			Address:       converters.StringPtr("  123 Main St  "),
-			PostalCode:    converters.StringPtr("  94102  "),
-			PhoneNumber:   converters.StringPtr("  +1-555-123-4567  "),
-			TShirtSize:    converters.StringPtr("  M  "),
-			Picture:       converters.StringPtr("  https://example.com/pic.jpg  "),
-			Zoneinfo:      converters.StringPtr("  America/Los_Angeles  "),
+			Name:               converters.StringPtr("  John Doe  "),
+			GivenName:          converters.StringPtr("  John  "),
+			FamilyName:         converters.StringPtr("  Doe  "),
+			JobTitle:           converters.StringPtr("  Software Engineer  "),
+			Organization:       converters.StringPtr("  ACME Corp  "),
+			OrganizationDomain: converters.StringPtr("  acme.com  "),
+			Country:            converters.StringPtr("  USA  "),
+			StateProvince:      converters.StringPtr("  California  "),
+			City:               converters.StringPtr("  San Francisco  "),
+			Address:            converters.StringPtr("  123 Main St  "),
+			PostalCode:         converters.StringPtr("  94102  "),
+			PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
+			TShirtSize:         converters.StringPtr("  M  "),
+			Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
+			Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 		}
 
 		metadata.userMetadataSanitize()
 
 		expected := map[string]string{
-			"Name":          "John Doe",
-			"GivenName":     "John",
-			"FamilyName":    "Doe",
-			"JobTitle":      "Software Engineer",
-			"Organization":  "ACME Corp",
-			"Country":       "USA",
-			"StateProvince": "California",
-			"City":          "San Francisco",
-			"Address":       "123 Main St",
-			"PostalCode":    "94102",
-			"PhoneNumber":   "+1-555-123-4567",
-			"TShirtSize":    "M",
-			"Picture":       "https://example.com/pic.jpg",
-			"Zoneinfo":      "America/Los_Angeles",
+			"Name":               "John Doe",
+			"GivenName":          "John",
+			"FamilyName":         "Doe",
+			"JobTitle":           "Software Engineer",
+			"Organization":       "ACME Corp",
+			"OrganizationDomain": "acme.com",
+			"Country":            "USA",
+			"StateProvince":      "California",
+			"City":               "San Francisco",
+			"Address":            "123 Main St",
+			"PostalCode":         "94102",
+			"PhoneNumber":        "+1-555-123-4567",
+			"TShirtSize":         "M",
+			"Picture":            "https://example.com/pic.jpg",
+			"Zoneinfo":           "America/Los_Angeles",
 		}
 
 		checks := map[string]*string{
-			"Name":          metadata.Name,
-			"GivenName":     metadata.GivenName,
-			"FamilyName":    metadata.FamilyName,
-			"JobTitle":      metadata.JobTitle,
-			"Organization":  metadata.Organization,
-			"Country":       metadata.Country,
-			"StateProvince": metadata.StateProvince,
-			"City":          metadata.City,
-			"Address":       metadata.Address,
-			"PostalCode":    metadata.PostalCode,
-			"PhoneNumber":   metadata.PhoneNumber,
-			"TShirtSize":    metadata.TShirtSize,
-			"Picture":       metadata.Picture,
-			"Zoneinfo":      metadata.Zoneinfo,
+			"Name":               metadata.Name,
+			"GivenName":          metadata.GivenName,
+			"FamilyName":         metadata.FamilyName,
+			"JobTitle":           metadata.JobTitle,
+			"Organization":       metadata.Organization,
+			"OrganizationDomain": metadata.OrganizationDomain,
+			"Country":            metadata.Country,
+			"StateProvince":      metadata.StateProvince,
+			"City":               metadata.City,
+			"Address":            metadata.Address,
+			"PostalCode":         metadata.PostalCode,
+			"PhoneNumber":        metadata.PhoneNumber,
+			"TShirtSize":         metadata.TShirtSize,
+			"Picture":            metadata.Picture,
+			"Zoneinfo":           metadata.Zoneinfo,
 		}
 
 		for fieldName, got := range checks {
@@ -367,11 +375,12 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 
 	t.Run("handle nil fields", func(t *testing.T) {
 		metadata := &UserMetadata{
-			Name:         converters.StringPtr("  John Doe  "),
-			GivenName:    nil,
-			FamilyName:   converters.StringPtr("  Doe  "),
-			JobTitle:     nil,
-			Organization: converters.StringPtr("  ACME Corp  "),
+			Name:               converters.StringPtr("  John Doe  "),
+			GivenName:          nil,
+			FamilyName:         converters.StringPtr("  Doe  "),
+			JobTitle:           nil,
+			Organization:       converters.StringPtr("  ACME Corp  "),
+			OrganizationDomain: converters.StringPtr("  acme.com  "),
 		}
 
 		metadata.userMetadataSanitize()
@@ -390,6 +399,9 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 		if metadata.Organization == nil || *metadata.Organization != "ACME Corp" {
 			t.Errorf("Organization not sanitized correctly")
+		}
+		if metadata.OrganizationDomain == nil || *metadata.OrganizationDomain != "acme.com" {
+			t.Errorf("OrganizationDomain not sanitized correctly")
 		}
 	})
 }
@@ -922,17 +934,19 @@ func TestUserMetadata_Patch(t *testing.T) {
 				GivenName: converters.StringPtr("Johnny"),
 			},
 			update: &UserMetadata{
-				FamilyName:   converters.StringPtr("Doe"),
-				JobTitle:     converters.StringPtr("Engineer"),
-				Organization: converters.StringPtr("ACME"),
+				FamilyName:         converters.StringPtr("Doe"),
+				JobTitle:           converters.StringPtr("Engineer"),
+				Organization:       converters.StringPtr("ACME"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
-				Name:         converters.StringPtr("John"),
-				GivenName:    converters.StringPtr("Johnny"),
-				FamilyName:   converters.StringPtr("Doe"),
-				JobTitle:     converters.StringPtr("Engineer"),
-				Organization: converters.StringPtr("ACME"),
+				Name:               converters.StringPtr("John"),
+				GivenName:          converters.StringPtr("Johnny"),
+				FamilyName:         converters.StringPtr("Doe"),
+				JobTitle:           converters.StringPtr("Engineer"),
+				Organization:       converters.StringPtr("ACME"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
 			},
 		},
 		{
@@ -957,37 +971,39 @@ func TestUserMetadata_Patch(t *testing.T) {
 			name:     "update all fields",
 			original: &UserMetadata{},
 			update: &UserMetadata{
-				Picture:       converters.StringPtr("pic.jpg"),
-				Zoneinfo:      converters.StringPtr("UTC"),
-				Name:          converters.StringPtr("John Doe"),
-				GivenName:     converters.StringPtr("John"),
-				FamilyName:    converters.StringPtr("Doe"),
-				JobTitle:      converters.StringPtr("Engineer"),
-				Organization:  converters.StringPtr("ACME Corp"),
-				Country:       converters.StringPtr("USA"),
-				StateProvince: converters.StringPtr("CA"),
-				City:          converters.StringPtr("SF"),
-				Address:       converters.StringPtr("123 Main St"),
-				PostalCode:    converters.StringPtr("94102"),
-				PhoneNumber:   converters.StringPtr("+1-555-1234"),
-				TShirtSize:    converters.StringPtr("L"),
+				Picture:            converters.StringPtr("pic.jpg"),
+				Zoneinfo:           converters.StringPtr("UTC"),
+				Name:               converters.StringPtr("John Doe"),
+				GivenName:          converters.StringPtr("John"),
+				FamilyName:         converters.StringPtr("Doe"),
+				JobTitle:           converters.StringPtr("Engineer"),
+				Organization:       converters.StringPtr("ACME Corp"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
+				Country:            converters.StringPtr("USA"),
+				StateProvince:      converters.StringPtr("CA"),
+				City:               converters.StringPtr("SF"),
+				Address:            converters.StringPtr("123 Main St"),
+				PostalCode:         converters.StringPtr("94102"),
+				PhoneNumber:        converters.StringPtr("+1-555-1234"),
+				TShirtSize:         converters.StringPtr("L"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
-				Picture:       converters.StringPtr("pic.jpg"),
-				Zoneinfo:      converters.StringPtr("UTC"),
-				Name:          converters.StringPtr("John Doe"),
-				GivenName:     converters.StringPtr("John"),
-				FamilyName:    converters.StringPtr("Doe"),
-				JobTitle:      converters.StringPtr("Engineer"),
-				Organization:  converters.StringPtr("ACME Corp"),
-				Country:       converters.StringPtr("USA"),
-				StateProvince: converters.StringPtr("CA"),
-				City:          converters.StringPtr("SF"),
-				Address:       converters.StringPtr("123 Main St"),
-				PostalCode:    converters.StringPtr("94102"),
-				PhoneNumber:   converters.StringPtr("+1-555-1234"),
-				TShirtSize:    converters.StringPtr("L"),
+				Picture:            converters.StringPtr("pic.jpg"),
+				Zoneinfo:           converters.StringPtr("UTC"),
+				Name:               converters.StringPtr("John Doe"),
+				GivenName:          converters.StringPtr("John"),
+				FamilyName:         converters.StringPtr("Doe"),
+				JobTitle:           converters.StringPtr("Engineer"),
+				Organization:       converters.StringPtr("ACME Corp"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
+				Country:            converters.StringPtr("USA"),
+				StateProvince:      converters.StringPtr("CA"),
+				City:               converters.StringPtr("SF"),
+				Address:            converters.StringPtr("123 Main St"),
+				PostalCode:         converters.StringPtr("94102"),
+				PhoneNumber:        converters.StringPtr("+1-555-1234"),
+				TShirtSize:         converters.StringPtr("L"),
 			},
 		},
 		{
@@ -1014,17 +1030,19 @@ func TestUserMetadata_Patch(t *testing.T) {
 				JobTitle: converters.StringPtr("Developer"),
 			},
 			update: &UserMetadata{
-				Name:         nil,                            // Should not update
-				GivenName:    converters.StringPtr("Johnny"), // Should update
-				JobTitle:     nil,                            // Should not update
-				Organization: converters.StringPtr("ACME"),   // Should update
+				Name:               nil,                            // Should not update
+				GivenName:          converters.StringPtr("Johnny"), // Should update
+				JobTitle:           nil,                            // Should not update
+				Organization:       converters.StringPtr("ACME"),   // Should update
+				OrganizationDomain: converters.StringPtr("acme.com"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
-				Name:         converters.StringPtr("John"),
-				GivenName:    converters.StringPtr("Johnny"),
-				JobTitle:     converters.StringPtr("Developer"),
-				Organization: converters.StringPtr("ACME"),
+				Name:               converters.StringPtr("John"),
+				GivenName:          converters.StringPtr("Johnny"),
+				JobTitle:           converters.StringPtr("Developer"),
+				Organization:       converters.StringPtr("ACME"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
 			},
 		},
 		{
@@ -1063,6 +1081,9 @@ func TestUserMetadata_Patch(t *testing.T) {
 				}
 				if tt.original.Organization != nil {
 					originalCopy.Organization = converters.StringPtr(*tt.original.Organization)
+				}
+				if tt.original.OrganizationDomain != nil {
+					originalCopy.OrganizationDomain = converters.StringPtr(*tt.original.OrganizationDomain)
 				}
 				if tt.original.Country != nil {
 					originalCopy.Country = converters.StringPtr(*tt.original.Country)
@@ -1112,6 +1133,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 			checkStringPtr("FamilyName", originalCopy.FamilyName, tt.expectedFinal.FamilyName)
 			checkStringPtr("JobTitle", originalCopy.JobTitle, tt.expectedFinal.JobTitle)
 			checkStringPtr("Organization", originalCopy.Organization, tt.expectedFinal.Organization)
+			checkStringPtr("OrganizationDomain", originalCopy.OrganizationDomain, tt.expectedFinal.OrganizationDomain)
 			checkStringPtr("Country", originalCopy.Country, tt.expectedFinal.Country)
 			checkStringPtr("StateProvince", originalCopy.StateProvince, tt.expectedFinal.StateProvince)
 			checkStringPtr("City", originalCopy.City, tt.expectedFinal.City)
@@ -1126,8 +1148,9 @@ func TestUserMetadata_Patch(t *testing.T) {
 func TestUserMetadata_Patch_Idempotency(t *testing.T) {
 	// Test that applying the same patch multiple times produces the same result
 	update := &UserMetadata{
-		GivenName:    converters.StringPtr("Johnny"),
-		Organization: converters.StringPtr("ACME"),
+		GivenName:          converters.StringPtr("Johnny"),
+		Organization:       converters.StringPtr("ACME"),
+		OrganizationDomain: converters.StringPtr("acme.com"),
 	}
 
 	// Make copies for multiple patch operations
@@ -1176,5 +1199,8 @@ func TestUserMetadata_Patch_Idempotency(t *testing.T) {
 	}
 	if copy1.Organization == nil || copy2.Organization == nil || *copy1.Organization != *copy2.Organization {
 		t.Errorf("Organization fields don't match after multiple patches")
+	}
+	if copy1.OrganizationDomain == nil || copy2.OrganizationDomain == nil || *copy1.OrganizationDomain != *copy2.OrganizationDomain {
+		t.Errorf("OrganizationDomain fields don't match after multiple patches")
 	}
 }

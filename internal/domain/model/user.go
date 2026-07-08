@@ -29,20 +29,21 @@ type User struct {
 
 // UserMetadata represents the metadata of a user
 type UserMetadata struct {
-	Picture       *string `json:"picture,omitempty" yaml:"picture,omitempty"`
-	Zoneinfo      *string `json:"zoneinfo,omitempty" yaml:"zoneinfo,omitempty"`
-	Name          *string `json:"name,omitempty" yaml:"name,omitempty"`
-	GivenName     *string `json:"given_name,omitempty" yaml:"given_name,omitempty"`
-	FamilyName    *string `json:"family_name,omitempty" yaml:"family_name,omitempty"`
-	JobTitle      *string `json:"job_title,omitempty" yaml:"job_title,omitempty"`
-	Organization  *string `json:"organization,omitempty" yaml:"organization,omitempty"`
-	Country       *string `json:"country,omitempty" yaml:"country,omitempty"`
-	StateProvince *string `json:"state_province,omitempty" yaml:"state_province,omitempty"`
-	City          *string `json:"city,omitempty" yaml:"city,omitempty"`
-	Address       *string `json:"address,omitempty" yaml:"address,omitempty"`
-	PostalCode    *string `json:"postal_code,omitempty" yaml:"postal_code,omitempty"`
-	PhoneNumber   *string `json:"phone_number,omitempty" yaml:"phone_number,omitempty"`
-	TShirtSize    *string `json:"t_shirt_size,omitempty" yaml:"t_shirt_size,omitempty"`
+	Picture            *string `json:"picture,omitempty" yaml:"picture,omitempty"`
+	Zoneinfo           *string `json:"zoneinfo,omitempty" yaml:"zoneinfo,omitempty"`
+	Name               *string `json:"name,omitempty" yaml:"name,omitempty"`
+	GivenName          *string `json:"given_name,omitempty" yaml:"given_name,omitempty"`
+	FamilyName         *string `json:"family_name,omitempty" yaml:"family_name,omitempty"`
+	JobTitle           *string `json:"job_title,omitempty" yaml:"job_title,omitempty"`
+	Organization       *string `json:"organization,omitempty" yaml:"organization,omitempty"`
+	OrganizationDomain *string `json:"organization_domain,omitempty" yaml:"organization_domain,omitempty"`
+	Country            *string `json:"country,omitempty" yaml:"country,omitempty"`
+	StateProvince      *string `json:"state_province,omitempty" yaml:"state_province,omitempty"`
+	City               *string `json:"city,omitempty" yaml:"city,omitempty"`
+	Address            *string `json:"address,omitempty" yaml:"address,omitempty"`
+	PostalCode         *string `json:"postal_code,omitempty" yaml:"postal_code,omitempty"`
+	PhoneNumber        *string `json:"phone_number,omitempty" yaml:"phone_number,omitempty"`
+	TShirtSize         *string `json:"t_shirt_size,omitempty" yaml:"t_shirt_size,omitempty"`
 }
 
 // Validate validates the user data and returns an error if validation fails
@@ -139,6 +140,9 @@ func (um *UserMetadata) userMetadataSanitize() {
 	if um.Organization != nil {
 		*um.Organization = strings.TrimSpace(*um.Organization)
 	}
+	if um.OrganizationDomain != nil {
+		*um.OrganizationDomain = strings.TrimSpace(*um.OrganizationDomain)
+	}
 	if um.Country != nil {
 		*um.Country = strings.TrimSpace(*um.Country)
 	}
@@ -209,6 +213,11 @@ func (a *UserMetadata) Patch(update *UserMetadata) bool {
 
 	if update.Organization != nil {
 		a.Organization = update.Organization
+		updated = true
+	}
+
+	if update.OrganizationDomain != nil {
+		a.OrganizationDomain = update.OrganizationDomain
 		updated = true
 	}
 

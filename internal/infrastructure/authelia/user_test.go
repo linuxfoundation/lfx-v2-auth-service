@@ -21,10 +21,11 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 		User: &model.User{
 			Username: "testuser",
 			UserMetadata: &model.UserMetadata{
-				Name:         converters.StringPtr("John Doe"),
-				JobTitle:     converters.StringPtr("Engineer"),
-				Organization: converters.StringPtr("ACME Corp"),
-				Country:      converters.StringPtr("USA"),
+				Name:               converters.StringPtr("John Doe"),
+				JobTitle:           converters.StringPtr("Engineer"),
+				Organization:       converters.StringPtr("ACME Corp"),
+				OrganizationDomain: converters.StringPtr("acme.com"),
+				Country:            converters.StringPtr("USA"),
 			},
 		},
 	}
@@ -35,7 +36,7 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 			Name:     converters.StringPtr("Jane Doe"), // Update
 			JobTitle: nil,                              // Should not change existing
 			City:     converters.StringPtr("New York"), // New field
-			// Organization and Country not specified - should be preserved
+			// Organization, OrganizationDomain, and Country not specified - should be preserved
 		},
 	}
 
@@ -69,6 +70,9 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	}
 	if result.UserMetadata.Organization == nil || *result.UserMetadata.Organization != "ACME Corp" {
 		t.Error("UpdateUser() should preserve Organization when not specified in input")
+	}
+	if result.UserMetadata.OrganizationDomain == nil || *result.UserMetadata.OrganizationDomain != "acme.com" {
+		t.Error("UpdateUser() should preserve OrganizationDomain when not specified in input")
 	}
 	if result.UserMetadata.Country == nil || *result.UserMetadata.Country != "USA" {
 		t.Error("UpdateUser() should preserve Country when not specified in input")

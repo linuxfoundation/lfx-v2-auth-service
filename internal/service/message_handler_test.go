@@ -285,20 +285,21 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					UserID:       "user-456",
 					PrimaryEmail: "complete@example.com",
 					UserMetadata: &model.UserMetadata{
-						Name:          converters.StringPtr("Jane Smith"),
-						GivenName:     converters.StringPtr("Jane"),
-						FamilyName:    converters.StringPtr("Smith"),
-						JobTitle:      converters.StringPtr("Senior Engineer"),
-						Organization:  converters.StringPtr("Tech Corp"),
-						Country:       converters.StringPtr("USA"),
-						StateProvince: converters.StringPtr("California"),
-						City:          converters.StringPtr("San Francisco"),
-						Address:       converters.StringPtr("123 Tech St"),
-						PostalCode:    converters.StringPtr("94105"),
-						PhoneNumber:   converters.StringPtr("+1-555-123-4567"),
-						TShirtSize:    converters.StringPtr("M"),
-						Picture:       converters.StringPtr("https://example.com/pic.jpg"),
-						Zoneinfo:      converters.StringPtr("America/Los_Angeles"),
+						Name:               converters.StringPtr("Jane Smith"),
+						GivenName:          converters.StringPtr("Jane"),
+						FamilyName:         converters.StringPtr("Smith"),
+						JobTitle:           converters.StringPtr("Senior Engineer"),
+						Organization:       converters.StringPtr("Tech Corp"),
+						OrganizationDomain: converters.StringPtr("techcorp.com"),
+						Country:            converters.StringPtr("USA"),
+						StateProvince:      converters.StringPtr("California"),
+						City:               converters.StringPtr("San Francisco"),
+						Address:            converters.StringPtr("123 Tech St"),
+						PostalCode:         converters.StringPtr("94105"),
+						PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
+						TShirtSize:         converters.StringPtr("M"),
+						Picture:            converters.StringPtr("https://example.com/pic.jpg"),
+						Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 					},
 				}
 				data, _ := json.Marshal(user)
@@ -334,6 +335,9 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					}
 					if organization, exists := metadata["organization"]; exists && organization != "Tech Corp" {
 						t.Errorf("Result metadata organization incorrect: got %v, want Tech Corp", organization)
+					}
+					if organizationDomain, exists := metadata["organization_domain"]; exists && organizationDomain != "techcorp.com" {
+						t.Errorf("Result metadata organization_domain incorrect: got %v, want techcorp.com", organizationDomain)
 					}
 				} else {
 					t.Errorf("Data is not a map[string]interface{}, got %T", response.Data)
@@ -1820,15 +1824,17 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 					UserID:   "auth0|987654321",
 					Username: "john.doe",
 					UserMetadata: &model.UserMetadata{
-						Name:         converters.StringPtr("John Doe"),
-						Organization: converters.StringPtr("Example Corp"),
+						Name:               converters.StringPtr("John Doe"),
+						Organization:       converters.StringPtr("Example Corp"),
+						OrganizationDomain: converters.StringPtr("example.com"),
 					},
 				}, nil
 			},
 			expectedError: false,
 			expectedData: &model.UserMetadata{
-				Name:         converters.StringPtr("John Doe"),
-				Organization: converters.StringPtr("Example Corp"),
+				Name:               converters.StringPtr("John Doe"),
+				Organization:       converters.StringPtr("Example Corp"),
+				OrganizationDomain: converters.StringPtr("example.com"),
 			},
 			description: "Should use SearchUser for search lookup and return user metadata",
 		},
@@ -2208,6 +2214,7 @@ func compareUserMetadata(actual, expected *model.UserMetadata) bool {
 	return compareStringPtr(actual.Name, expected.Name) &&
 		compareStringPtr(actual.JobTitle, expected.JobTitle) &&
 		compareStringPtr(actual.Organization, expected.Organization) &&
+		compareStringPtr(actual.OrganizationDomain, expected.OrganizationDomain) &&
 		compareStringPtr(actual.Picture, expected.Picture) &&
 		compareStringPtr(actual.GivenName, expected.GivenName) &&
 		compareStringPtr(actual.FamilyName, expected.FamilyName) &&
