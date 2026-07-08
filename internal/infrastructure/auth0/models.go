@@ -74,20 +74,21 @@ type Auth0ProfileData struct {
 // It's the same as the domain User.UserMetadata, but it might be useful
 // to have it separated for Auth0 to handle it separately if needed.
 type Auth0UserMetadata struct {
-	Name          *string `json:"name"`
-	FamilyName    *string `json:"family_name"`
-	GivenName     *string `json:"given_name"`
-	Picture       *string `json:"picture"`
-	JobTitle      *string `json:"job_title"`
-	Organization  *string `json:"organization"`
-	Country       *string `json:"country"`
-	StateProvince *string `json:"state_province"`
-	City          *string `json:"city"`
-	Address       *string `json:"address"`
-	PostalCode    *string `json:"postal_code"`
-	PhoneNumber   *string `json:"phone_number"`
-	TShirtSize    *string `json:"t_shirt_size"`
-	Zoneinfo      *string `json:"zoneinfo"`
+	Name               *string `json:"name"`
+	FamilyName         *string `json:"family_name"`
+	GivenName          *string `json:"given_name"`
+	Picture            *string `json:"picture"`
+	JobTitle           *string `json:"job_title"`
+	Organization       *string `json:"organization"`
+	OrganizationDomain *string `json:"organization_domain"`
+	Country            *string `json:"country"`
+	StateProvince      *string `json:"state_province"`
+	City               *string `json:"city"`
+	Address            *string `json:"address"`
+	PostalCode         *string `json:"postal_code"`
+	PhoneNumber        *string `json:"phone_number"`
+	TShirtSize         *string `json:"t_shirt_size"`
+	Zoneinfo           *string `json:"zoneinfo"`
 }
 
 // ToUser converts an Auth0User to a User
@@ -95,20 +96,21 @@ func (u *Auth0User) ToUser() *model.User {
 	var meta *model.UserMetadata
 	if u.UserMetadata != nil {
 		meta = &model.UserMetadata{
-			Name:          u.UserMetadata.Name,
-			FamilyName:    u.UserMetadata.FamilyName,
-			GivenName:     u.UserMetadata.GivenName,
-			Picture:       u.UserMetadata.Picture,
-			JobTitle:      u.UserMetadata.JobTitle,
-			Organization:  u.UserMetadata.Organization,
-			Country:       u.UserMetadata.Country,
-			StateProvince: u.UserMetadata.StateProvince,
-			City:          u.UserMetadata.City,
-			Address:       u.UserMetadata.Address,
-			PostalCode:    u.UserMetadata.PostalCode,
-			PhoneNumber:   u.UserMetadata.PhoneNumber,
-			TShirtSize:    u.UserMetadata.TShirtSize,
-			Zoneinfo:      u.UserMetadata.Zoneinfo,
+			Name:               u.UserMetadata.Name,
+			FamilyName:         u.UserMetadata.FamilyName,
+			GivenName:          u.UserMetadata.GivenName,
+			Picture:            u.UserMetadata.Picture,
+			JobTitle:           u.UserMetadata.JobTitle,
+			Organization:       u.UserMetadata.Organization,
+			OrganizationDomain: u.UserMetadata.OrganizationDomain,
+			Country:            u.UserMetadata.Country,
+			StateProvince:      u.UserMetadata.StateProvince,
+			City:               u.UserMetadata.City,
+			Address:            u.UserMetadata.Address,
+			PostalCode:         u.UserMetadata.PostalCode,
+			PhoneNumber:        u.UserMetadata.PhoneNumber,
+			TShirtSize:         u.UserMetadata.TShirtSize,
+			Zoneinfo:           u.UserMetadata.Zoneinfo,
 		}
 	}
 
