@@ -88,6 +88,7 @@ type Auth0UserMetadata struct {
 	PostalCode         *string `json:"postal_code"`
 	PhoneNumber        *string `json:"phone_number"`
 	TShirtSize         *string `json:"t_shirt_size"`
+	Bio                *string `json:"bio"`
 	Zoneinfo           *string `json:"zoneinfo"`
 }
 
@@ -110,6 +111,7 @@ func (u *Auth0User) ToUser() *model.User {
 			PostalCode:         u.UserMetadata.PostalCode,
 			PhoneNumber:        u.UserMetadata.PhoneNumber,
 			TShirtSize:         u.UserMetadata.TShirtSize,
+			Bio:                u.UserMetadata.Bio,
 			Zoneinfo:           u.UserMetadata.Zoneinfo,
 		}
 	}

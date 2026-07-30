@@ -70,6 +70,7 @@ The service returns a structured reply with user metadata:
     "postal_code": "94102",
     "phone_number": "+1-555-0123",
     "t_shirt_size": "L",
+    "bio": "Software engineer and open source contributor.",
     "picture": "https://example.com/avatar.jpg",
     "zoneinfo": "America/Los_Angeles"
   }
@@ -145,6 +146,7 @@ The request payload must be a JSON object containing the user data to update. Th
     "postal_code": "90210",
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
+    "bio": "Cloud architect building resilient systems in the Skylands.",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }
@@ -178,6 +180,7 @@ The service returns a structured reply indicating success or failure:
     "postal_code": "90210",
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
+    "bio": "Cloud architect building resilient systems in the Skylands.",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }
