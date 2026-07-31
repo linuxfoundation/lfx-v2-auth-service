@@ -44,7 +44,13 @@ type UserMetadata struct {
 	PostalCode         *string `json:"postal_code,omitempty" yaml:"postal_code,omitempty"`
 	PhoneNumber        *string `json:"phone_number,omitempty" yaml:"phone_number,omitempty"`
 	TShirtSize         *string `json:"t_shirt_size,omitempty" yaml:"t_shirt_size,omitempty"`
+	Bio                *string `json:"bio,omitempty" yaml:"bio,omitempty"`
 }
+
+// bioMaxLength is the maximum number of characters allowed in the About Me (bio)
+// field. Auth0 imposes no limit, so this is the chokepoint cap; longer values are
+// truncated during sanitization.
+const bioMaxLength = 2000
 
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
@@ -164,6 +170,12 @@ func (um *UserMetadata) userMetadataSanitize() {
 	if um.TShirtSize != nil {
 		*um.TShirtSize = strings.TrimSpace(*um.TShirtSize)
 	}
+	if um.Bio != nil {
+		*um.Bio = strings.TrimSpace(*um.Bio)
+		if runes := []rune(*um.Bio); len(runes) > bioMaxLength {
+			*um.Bio = string(runes[:bioMaxLength])
+		}
+	}
 	if um.Picture != nil {
 		*um.Picture = strings.TrimSpace(*um.Picture)
 	}
@@ -252,6 +264,11 @@ func (a *UserMetadata) Patch(update *UserMetadata) bool {
 
 	if update.TShirtSize != nil {
 		a.TShirtSize = update.TShirtSize
+		updated = true
+	}
+
+	if update.Bio != nil {
+		a.Bio = update.Bio
 		updated = true
 	}
 
