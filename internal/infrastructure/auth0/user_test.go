@@ -810,6 +810,34 @@ func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid audience")
 	})
+
+	signScopedToken := func(audience, scope string) string {
+		claims := jwt.MapClaims{
+			"sub":   "auth0|123456789",
+			"exp":   time.Now().Add(time.Hour).Unix(),
+			"iat":   time.Now().Unix(),
+			"iss":   "https://test.auth0.com/",
+			"aud":   audience,
+			"scope": scope,
+		}
+		tokenString, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(privateKey)
+		require.NoError(t, err)
+		return tokenString
+	}
+
+	t.Run("scope-gated lookup rejects LFX v2 API audience even with matching scope", func(t *testing.T) {
+		tokenString := signScopedToken("https://lfx-api.example.org/", "update:current_user_identities")
+		_, err := writer.MetadataLookup(ctx, tokenString, "update:current_user_identities")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid audience")
+	})
+
+	t.Run("scope-gated lookup accepts management-audience token with scope", func(t *testing.T) {
+		tokenString := signScopedToken("https://test.auth0.com/api/v2/", "update:current_user_identities")
+		user, err := writer.MetadataLookup(ctx, tokenString, "update:current_user_identities")
+		require.NoError(t, err)
+		assert.Equal(t, tokenString, user.Token)
+	})
 }
 
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {

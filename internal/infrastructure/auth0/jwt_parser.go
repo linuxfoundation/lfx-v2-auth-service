@@ -58,6 +58,13 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 
 	if len(requiredScope) > 0 {
 		opts.RequiredScopes = requiredScope
+		// Required scopes are Auth0 Management API scopes, which are only
+		// meaningful on Management-API-audience tokens. Restricting scope-gated
+		// verifications (the write-authorizing paths) to that audience keeps
+		// broader-audience tokens — accepted for read-only lookups via
+		// ExpectedAudiences — from ever authorizing a write, even if another
+		// resource server were to define an identically named scope.
+		opts.ExpectedAudiences = nil
 	}
 
 	// Parse and validate the JWT token with signature verification
