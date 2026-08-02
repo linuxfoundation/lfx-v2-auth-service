@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -159,6 +160,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PostalCode:         converters.StringPtr("  94102  "),
 					PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 					TShirtSize:         converters.StringPtr("  M  "),
+					Bio:                converters.StringPtr("  Passionate engineer  "),
 					Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 					Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 				},
@@ -182,6 +184,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PostalCode:         converters.StringPtr("94102"),
 					PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 					TShirtSize:         converters.StringPtr("M"),
+					Bio:                converters.StringPtr("Passionate engineer"),
 					Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 					Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 				},
@@ -299,6 +302,7 @@ func TestUser_UserSanitize(t *testing.T) {
 			checkStringPtr("PostalCode", userCopy.UserMetadata.PostalCode, tt.expected.UserMetadata.PostalCode)
 			checkStringPtr("PhoneNumber", userCopy.UserMetadata.PhoneNumber, tt.expected.UserMetadata.PhoneNumber)
 			checkStringPtr("TShirtSize", userCopy.UserMetadata.TShirtSize, tt.expected.UserMetadata.TShirtSize)
+			checkStringPtr("Bio", userCopy.UserMetadata.Bio, tt.expected.UserMetadata.Bio)
 			checkStringPtr("Picture", userCopy.UserMetadata.Picture, tt.expected.UserMetadata.Picture)
 			checkStringPtr("Zoneinfo", userCopy.UserMetadata.Zoneinfo, tt.expected.UserMetadata.Zoneinfo)
 		})
@@ -321,6 +325,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			PostalCode:         converters.StringPtr("  94102  "),
 			PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 			TShirtSize:         converters.StringPtr("  M  "),
+			Bio:                converters.StringPtr("  Passionate engineer  "),
 			Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 			Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 		}
@@ -341,6 +346,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PostalCode":         "94102",
 			"PhoneNumber":        "+1-555-123-4567",
 			"TShirtSize":         "M",
+			"Bio":                "Passionate engineer",
 			"Picture":            "https://example.com/pic.jpg",
 			"Zoneinfo":           "America/Los_Angeles",
 		}
@@ -359,6 +365,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PostalCode":         metadata.PostalCode,
 			"PhoneNumber":        metadata.PhoneNumber,
 			"TShirtSize":         metadata.TShirtSize,
+			"Bio":                metadata.Bio,
 			"Picture":            metadata.Picture,
 			"Zoneinfo":           metadata.Zoneinfo,
 		}
@@ -402,6 +409,39 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 		if metadata.OrganizationDomain == nil || *metadata.OrganizationDomain != "acme.com" {
 			t.Errorf("OrganizationDomain not sanitized correctly")
+		}
+	})
+
+	t.Run("bio is truncated to the max length", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Bio: converters.StringPtr("  " + strings.Repeat("a", bioMaxLength+100) + "  "),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Bio == nil {
+			t.Fatal("Bio = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Bio)); got != bioMaxLength {
+			t.Errorf("Bio length = %d, want %d", got, bioMaxLength)
+		}
+	})
+
+	t.Run("multibyte bio is truncated on a rune boundary", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Bio: converters.StringPtr(strings.Repeat("é", bioMaxLength+50)),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Bio == nil {
+			t.Fatal("Bio = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Bio)); got != bioMaxLength {
+			t.Errorf("Bio rune length = %d, want %d", got, bioMaxLength)
+		}
+		if !utf8.ValidString(*metadata.Bio) {
+			t.Error("Bio is not valid UTF-8 after truncation")
 		}
 	})
 }
@@ -986,6 +1026,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PostalCode:         converters.StringPtr("94102"),
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
+				Bio:                converters.StringPtr("Engineer bio"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
@@ -1004,6 +1045,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PostalCode:         converters.StringPtr("94102"),
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
+				Bio:                converters.StringPtr("Engineer bio"),
 			},
 		},
 		{
@@ -1106,6 +1148,9 @@ func TestUserMetadata_Patch(t *testing.T) {
 				if tt.original.TShirtSize != nil {
 					originalCopy.TShirtSize = converters.StringPtr(*tt.original.TShirtSize)
 				}
+				if tt.original.Bio != nil {
+					originalCopy.Bio = converters.StringPtr(*tt.original.Bio)
+				}
 			}
 
 			result := originalCopy.Patch(tt.update)
@@ -1141,6 +1186,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 			checkStringPtr("PostalCode", originalCopy.PostalCode, tt.expectedFinal.PostalCode)
 			checkStringPtr("PhoneNumber", originalCopy.PhoneNumber, tt.expectedFinal.PhoneNumber)
 			checkStringPtr("TShirtSize", originalCopy.TShirtSize, tt.expectedFinal.TShirtSize)
+			checkStringPtr("Bio", originalCopy.Bio, tt.expectedFinal.Bio)
 		})
 	}
 }

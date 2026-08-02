@@ -298,6 +298,7 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 						PostalCode:         converters.StringPtr("94105"),
 						PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 						TShirtSize:         converters.StringPtr("M"),
+						Bio:                converters.StringPtr("Senior engineer and mentor"),
 						Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 						Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 					},
@@ -2225,6 +2226,7 @@ func compareUserMetadata(actual, expected *model.UserMetadata) bool {
 		compareStringPtr(actual.PostalCode, expected.PostalCode) &&
 		compareStringPtr(actual.PhoneNumber, expected.PhoneNumber) &&
 		compareStringPtr(actual.TShirtSize, expected.TShirtSize) &&
+		compareStringPtr(actual.Bio, expected.Bio) &&
 		compareStringPtr(actual.Zoneinfo, expected.Zoneinfo)
 }
 
