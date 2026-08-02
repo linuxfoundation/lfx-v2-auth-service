@@ -762,6 +762,56 @@ func TestUserReaderWriter_MetadataLookup(t *testing.T) {
 	}
 }
 
+func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
+	ctx := context.Background()
+
+	jwtConfig, privateKey := createTestJWTVerificationConfig(t)
+	jwtConfig.ExpectedAudiences = []string{"https://test.auth0.com/api/v2/", "https://lfx-api.example.org/"}
+
+	writer := &userReaderWriter{
+		config: Config{
+			JWTVerificationConfig: jwtConfig,
+		},
+	}
+
+	signToken := func(audience string) string {
+		claims := jwt.MapClaims{
+			"sub": "auth0|123456789",
+			"exp": time.Now().Add(time.Hour).Unix(),
+			"iat": time.Now().Unix(),
+			"iss": "https://test.auth0.com/",
+			"aud": audience,
+		}
+		tokenString, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(privateKey)
+		require.NoError(t, err)
+		return tokenString
+	}
+
+	t.Run("management-audience token is retained for Management API calls", func(t *testing.T) {
+		tokenString := signToken("https://test.auth0.com/api/v2/")
+		user, err := writer.MetadataLookup(ctx, tokenString)
+		require.NoError(t, err)
+		assert.Equal(t, "auth0|123456789", user.Sub)
+		assert.Equal(t, tokenString, user.Token, "management-audience token should be kept as bearer")
+	})
+
+	t.Run("LFX v2 API audience token verifies but is not forwarded", func(t *testing.T) {
+		tokenString := signToken("https://lfx-api.example.org/")
+		user, err := writer.MetadataLookup(ctx, tokenString)
+		require.NoError(t, err)
+		assert.Equal(t, "auth0|123456789", user.Sub)
+		assert.Equal(t, "auth0|123456789", user.UserID)
+		assert.Empty(t, user.Token, "non-management token must not be forwarded to the Management API")
+	})
+
+	t.Run("un-allow-listed audience is rejected", func(t *testing.T) {
+		tokenString := signToken("https://evil.example.org/")
+		_, err := writer.MetadataLookup(ctx, tokenString)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid audience")
+	})
+}
+
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
 	ctx := context.Background()
 
