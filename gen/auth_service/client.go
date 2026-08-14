@@ -15,15 +15,17 @@ import (
 
 // Client is the "auth-service" service client.
 type Client struct {
-	LivezEndpoint  goa.Endpoint
-	ReadyzEndpoint goa.Endpoint
+	LivezEndpoint            goa.Endpoint
+	ProvisionCdpUUIDEndpoint goa.Endpoint
+	ReadyzEndpoint           goa.Endpoint
 }
 
 // NewClient initializes a "auth-service" service client given the endpoints.
-func NewClient(livez, readyz goa.Endpoint) *Client {
+func NewClient(livez, provisionCdpUUID, readyz goa.Endpoint) *Client {
 	return &Client{
-		LivezEndpoint:  livez,
-		ReadyzEndpoint: readyz,
+		LivezEndpoint:            livez,
+		ProvisionCdpUUIDEndpoint: provisionCdpUUID,
+		ReadyzEndpoint:           readyz,
 	}
 }
 
@@ -35,6 +37,18 @@ func (c *Client) Livez(ctx context.Context) (res []byte, err error) {
 		return
 	}
 	return ires.([]byte), nil
+}
+
+// ProvisionCdpUUID calls the "provision-cdp-uuid" endpoint of the
+// "auth-service" service.
+// ProvisionCdpUUID may return the following errors:
+//   - "Unauthorized" (type Unauthorized)
+//   - "BadRequest" (type BadRequest)
+//   - "InternalServerError" (type InternalServerError)
+//   - error: internal error
+func (c *Client) ProvisionCdpUUID(ctx context.Context, p *ProvisionCdpUUIDPayload) (err error) {
+	_, err = c.ProvisionCdpUUIDEndpoint(ctx, p)
+	return
 }
 
 // Readyz calls the "readyz" endpoint of the "auth-service" service.

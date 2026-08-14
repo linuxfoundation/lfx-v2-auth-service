@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 
+	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	goahttp "goa.design/goa/v3/http"
 )
 
@@ -63,6 +64,103 @@ func DecodeLivezResponse(decoder func(*http.Response) goahttp.Decoder, restoreBo
 		default:
 			body, _ := io.ReadAll(resp.Body)
 			return nil, goahttp.ErrInvalidResponse("auth-service", "livez", resp.StatusCode, string(body))
+		}
+	}
+}
+
+// BuildProvisionCdpUUIDRequest instantiates a HTTP request object with method
+// and path set to call the "auth-service" service "provision-cdp-uuid" endpoint
+func (c *Client) BuildProvisionCdpUUIDRequest(ctx context.Context, v any) (*http.Request, error) {
+	u := &url.URL{Scheme: c.scheme, Host: c.host, Path: ProvisionCdpUUIDAuthServicePath()}
+	req, err := http.NewRequest("POST", u.String(), nil)
+	if err != nil {
+		return nil, goahttp.ErrInvalidURL("auth-service", "provision-cdp-uuid", u.String(), err)
+	}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	return req, nil
+}
+
+// EncodeProvisionCdpUUIDRequest returns an encoder for requests sent to the
+// auth-service provision-cdp-uuid server.
+func EncodeProvisionCdpUUIDRequest(encoder func(*http.Request) goahttp.Encoder) func(*http.Request, any) error {
+	return func(req *http.Request, v any) error {
+		p, ok := v.(*authservice.ProvisionCdpUUIDPayload)
+		if !ok {
+			return goahttp.ErrInvalidType("auth-service", "provision-cdp-uuid", "*authservice.ProvisionCdpUUIDPayload", v)
+		}
+		if p.Authorization != nil {
+			head := *p.Authorization
+			req.Header.Set("Authorization", head)
+		}
+		body := p.Body
+		if err := encoder(req).Encode(&body); err != nil {
+			return goahttp.ErrEncodingError("auth-service", "provision-cdp-uuid", err)
+		}
+		return nil
+	}
+}
+
+// DecodeProvisionCdpUUIDResponse returns a decoder for responses returned by
+// the auth-service provision-cdp-uuid endpoint. restoreBody controls whether
+// the response body should be restored after having been read.
+// DecodeProvisionCdpUUIDResponse may return the following errors:
+//   - "BadRequest" (type authservice.BadRequest): http.StatusBadRequest
+//   - "InternalServerError" (type authservice.InternalServerError): http.StatusInternalServerError
+//   - "Unauthorized" (type authservice.Unauthorized): http.StatusUnauthorized
+//   - error: internal error
+func DecodeProvisionCdpUUIDResponse(decoder func(*http.Response) goahttp.Decoder, restoreBody bool) func(*http.Response) (any, error) {
+	return func(resp *http.Response) (any, error) {
+		if restoreBody {
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			defer func() {
+				resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			}()
+		} else {
+			defer resp.Body.Close()
+		}
+		switch resp.StatusCode {
+		case http.StatusNoContent:
+			return nil, nil
+		case http.StatusBadRequest:
+			var (
+				body string
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("auth-service", "provision-cdp-uuid", err)
+			}
+			return nil, NewProvisionCdpUUIDBadRequest(body)
+		case http.StatusInternalServerError:
+			var (
+				body string
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("auth-service", "provision-cdp-uuid", err)
+			}
+			return nil, NewProvisionCdpUUIDInternalServerError(body)
+		case http.StatusUnauthorized:
+			var (
+				body string
+				err  error
+			)
+			err = decoder(resp).Decode(&body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("auth-service", "provision-cdp-uuid", err)
+			}
+			return nil, NewProvisionCdpUUIDUnauthorized(body)
+		default:
+			body, _ := io.ReadAll(resp.Body)
+			return nil, goahttp.ErrInvalidResponse("auth-service", "provision-cdp-uuid", resp.StatusCode, string(body))
 		}
 	}
 }

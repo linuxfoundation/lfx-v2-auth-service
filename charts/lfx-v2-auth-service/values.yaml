@@ -50,6 +50,28 @@ service:
   # port is the service port
   port: 8080
 
+# provisioningWebhook exposes the Auth0 Event Stream provisioning endpoint
+# through the platform gateway. This is the service's first inbound HTTP
+# surface beyond the health probes, so it is opt-in.
+provisioningWebhook:
+  enabled: false
+  # path is the exact route matched on the gateway
+  path: /webhooks/auth0/cdp-provisioning
+
+# lfx holds platform-wide values shared with the umbrella chart
+lfx:
+  # domain is the cluster domain, used to build the API hostname
+  domain: k8s.orb.local
+
+# parentGateway is the Gateway API gateway the HTTPRoute attaches to.
+# Deployed environments expose the API on the `websecure` HTTPS listener, which
+# is the only one accepting routes from other namespaces — this service runs in
+# `auth-service`, not alongside the gateway in `lfx`.
+parentGateway:
+  name: lfx-platform-gateway
+  sectionName: websecure
+  namespace: lfx
+
 # resources is the configuration for resource requests and limits
 resources:
   limits:
@@ -164,6 +186,20 @@ app:
     # Auth0 LFX One Client configuration (user-facing SSR app)
     ## Required for sending password reset links
     AUTH0_LFX_ONE_CLIENT_ID:
+      value: null
+
+    # CDP provisioning configuration
+    ## Required when provisioningWebhook.enabled is true. Without both of
+    ## these the webhook rejects deliveries with a 5xx, so Auth0 retries
+    ## rather than treating unconfigured events as handled.
+    CDP_BASE_URL:
+      value: null
+    CDP_AUDIENCE:
+      value: null
+    # The static bearer secret the Auth0 Event Stream presents. Supply it as a
+    # secretKeyRef at install time; the webhook destination supports no other
+    # form of authentication, so this value is the whole of its authorization.
+    PROVISIONING_WEBHOOK_SECRET:
       value: null
 
     # Authelia configuration

@@ -10,15 +10,18 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/authelia"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/mock"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/provisioning"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
@@ -175,6 +178,61 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 		log.Fatalf("unsupported user repository type: %s", userRepositoryType)
 		return nil // This will never be reached due to log.Fatalf, but satisfies the linter
 	}
+}
+
+// newProvisioningOrchestrator wires the CDP provisioning flow.
+//
+// It returns nil when the CDP configuration is absent, which leaves the webhook
+// answering 5xx. That is deliberate: an unconfigured deployment should make the
+// events retry rather than acknowledge deliveries it never acted on.
+func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator {
+	cdpBaseURL := os.Getenv(constants.CDPBaseURLEnvKey)
+	cdpAudience := os.Getenv(constants.CDPAudienceEnvKey)
+	if cdpBaseURL == "" || cdpAudience == "" {
+		slog.WarnContext(ctx, "CDP provisioning is not configured, the provisioning webhook will reject deliveries",
+			"has_base_url", cdpBaseURL != "",
+			"has_audience", cdpAudience != "",
+		)
+		return nil
+	}
+
+	auth0Tenant := os.Getenv(constants.Auth0TenantEnvKey)
+	auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
+	if auth0Domain == "" {
+		auth0Domain = fmt.Sprintf("%s.auth0.com", auth0Tenant)
+	}
+
+	auth0Config := auth0.Config{
+		Tenant: auth0Tenant,
+		Domain: auth0Domain,
+	}
+
+	// The Auth0 Management API and the CDP public API are different audiences,
+	// so each needs its own token manager and its own cache.
+	managementTokenManager, err := auth0.NewM2MTokenManager(ctx, auth0Config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create Auth0 M2M token manager for provisioning", "error", err)
+		return nil
+	}
+	auth0Config.M2MTokenManager = managementTokenManager
+
+	cdpTokenManager, err := auth0.NewM2MTokenManagerForAudience(ctx, auth0Config, cdpAudience)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create CDP M2M token manager", "error", err)
+		return nil
+	}
+
+	cdpClient := cdp.NewClient(cdp.Config{
+		BaseURL:      strings.TrimSuffix(cdpBaseURL, "/"),
+		TokenManager: cdpTokenManager,
+	})
+
+	slog.DebugContext(ctx, "CDP provisioning initialized", "cdp_base_url", cdpBaseURL)
+
+	return provisioning.NewOrchestrator(
+		provisioning.WithCDPClient(cdpClient),
+		provisioning.WithMetadataWriter(auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)),
+	)
 }
 
 // QueueSubscriptions starts all NATS subscriptions with the provided dependencies

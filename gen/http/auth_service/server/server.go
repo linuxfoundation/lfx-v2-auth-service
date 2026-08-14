@@ -18,9 +18,10 @@ import (
 
 // Server lists the auth-service service endpoint HTTP handlers.
 type Server struct {
-	Mounts []*MountPoint
-	Livez  http.Handler
-	Readyz http.Handler
+	Mounts           []*MountPoint
+	Livez            http.Handler
+	ProvisionCdpUUID http.Handler
+	Readyz           http.Handler
 }
 
 // MountPoint holds information about the mounted endpoints.
@@ -51,10 +52,12 @@ func New(
 	return &Server{
 		Mounts: []*MountPoint{
 			{"Livez", "GET", "/livez"},
+			{"ProvisionCdpUUID", "POST", "/webhooks/auth0/cdp-provisioning"},
 			{"Readyz", "GET", "/readyz"},
 		},
-		Livez:  NewLivezHandler(e.Livez, mux, decoder, encoder, errhandler, formatter),
-		Readyz: NewReadyzHandler(e.Readyz, mux, decoder, encoder, errhandler, formatter),
+		Livez:            NewLivezHandler(e.Livez, mux, decoder, encoder, errhandler, formatter),
+		ProvisionCdpUUID: NewProvisionCdpUUIDHandler(e.ProvisionCdpUUID, mux, decoder, encoder, errhandler, formatter),
+		Readyz:           NewReadyzHandler(e.Readyz, mux, decoder, encoder, errhandler, formatter),
 	}
 }
 
@@ -64,6 +67,7 @@ func (s *Server) Service() string { return "auth-service" }
 // Use wraps the server handlers with the given middleware.
 func (s *Server) Use(m func(http.Handler) http.Handler) {
 	s.Livez = m(s.Livez)
+	s.ProvisionCdpUUID = m(s.ProvisionCdpUUID)
 	s.Readyz = m(s.Readyz)
 }
 
@@ -73,6 +77,7 @@ func (s *Server) MethodNames() []string { return authservice.MethodNames[:] }
 // Mount configures the mux to serve the auth-service endpoints.
 func Mount(mux goahttp.Muxer, h *Server) {
 	MountLivezHandler(mux, h.Livez)
+	MountProvisionCdpUUIDHandler(mux, h.ProvisionCdpUUID)
 	MountReadyzHandler(mux, h.Readyz)
 }
 
@@ -113,6 +118,59 @@ func NewLivezHandler(
 		ctx = context.WithValue(ctx, goa.ServiceKey, "auth-service")
 		var err error
 		res, err := endpoint(ctx, nil)
+		if err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+		if err := encodeResponse(ctx, w, res); err != nil {
+			if errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+		}
+	})
+}
+
+// MountProvisionCdpUUIDHandler configures the mux to serve the "auth-service"
+// service "provision-cdp-uuid" endpoint.
+func MountProvisionCdpUUIDHandler(mux goahttp.Muxer, h http.Handler) {
+	f, ok := h.(http.HandlerFunc)
+	if !ok {
+		f = func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r)
+		}
+	}
+	mux.Handle("POST", "/webhooks/auth0/cdp-provisioning", f)
+}
+
+// NewProvisionCdpUUIDHandler creates a HTTP handler which loads the HTTP
+// request and calls the "auth-service" service "provision-cdp-uuid" endpoint.
+func NewProvisionCdpUUIDHandler(
+	endpoint goa.Endpoint,
+	mux goahttp.Muxer,
+	decoder func(*http.Request) goahttp.Decoder,
+	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
+	errhandler func(context.Context, http.ResponseWriter, error),
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
+) http.Handler {
+	var (
+		decodeRequest  = DecodeProvisionCdpUUIDRequest(mux, decoder)
+		encodeResponse = EncodeProvisionCdpUUIDResponse(encoder)
+		encodeError    = EncodeProvisionCdpUUIDError(encoder, formatter)
+	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), goahttp.AcceptTypeKey, r.Header.Get("Accept"))
+		ctx = context.WithValue(ctx, goa.MethodKey, "provision-cdp-uuid")
+		ctx = context.WithValue(ctx, goa.ServiceKey, "auth-service")
+		payload, err := decodeRequest(r)
+		if err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+		res, err := endpoint(ctx, payload)
 		if err != nil {
 			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)

@@ -6,3 +6,29 @@
 // $ goa gen github.com/linuxfoundation/lfx-v2-auth-service/cmd/server/design
 
 package client
+
+import (
+	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
+)
+
+// BuildProvisionCdpUUIDPayload builds the payload for the auth-service
+// provision-cdp-uuid endpoint from CLI flags.
+func BuildProvisionCdpUUIDPayload(authServiceProvisionCdpUUIDBody string, authServiceProvisionCdpUUIDAuthorization string) (*authservice.ProvisionCdpUUIDPayload, error) {
+	var body []byte
+	{
+		body = []byte(authServiceProvisionCdpUUIDBody)
+	}
+	var authorization *string
+	{
+		if authServiceProvisionCdpUUIDAuthorization != "" {
+			authorization = &authServiceProvisionCdpUUIDAuthorization
+		}
+	}
+	v := body
+	res := &authservice.ProvisionCdpUUIDPayload{
+		Body: v,
+	}
+	res.Authorization = authorization
+
+	return res, nil
+}

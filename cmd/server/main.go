@@ -84,7 +84,7 @@ func main() {
 	)
 
 	// Initialize the health service
-	authSvc := service.NewAuthService()
+	authSvc := service.NewAuthService(ctx)
 
 	// Wrap the service in endpoints
 	authEndpoints := authservice.NewEndpoints(authSvc)

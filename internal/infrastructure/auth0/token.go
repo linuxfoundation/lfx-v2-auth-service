@@ -177,9 +177,33 @@ func loadM2MConfigFromEnv(ctx context.Context, config Config) (m2mConfig, error)
 
 // NewM2MTokenManager creates a new M2M token manager using Auth0 SDK
 func NewM2MTokenManager(ctx context.Context, config Config) (*TokenManager, error) {
+	return newM2MTokenManager(ctx, config, "")
+}
+
+// NewM2MTokenManagerForAudience creates an M2M token manager for an audience
+// other than the one in the environment.
+//
+// The same client credentials mint tokens for several APIs — the Auth0
+// Management API and the CDP public API among them — and a token is only valid
+// for the audience it was minted for, so each audience needs its own manager
+// and its own cache.
+func NewM2MTokenManagerForAudience(ctx context.Context, config Config, audience string) (*TokenManager, error) {
+	if strings.TrimSpace(audience) == "" {
+		return nil, errors.NewUnexpected("audience is required")
+	}
+	return newM2MTokenManager(ctx, config, audience)
+}
+
+// newM2MTokenManager builds a token manager, optionally overriding the audience
+// loaded from the environment.
+func newM2MTokenManager(ctx context.Context, config Config, audienceOverride string) (*TokenManager, error) {
 	m2mConfig, err := loadM2MConfigFromEnv(ctx, config)
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to load M2M configuration", err)
+	}
+
+	if strings.TrimSpace(audienceOverride) != "" {
+		m2mConfig.Audience = audienceOverride
 	}
 
 	// Create Auth0 authentication client with private key assertion
