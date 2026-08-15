@@ -245,6 +245,24 @@ func TestReadProvisioningState(t *testing.T) {
 		assert.Len(t, transport.requests, 1, "the gate must cost one Auth0 call, not four")
 	})
 
+	t.Run("the username is ignored when the primary identity is not the database", func(t *testing.T) {
+		// The root username belongs to the primary identity. Handing another
+		// connection's username to CDP as an LFID would store a wrong id
+		// permanently, so this reports no username and the caller skips.
+		transport := &cdpMetadataTransport{getBody: `{
+			"user_id":"google-oauth2|1",
+			"username":"not-an-lfid",
+			"email_verified":true,
+			"identities":[{"connection":"google-oauth2"},{"connection":"Username-Password-Authentication"}]
+		}`}
+
+		state, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "google-oauth2|1")
+
+		require.NoError(t, err)
+		assert.True(t, state.HasDatabaseIdentity, "the linked database identity is still visible")
+		assert.Empty(t, state.Username, "but its username is not readable, so none is reported")
+	})
+
 	t.Run("a social-only user has no database identity", func(t *testing.T) {
 		transport := &cdpMetadataTransport{getBody: `{
 			"user_id":"google-oauth2|1",

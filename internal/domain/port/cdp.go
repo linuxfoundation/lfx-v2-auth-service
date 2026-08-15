@@ -28,7 +28,13 @@ type UserProvisioningState struct {
 	// EmailVerified is the user's current verification state.
 	EmailVerified bool
 
-	// Username is the LFID, present on database-connection users.
+	// Email is the user's current primary email, usable as a secondary
+	// resolve identifier only when EmailVerified is true.
+	Email string
+
+	// Username is the LFID. It is populated only when the user's primary
+	// identity is the database connection, since another connection's
+	// username is not an LFID.
 	Username string
 
 	// HasDatabaseIdentity reports whether the user holds an identity on the

@@ -179,9 +179,10 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 		return skip(reasonNoLFIDUsername), nil
 	}
 
-	// The email is a secondary identifier that only widens the match, and it
-	// is only usable because the read above confirmed verification.
-	memberID, result, err := o.findOrCreateMember(ctx, req, username, strings.TrimSpace(req.Email))
+	// The email is a secondary identifier that only widens the match, so it
+	// also comes from Auth0 rather than the payload — a forged one could widen
+	// the match onto somebody else's member.
+	memberID, result, err := o.findOrCreateMember(ctx, req, username, strings.TrimSpace(state.Email))
 	if err != nil {
 		return Result{}, err
 	}

@@ -19,6 +19,10 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
+// databaseUserIDPrefix is the Auth0 user-id prefix for a user whose primary
+// identity is the database connection.
+const databaseUserIDPrefix = "auth0|"
+
 // cdpMetadataPatch is the body for PATCH /api/v2/users/{id} when writing the
 // CDP enrichment keys.
 //
@@ -74,14 +78,29 @@ func (w *cdpMetadataWriter) ReadProvisioningState(ctx context.Context, userID st
 		return port.UserProvisioningState{}, errors.NewValidation("user_id is required")
 	}
 
-	user, err := w.getUser(ctx, userID, "app_metadata,email_verified,username,identities")
+	user, err := w.getUser(ctx, userID, "user_id,app_metadata,email,email_verified,username,identities")
 	if err != nil {
 		return port.UserProvisioningState{}, err
 	}
 
 	state := port.UserProvisioningState{
 		EmailVerified: user.EmailVerified,
-		Username:      user.Username,
+		Email:         user.Email,
+	}
+
+	// The root `username` belongs to the user's *primary* identity. Reading it
+	// for a user whose primary is social or enterprise would hand CDP another
+	// connection's username as though it were an LFID, and the resulting id is
+	// permanent. Auth0 gives database-connection users an `auth0|` id, so that
+	// prefix is what makes the root username safe to read.
+	//
+	// A social-primary user with a linked database identity is therefore left
+	// without a username here rather than given a wrong one: Auth0 does not
+	// expose a secondary identity's username on this record. Those users are
+	// skipped, and a later login heals them.
+	primaryIsDatabase := strings.HasPrefix(user.UserID, databaseUserIDPrefix)
+	if primaryIsDatabase {
+		state.Username = user.Username
 	}
 	if user.AppMetadata != nil {
 		state.CDPMetadata = port.CDPMetadata{
