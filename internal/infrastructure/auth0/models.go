@@ -17,6 +17,7 @@ type Auth0User struct {
 	UserID         string             `json:"user_id"`
 	Username       string             `json:"username"`
 	Email          string             `json:"email"`
+	Name           string             `json:"name"`
 	EmailVerified  bool               `json:"email_verified"`
 	FamilyName     string             `json:"family_name"`
 	GivenName      string             `json:"given_name"`

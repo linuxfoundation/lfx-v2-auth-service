@@ -82,6 +82,7 @@ const (
 	reasonAlreadyProvisioned = "already-has-cdp-uuid"
 	reasonNoDatabaseIdentity = "no-database-identity"
 	reasonNoLFIDUsername     = "missing-lfid-username"
+	reasonUserNotFound       = "user-not-found"
 	reasonConflict           = "cdp-identity-conflict"
 )
 
@@ -151,6 +152,12 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 	// current than a snapshot taken when the event was queued.
 	state, err := o.metadata.ReadProvisioningState(ctx, req.UserID)
 	if err != nil {
+		// A deleted user is a permanent answer. Surfacing it as a failure
+		// would have Auth0 redeliver the event until the stream gives up.
+		var notFound errs.NotFound
+		if errors.As(err, &notFound) {
+			return skip(reasonUserNotFound), nil
+		}
 		return Result{}, err
 	}
 
@@ -182,7 +189,7 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 	// The email is a secondary identifier that only widens the match, so it
 	// also comes from Auth0 rather than the payload — a forged one could widen
 	// the match onto somebody else's member.
-	memberID, result, err := o.findOrCreateMember(ctx, req, username, strings.TrimSpace(state.Email))
+	memberID, result, err := o.findOrCreateMember(ctx, req, state, username)
 	if err != nil {
 		return Result{}, err
 	}
@@ -215,7 +222,9 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 //
 // An empty member id with a nil error means the attempt ended in a skip, which
 // the returned Result describes.
-func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, username, email string) (string, Result, error) {
+func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, state port.UserProvisioningState, username string) (string, Result, error) {
+	email := strings.TrimSpace(state.Email)
+
 	resolved, err := o.cdpClient.Resolve(ctx, username, email)
 	if err != nil {
 		return "", Result{}, err
@@ -238,7 +247,7 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, user
 	}
 
 	// No member: create one seeded with the LFID identity.
-	created, err := o.cdpClient.CreateMember(ctx, displayName(req, username), lfidIdentity(username))
+	created, err := o.cdpClient.CreateMember(ctx, displayName(state, username), lfidIdentity(username))
 	if err != nil {
 		return "", Result{}, err
 	}
@@ -276,9 +285,12 @@ func lfidIdentity(username string) cdp.Identity {
 	}
 }
 
-// displayName falls back to the username when the event carries no name.
-func displayName(req Request, username string) string {
-	if name := strings.TrimSpace(req.DisplayName); name != "" {
+// displayName falls back to the username when Auth0 holds no name.
+//
+// Taken from the Auth0 record rather than the event: a forged payload could
+// otherwise put an attacker-chosen name on a real person's new CDP member.
+func displayName(state port.UserProvisioningState, username string) string {
+	if name := strings.TrimSpace(state.Name); name != "" {
 		return name
 	}
 	return username

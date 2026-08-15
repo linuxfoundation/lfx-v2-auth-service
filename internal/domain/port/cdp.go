@@ -32,6 +32,9 @@ type UserProvisioningState struct {
 	// resolve identifier only when EmailVerified is true.
 	Email string
 
+	// Name is the user's display name, used to seed a new CDP member.
+	Name string
+
 	// Username is the LFID. It is populated only when the user's primary
 	// identity is the database connection, since another connection's
 	// username is not an LFID.

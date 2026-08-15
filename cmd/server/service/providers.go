@@ -199,6 +199,10 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 	auth0Tenant := os.Getenv(constants.Auth0TenantEnvKey)
 	auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
 	if auth0Domain == "" {
+		if auth0Tenant == "" {
+			slog.ErrorContext(ctx, "CDP provisioning needs an Auth0 tenant or domain, disabling it")
+			return nil
+		}
 		auth0Domain = fmt.Sprintf("%s.auth0.com", auth0Tenant)
 	}
 
@@ -229,9 +233,15 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 
 	slog.DebugContext(ctx, "CDP provisioning initialized", "cdp_base_url", cdpBaseURL)
 
+	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create the CDP metadata writer", "error", err)
+		return nil
+	}
+
 	return provisioning.NewOrchestrator(
 		provisioning.WithCDPClient(cdpClient),
-		provisioning.WithMetadataStore(auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)),
+		provisioning.WithMetadataStore(metadataStore),
 	)
 }
 

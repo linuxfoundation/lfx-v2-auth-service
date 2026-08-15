@@ -29,6 +29,8 @@ type mockCDPClient struct {
 	attachCalls  int
 	attachedTo   string
 	resolvedLFID string
+
+	createdDisplayName string
 }
 
 func (m *mockCDPClient) Resolve(_ context.Context, lfid string, _ string) (cdp.ResolveResult, error) {
@@ -47,8 +49,9 @@ func (m *mockCDPClient) Resolve(_ context.Context, lfid string, _ string) (cdp.R
 	return m.resolveResults[index], nil
 }
 
-func (m *mockCDPClient) CreateMember(_ context.Context, _ string, _ cdp.Identity) (cdp.CreateResult, error) {
+func (m *mockCDPClient) CreateMember(_ context.Context, displayName string, _ cdp.Identity) (cdp.CreateResult, error) {
 	m.createCalls++
+	m.createdDisplayName = displayName
 	return m.createResult, m.createErr
 }
 
@@ -236,6 +239,20 @@ func TestProvisionGate(t *testing.T) {
 		assert.Equal(t, "real-lfid", client.resolvedLFID)
 	})
 
+	t.Run("a deleted user is a terminal skip, not a retry", func(t *testing.T) {
+		// Redelivering cannot bring the user back, so a 5xx here would have
+		// Auth0 retry until the stream disables itself.
+		client := &mockCDPClient{}
+		store := &mockMetadataStore{stateErr: errs.NewNotFound("user not found")}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonUserNotFound, result.Reason)
+		assert.Zero(t, client.resolveCalls)
+	})
+
 	t.Run("an Auth0 read failure is retryable and writes nothing", func(t *testing.T) {
 		client := &mockCDPClient{}
 		store := &mockMetadataStore{stateErr: assert.AnError}
@@ -276,6 +293,29 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, "auth0|1", store.userID)
 		assert.Equal(t, "mem-1", store.written.UUID, "the stored uuid is lowercased")
 		assert.Equal(t, constants.CDPUUIDSourceProvisioning, store.written.Source)
+	})
+
+	t.Run("the created member is named from Auth0, not from the payload", func(t *testing.T) {
+		// A forged payload could otherwise put an attacker-chosen name on a
+		// real person's new CDP member.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeNoMatch}},
+			createResult:   cdp.CreateResult{Outcome: cdp.OutcomeFound, MemberID: "new-1"},
+		}
+		store := &mockMetadataStore{state: &port.UserProvisioningState{
+			EmailVerified:       true,
+			Username:            "psmith",
+			Name:                "Real Name",
+			HasDatabaseIdentity: true,
+		}}
+
+		request := verifiedRequest()
+		request.DisplayName = "Attacker Chosen"
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, request)
+
+		require.NoError(t, err)
+		assert.Equal(t, "Real Name", client.createdDisplayName)
 	})
 
 	t.Run("no member creates one and writes it back", func(t *testing.T) {

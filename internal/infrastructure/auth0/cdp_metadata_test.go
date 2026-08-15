@@ -22,10 +22,10 @@ import (
 // every request, so a test can assert both the write-once decision and whether
 // a PATCH was issued at all.
 type cdpMetadataTransport struct {
-	getBody    string
-	getStatus  int
-	patchStaus int
-	requests   []cdpRecordedRequest
+	getBody     string
+	getStatus   int
+	patchStatus int
+	requests    []cdpRecordedRequest
 }
 
 type cdpRecordedRequest struct {
@@ -44,7 +44,7 @@ func (c *cdpMetadataTransport) RoundTrip(req *http.Request) (*http.Response, err
 	status := c.getStatus
 	body := c.getBody
 	if req.Method == http.MethodPatch {
-		status = c.patchStaus
+		status = c.patchStatus
 		body = "{}"
 	}
 	if status == 0 {
@@ -72,13 +72,31 @@ func (c *cdpMetadataTransport) patches() []cdpRecordedRequest {
 }
 
 func newTestCDPWriter(transport http.RoundTripper) port.CDPMetadataReaderWriter {
-	return NewCDPMetadataWriter(
+	writer, err := NewCDPMetadataWriter(
 		httpclient.Config{Transport: transport, MaxRetries: 0},
 		Config{
 			Domain:          "test-tenant.auth0.com",
 			M2MTokenManager: &TokenManager{tokenSource: fakeTokenSource{token: "test-m2m-token"}},
 		},
 	)
+	if err != nil {
+		panic(err)
+	}
+	return writer
+}
+
+func TestNewCDPMetadataWriterValidation(t *testing.T) {
+	t.Run("a missing token manager is refused at construction", func(t *testing.T) {
+		_, err := NewCDPMetadataWriter(httpclient.DefaultConfig(), Config{Domain: "test.auth0.com"})
+		require.Error(t, err, "misconfiguration must surface here, not as a panic on the first request")
+	})
+
+	t.Run("a missing domain is refused at construction", func(t *testing.T) {
+		_, err := NewCDPMetadataWriter(httpclient.DefaultConfig(), Config{
+			M2MTokenManager: &TokenManager{tokenSource: fakeTokenSource{token: "t"}},
+		})
+		require.Error(t, err)
+	})
 }
 
 func TestWriteCDPMetadataWriteOnce(t *testing.T) {
@@ -230,6 +248,7 @@ func TestReadProvisioningState(t *testing.T) {
 		transport := &cdpMetadataTransport{getBody: `{
 			"user_id":"auth0|1",
 			"username":"psmith",
+			"name":"P. Smith",
 			"email_verified":true,
 			"identities":[{"connection":"google-oauth2"},{"connection":"Username-Password-Authentication"}],
 			"app_metadata":{"cdp_uuid":"uuid-1","cdp_uuid_source":"backfill"}
@@ -241,6 +260,7 @@ func TestReadProvisioningState(t *testing.T) {
 		assert.True(t, state.EmailVerified)
 		assert.Equal(t, "psmith", state.Username)
 		assert.True(t, state.HasDatabaseIdentity)
+		assert.Equal(t, "P. Smith", state.Name)
 		assert.Equal(t, "uuid-1", state.UUID)
 		assert.Len(t, transport.requests, 1, "the gate must cost one Auth0 call, not four")
 	})

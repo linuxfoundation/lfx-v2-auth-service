@@ -42,11 +42,18 @@ type cdpMetadataWriter struct {
 
 // NewCDPMetadataWriter creates the Auth0 `app_metadata` writer for the CDP
 // enrichment keys.
-func NewCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) port.CDPMetadataReaderWriter {
+func NewCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) (port.CDPMetadataReaderWriter, error) {
+	if auth0Config.M2MTokenManager == nil {
+		return nil, errors.NewUnexpected("M2M token manager is required")
+	}
+	if strings.TrimSpace(auth0Config.Domain) == "" {
+		return nil, errors.NewUnexpected("Auth0 domain is required")
+	}
+
 	return &cdpMetadataWriter{
 		httpClient: httpclient.NewClient(httpConfig),
 		config:     auth0Config,
-	}
+	}, nil
 }
 
 // ReadCDPMetadata returns the user's current CDP enrichment record.
@@ -78,7 +85,7 @@ func (w *cdpMetadataWriter) ReadProvisioningState(ctx context.Context, userID st
 		return port.UserProvisioningState{}, errors.NewValidation("user_id is required")
 	}
 
-	user, err := w.getUser(ctx, userID, "user_id,app_metadata,email,email_verified,username,identities")
+	user, err := w.getUser(ctx, userID, "user_id,app_metadata,email,email_verified,username,name,identities")
 	if err != nil {
 		return port.UserProvisioningState{}, err
 	}
@@ -86,6 +93,7 @@ func (w *cdpMetadataWriter) ReadProvisioningState(ctx context.Context, userID st
 	state := port.UserProvisioningState{
 		EmailVerified: user.EmailVerified,
 		Email:         user.Email,
+		Name:          user.Name,
 	}
 
 	// The root `username` belongs to the user's *primary* identity. Reading it
@@ -152,14 +160,20 @@ func (w *cdpMetadataWriter) getUser(ctx context.Context, userID, fields string) 
 	return user, nil
 }
 
-// WriteCDPMetadata writes the CDP enrichment keys, enforcing that a stored
-// `cdp_uuid` is write-once.
+// WriteCDPMetadata writes the CDP enrichment keys, rejecting a change to a
+// stored `cdp_uuid`.
 //
 // Absent to present is the only legal transition for the UUID itself: changing
 // one to a different value, or clearing one, is rejected. `source` and
 // `checked_at` stay freely updatable, which is what lets a re-check refresh the
 // timestamp without touching the identity. Rejections are logged and counted —
 // they mean a caller's own guard is wrong, not that the data is.
+//
+// **Best-effort, not atomic.** The read below and the patch are two Management
+// API calls, and the login Action writes the same keys directly, so two writers
+// can both observe an absent UUID and both proceed. Auth0 offers no
+// compare-and-set on `app_metadata`, so this cannot be closed here — it catches
+// the common case, and the residual window is tracked against the release gate.
 func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string, record port.CDPMetadata) error {
 	if strings.TrimSpace(userID) == "" {
 		return errors.NewValidation("user_id is required")

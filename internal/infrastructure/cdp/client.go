@@ -229,14 +229,14 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 	if errCall != nil {
 		if statusCode == http.StatusConflict {
 			slog.InfoContext(ctx, "CDP identity already attached to member",
-				"member_id", memberID,
+				"member_id", redaction.Redact(memberID),
 			)
 			return nil
 		}
 		slog.ErrorContext(ctx, "CDP identity attach failed",
 			"error", errCall,
 			"status_code", statusCode,
-			"member_id", memberID,
+			"member_id", redaction.Redact(memberID),
 		)
 		return errors.NewUnexpected("CDP identity attach failed", errCall)
 	}

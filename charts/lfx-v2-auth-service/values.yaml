@@ -55,8 +55,6 @@ service:
 # surface beyond the health probes, so it is opt-in.
 provisioningWebhook:
   enabled: false
-  # path is the exact route matched on the gateway
-  path: /webhooks/auth0/cdp-provisioning
 
 # lfx holds platform-wide values shared with the umbrella chart
 lfx:

@@ -54,7 +54,6 @@ func TestProvisionCdpUUIDAuthorization(t *testing.T) {
 		{name: "missing header", header: nil, secret: testSecret},
 		{name: "wrong secret", header: strptr("Bearer nope"), secret: testSecret},
 		{name: "empty bearer", header: strptr("Bearer "), secret: testSecret},
-		{name: "secret not configured", header: strptr("Bearer " + testSecret), secret: ""},
 	}
 
 	for _, tt := range tests {
@@ -72,6 +71,22 @@ func TestProvisionCdpUUIDAuthorization(t *testing.T) {
 			assert.Zero(t, provisioner.calls, "an unauthorized request must not reach provisioning")
 		})
 	}
+
+	t.Run("an unconfigured secret asks for redelivery rather than rejecting", func(t *testing.T) {
+		// Our misconfiguration, not the caller's. A 401 would tell Auth0 to
+		// stop retrying and the events would be lost for its duration.
+		provisioner := &stubProvisioner{}
+		svc := newTestAuthService(provisioner, "")
+
+		err := svc.ProvisionCdpUUID(ctx, &authservice.ProvisionCdpUUIDPayload{
+			Authorization: strptr("Bearer " + testSecret),
+			Body:          validBody(),
+		})
+
+		var internal authservice.InternalServerError
+		require.ErrorAs(t, err, &internal)
+		assert.Zero(t, provisioner.calls)
+	})
 
 	t.Run("the configured secret is accepted", func(t *testing.T) {
 		provisioner := &stubProvisioner{result: provisioning.Result{Outcome: provisioning.OutcomeProvisioned}}

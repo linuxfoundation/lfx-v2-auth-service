@@ -25,7 +25,7 @@ spec:
     - matches:
         - path:
             type: Exact
-            value: {{ .Values.provisioningWebhook.path }}
+            value: /webhooks/auth0/cdp-provisioning
           method: POST
       backendRefs:
         - group: ""

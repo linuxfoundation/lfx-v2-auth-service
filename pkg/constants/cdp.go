@@ -13,8 +13,13 @@ const (
 	// CDPUUIDKey holds the resolved CDP member id.
 	CDPUUIDKey = "cdp_uuid"
 
-	// CDPUUIDSourceKey records which path produced the record. Its presence,
-	// with or without a UUID, is what marks a user as already processed.
+	// CDPUUIDSourceKey records which path produced the record. It is present
+	// even when no member was found, which is what lets the login path
+	// suppress a re-check for the TTL.
+	//
+	// It does NOT mark a user as finished: provisioning gates on the UUID, so
+	// somebody previously recorded as having no CDP member is retried once
+	// they verify their email and become eligible.
 	CDPUUIDSourceKey = "cdp_uuid_source"
 
 	// CDPUUIDCheckedAtKey is the RFC3339 timestamp of the last CDP check.

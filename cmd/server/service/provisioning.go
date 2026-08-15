@@ -6,8 +6,10 @@ package service
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
@@ -27,14 +29,24 @@ func (s *authService) ProvisionCdpUUID(ctx context.Context, payload *authservice
 		return authservice.BadRequest("empty request")
 	}
 
+	// An unconfigured secret is our fault, not the caller's. Answering 401
+	// would tell Auth0 to stop retrying and the events would be lost for the
+	// duration of the misconfiguration.
+	if s.provisioningSecret == "" {
+		slog.ErrorContext(ctx, "provisioning webhook secret is not configured, rejecting request")
+		return authservice.InternalServerError("provisioning is not available")
+	}
 	if !s.authorizeWebhook(ctx, payload.Authorization) {
 		return authservice.Unauthorized("invalid or missing bearer secret")
 	}
 
-	// Logged before any field is read, so a field path that does not match the
-	// real payload shows up as data rather than as a silently empty struct.
+	// The shape is logged, not the contents: an Auth0 user event carries email,
+	// username and user id in cleartext, and redaction only masks
+	// token-shaped substrings. Keys are enough to tell a field-path mismatch
+	// from a genuinely absent field, which is what this trace is for.
 	slog.DebugContext(ctx, "received Auth0 provisioning event",
-		"raw_body", redaction.RedactJWTs(string(payload.Body)),
+		"body_bytes", len(payload.Body),
+		"body_keys", topLevelKeys(payload.Body),
 	)
 
 	event, user, err := provisioning.ParseEvent(payload.Body)
@@ -104,9 +116,8 @@ func (s *authService) ProvisionCdpUUID(ctx context.Context, payload *authservice
 // one in constant time.
 func (s *authService) authorizeWebhook(ctx context.Context, header *string) bool {
 	if s.provisioningSecret == "" {
-		// Refusing every request is the safe failure here: a missing secret
-		// must not silently turn the endpoint into an open one.
-		slog.ErrorContext(ctx, "provisioning webhook secret is not configured, rejecting request")
+		// Checked by the caller, which answers 5xx rather than 4xx. Repeated
+		// here so this can never authorize against an empty secret.
 		return false
 	}
 	if header == nil {
@@ -120,6 +131,24 @@ func (s *authService) authorizeWebhook(ctx context.Context, header *string) bool
 	}
 
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.provisioningSecret)) == 1
+}
+
+// topLevelKeys returns the top-level keys of a JSON object body, or nil when
+// it is not one. Used to make a field-path mismatch visible without logging
+// any of the user data the body carries.
+func topLevelKeys(body []byte) []string {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	return keys
 }
 
 // countProvisioningEvent emits the delivery counter trace.

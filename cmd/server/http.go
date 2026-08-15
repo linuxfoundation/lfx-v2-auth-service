@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -29,7 +30,7 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	// Other encodings can be used by providing the corresponding functions,
 	// see goa.design/implement/encoding.
 	var (
-		dec = goahttp.RequestDecoder
+		dec = requestDecoder
 		enc = goahttp.ResponseEncoder
 	)
 
@@ -85,11 +86,13 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	// Wrap the multiplexer with additional middlewares. Middlewares mounted
 	// here apply to all the service endpoints.
 	var handler http.Handler = mux
-	handler = limitRequestBody(handler)
 	if dbg {
 		// Log query and response bodies if debug logs are enabled.
 		handler = debug.HTTP()(handler)
 	}
+	// Applied last so it wraps everything above, including the debug handler —
+	// otherwise that reads the body before the cap takes effect.
+	handler = limitRequestBody(handler)
 	// Wrap the handler with OpenTelemetry instrumentation
 	handler = otelhttp.NewHandler(handler, "auth-service",
 		otelhttp.WithFilter(func(r *http.Request) bool {
@@ -131,6 +134,43 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 			errc <- err
 		}
 	}()
+}
+
+// rawBodyDecoder reads a request body verbatim when the target is a byte
+// slice, and defers to goa's usual decoder otherwise.
+//
+// A goa `Bytes` payload is decoded with encoding/json, which accepts only a
+// base64 string for that target — so a plain JSON body fails to decode before
+// any handler runs. The provisioning webhook receives Auth0's own JSON and
+// parses it itself, precisely because the exact shape is not pinned down, so
+// it needs the bytes as sent.
+type rawBodyDecoder struct {
+	request *http.Request
+}
+
+// Decode implements goahttp.Decoder.
+func (d rawBodyDecoder) Decode(v any) error {
+	target, ok := v.(*[]byte)
+	if !ok {
+		return goahttp.RequestDecoder(d.request).Decode(v)
+	}
+
+	body, err := io.ReadAll(d.request.Body)
+	if err != nil {
+		return err
+	}
+	if len(body) == 0 {
+		// goa maps io.EOF to a missing-payload error.
+		return io.EOF
+	}
+
+	*target = body
+	return nil
+}
+
+// requestDecoder returns the decoder used for every inbound request.
+func requestDecoder(r *http.Request) goahttp.Decoder {
+	return rawBodyDecoder{request: r}
 }
 
 // maxRequestBodyBytes caps an inbound request body. Auth0 user events are a
