@@ -51,32 +51,9 @@ func (w *cdpMetadataWriter) ReadCDPMetadata(ctx context.Context, userID string) 
 		return port.CDPMetadata{}, errors.NewValidation("user_id is required")
 	}
 
-	token, err := w.config.M2MTokenManager.GetToken(ctx)
+	user, err := w.getUser(ctx, userID, "app_metadata")
 	if err != nil {
-		return port.CDPMetadata{}, errors.NewUnexpected("failed to get M2M token to read CDP metadata", err)
-	}
-
-	request := httpclient.NewAPIRequest(
-		w.httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s?fields=app_metadata&include_fields=true",
-			w.config.Domain, url.PathEscape(userID))),
-		httpclient.WithToken(token),
-		httpclient.WithDescription("read CDP app_metadata"),
-	)
-
-	var user Auth0User
-	statusCode, errCall := request.Call(ctx, &user)
-	if errCall != nil {
-		if statusCode == http.StatusNotFound {
-			return port.CDPMetadata{}, errors.NewNotFound("user not found")
-		}
-		slog.ErrorContext(ctx, "failed to read CDP app_metadata",
-			"error", errCall,
-			"status_code", statusCode,
-			"user_id", redaction.Redact(userID),
-		)
-		return port.CDPMetadata{}, errors.NewUnexpected("failed to read CDP app_metadata", errCall)
+		return port.CDPMetadata{}, err
 	}
 
 	if user.AppMetadata == nil {
@@ -88,6 +65,72 @@ func (w *cdpMetadataWriter) ReadCDPMetadata(ctx context.Context, userID string) 
 		Source:    user.AppMetadata.CDPUUIDSource,
 		CheckedAt: user.AppMetadata.CDPUUIDCheckedAt,
 	}, nil
+}
+
+// ReadProvisioningState returns the authoritative fields the provisioning gate
+// depends on, in a single Management API call.
+func (w *cdpMetadataWriter) ReadProvisioningState(ctx context.Context, userID string) (port.UserProvisioningState, error) {
+	if strings.TrimSpace(userID) == "" {
+		return port.UserProvisioningState{}, errors.NewValidation("user_id is required")
+	}
+
+	user, err := w.getUser(ctx, userID, "app_metadata,email_verified,username,identities")
+	if err != nil {
+		return port.UserProvisioningState{}, err
+	}
+
+	state := port.UserProvisioningState{
+		EmailVerified: user.EmailVerified,
+		Username:      user.Username,
+	}
+	if user.AppMetadata != nil {
+		state.CDPMetadata = port.CDPMetadata{
+			UUID:      user.AppMetadata.CDPUUID,
+			Source:    user.AppMetadata.CDPUUIDSource,
+			CheckedAt: user.AppMetadata.CDPUUIDCheckedAt,
+		}
+	}
+	for _, identity := range user.Identities {
+		if identity.Connection == constants.DatabaseConnection {
+			state.HasDatabaseIdentity = true
+			break
+		}
+	}
+
+	return state, nil
+}
+
+// getUser fetches the requested fields of an Auth0 user.
+func (w *cdpMetadataWriter) getUser(ctx context.Context, userID, fields string) (Auth0User, error) {
+	token, err := w.config.M2MTokenManager.GetToken(ctx)
+	if err != nil {
+		return Auth0User{}, errors.NewUnexpected("failed to get M2M token to read user", err)
+	}
+
+	request := httpclient.NewAPIRequest(
+		w.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s?fields=%s&include_fields=true",
+			w.config.Domain, url.PathEscape(userID), url.QueryEscape(fields))),
+		httpclient.WithToken(token),
+		httpclient.WithDescription("read user for CDP provisioning"),
+	)
+
+	var user Auth0User
+	statusCode, errCall := request.Call(ctx, &user)
+	if errCall != nil {
+		if statusCode == http.StatusNotFound {
+			return Auth0User{}, errors.NewNotFound("user not found")
+		}
+		slog.ErrorContext(ctx, "failed to read user for CDP provisioning",
+			"error", errCall,
+			"status_code", statusCode,
+			"user_id", redaction.Redact(userID),
+		)
+		return Auth0User{}, errors.NewUnexpected("failed to read user", errCall)
+	}
+
+	return user, nil
 }
 
 // WriteCDPMetadata writes the CDP enrichment keys, enforcing that a stored

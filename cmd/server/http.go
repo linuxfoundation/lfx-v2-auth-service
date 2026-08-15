@@ -85,6 +85,7 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	// Wrap the multiplexer with additional middlewares. Middlewares mounted
 	// here apply to all the service endpoints.
 	var handler http.Handler = mux
+	handler = limitRequestBody(handler)
 	if dbg {
 		// Log query and response bodies if debug logs are enabled.
 		handler = debug.HTTP()(handler)
@@ -130,6 +131,27 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 			errc <- err
 		}
 	}()
+}
+
+// maxRequestBodyBytes caps an inbound request body. Auth0 user events are a
+// few KB; this leaves generous headroom while keeping a single request far
+// below the pod's memory limit.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+// limitRequestBody caps how much of a request body the server will read.
+//
+// The generated transport decodes the whole body before any handler runs, so
+// the provisioning webhook's bearer check happens after the allocation. That
+// endpoint is reachable from the internet and unauthenticated at the edge by
+// design, which would otherwise let an unauthenticated caller size the
+// allocation.
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // errorHandler returns a function that writes and logs the given error.

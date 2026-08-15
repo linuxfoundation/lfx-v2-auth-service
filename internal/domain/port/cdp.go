@@ -16,9 +16,33 @@ type CDPMetadata struct {
 	CheckedAt string
 }
 
+// UserProvisioningState is the authoritative view of a user, read from Auth0
+// rather than taken from an event payload.
+//
+// A webhook body is only as trustworthy as the shared secret in front of it,
+// and the fields below decide whether this service writes to CDP on a user's
+// behalf — so they are re-read before any write rather than believed.
+type UserProvisioningState struct {
+	CDPMetadata
+
+	// EmailVerified is the user's current verification state.
+	EmailVerified bool
+
+	// Username is the LFID, present on database-connection users.
+	Username string
+
+	// HasDatabaseIdentity reports whether the user holds an identity on the
+	// Auth0 database connection.
+	HasDatabaseIdentity bool
+}
+
 // CDPMetadataReader reads a user's stored CDP enrichment record.
 type CDPMetadataReader interface {
 	ReadCDPMetadata(ctx context.Context, userID string) (CDPMetadata, error)
+
+	// ReadProvisioningState returns the fields the provisioning gate depends
+	// on, in one call.
+	ReadProvisioningState(ctx context.Context, userID string) (UserProvisioningState, error)
 }
 
 // CDPMetadataWriter writes a user's CDP enrichment record.

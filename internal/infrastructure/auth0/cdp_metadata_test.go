@@ -222,3 +222,56 @@ func TestReadCDPMetadata(t *testing.T) {
 		assert.Empty(t, transport.requests)
 	})
 }
+
+func TestReadProvisioningState(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("returns the fields the gate depends on in one call", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{
+			"user_id":"auth0|1",
+			"username":"psmith",
+			"email_verified":true,
+			"identities":[{"connection":"google-oauth2"},{"connection":"Username-Password-Authentication"}],
+			"app_metadata":{"cdp_uuid":"uuid-1","cdp_uuid_source":"backfill"}
+		}`}
+
+		state, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "auth0|1")
+
+		require.NoError(t, err)
+		assert.True(t, state.EmailVerified)
+		assert.Equal(t, "psmith", state.Username)
+		assert.True(t, state.HasDatabaseIdentity)
+		assert.Equal(t, "uuid-1", state.UUID)
+		assert.Len(t, transport.requests, 1, "the gate must cost one Auth0 call, not four")
+	})
+
+	t.Run("a social-only user has no database identity", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{
+			"user_id":"google-oauth2|1",
+			"email_verified":true,
+			"identities":[{"connection":"google-oauth2"}]
+		}`}
+
+		state, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "google-oauth2|1")
+
+		require.NoError(t, err)
+		assert.False(t, state.HasDatabaseIdentity)
+	})
+
+	t.Run("an unverified user reports as unverified", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","email_verified":false}`}
+
+		state, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "auth0|1")
+
+		require.NoError(t, err)
+		assert.False(t, state.EmailVerified)
+	})
+
+	t.Run("a missing user is a not-found error", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getStatus: http.StatusNotFound}
+
+		_, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "auth0|missing")
+
+		require.Error(t, err)
+	})
+}

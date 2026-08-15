@@ -91,8 +91,8 @@ type Orchestrator interface {
 }
 
 type orchestrator struct {
-	cdpClient      cdp.Client
-	metadataWriter port.CDPMetadataWriter
+	cdpClient cdp.Client
+	metadata  port.CDPMetadataReaderWriter
 }
 
 // Option configures the orchestrator.
@@ -105,10 +105,10 @@ func WithCDPClient(client cdp.Client) Option {
 	}
 }
 
-// WithMetadataWriter sets the Auth0 `app_metadata` writer.
-func WithMetadataWriter(writer port.CDPMetadataWriter) Option {
+// WithMetadataStore sets the Auth0 `app_metadata` reader/writer.
+func WithMetadataStore(store port.CDPMetadataReaderWriter) Option {
 	return func(o *orchestrator) {
-		o.metadataWriter = writer
+		o.metadata = store
 	}
 }
 
@@ -127,28 +127,48 @@ func NewOrchestrator(options ...Option) Orchestrator {
 // A returned error means the attempt is worth retrying and the caller should
 // answer with a 5xx; a skip is a final answer and must not be redelivered.
 func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, error) {
-	if o.cdpClient == nil || o.metadataWriter == nil {
+	if o.cdpClient == nil || o.metadata == nil {
 		return Result{}, errs.NewUnexpected("provisioning orchestrator is not fully configured")
 	}
 	if strings.TrimSpace(req.UserID) == "" {
 		return Result{}, errs.NewValidation("user_id is required")
 	}
 
+	// Cheap pre-filter on the event payload. Most deliveries are ordinary user
+	// updates that fail this, and skipping them here keeps the authoritative
+	// read below off the common path.
+	if !req.EmailVerified || strings.TrimSpace(req.StoredCDPUUID) != "" {
+		if !req.EmailVerified {
+			return skip(reasonEmailNotVerified), nil
+		}
+		return skip(reasonAlreadyProvisioned), nil
+	}
+
+	// Re-read from Auth0 before deciding anything. The payload arrives behind
+	// a shared static secret, which proves who sent the request but not that
+	// the fields are true — and these fields decide whether this service
+	// writes to CDP on a user's behalf. The stored record is also more
+	// current than a snapshot taken when the event was queued.
+	state, err := o.metadata.ReadProvisioningState(ctx, req.UserID)
+	if err != nil {
+		return Result{}, err
+	}
+
 	// The gate. Both halves are required: `user.updated` fires on every user
 	// record mutation, including this flow's own write-back, so gating on
 	// verification alone would make provisioning re-trigger on itself.
-	if !req.EmailVerified {
+	if !state.EmailVerified {
 		return skip(reasonEmailNotVerified), nil
 	}
-	if strings.TrimSpace(req.StoredCDPUUID) != "" {
+	if strings.TrimSpace(state.UUID) != "" {
 		return skip(reasonAlreadyProvisioned), nil
 	}
 
 	// Only database-connection users hold an LFID, and resolve requires one.
-	if !req.HasDatabaseIdentity {
+	if !state.HasDatabaseIdentity {
 		return skip(reasonNoDatabaseIdentity), nil
 	}
-	username := strings.TrimSpace(req.Username)
+	username := strings.TrimSpace(state.Username)
 	if username == "" {
 		// Unexpected for a database user, and not recoverable: an email-only
 		// create would 409 without returning the conflicting member id, so the
@@ -159,7 +179,9 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 		return skip(reasonNoLFIDUsername), nil
 	}
 
-	memberID, result, err := o.findOrCreateMember(ctx, req, username)
+	// The email is a secondary identifier that only widens the match, and it
+	// is only usable because the read above confirmed verification.
+	memberID, result, err := o.findOrCreateMember(ctx, req, username, strings.TrimSpace(req.Email))
 	if err != nil {
 		return Result{}, err
 	}
@@ -167,7 +189,7 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 		return result, nil
 	}
 
-	if err := o.metadataWriter.WriteCDPMetadata(ctx, req.UserID, port.CDPMetadata{
+	if err := o.metadata.WriteCDPMetadata(ctx, req.UserID, port.CDPMetadata{
 		UUID:      strings.ToLower(memberID),
 		Source:    constants.CDPUUIDSourceProvisioning,
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
@@ -192,13 +214,7 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 //
 // An empty member id with a nil error means the attempt ended in a skip, which
 // the returned Result describes.
-func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, username string) (string, Result, error) {
-	// Email only ever widens the match, and only when verified.
-	email := ""
-	if req.EmailVerified {
-		email = strings.TrimSpace(req.Email)
-	}
-
+func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, username, email string) (string, Result, error) {
 	resolved, err := o.cdpClient.Resolve(ctx, username, email)
 	if err != nil {
 		return "", Result{}, err

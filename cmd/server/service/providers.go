@@ -231,7 +231,7 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 
 	return provisioning.NewOrchestrator(
 		provisioning.WithCDPClient(cdpClient),
-		provisioning.WithMetadataWriter(auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)),
+		provisioning.WithMetadataStore(auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)),
 	)
 }
 
