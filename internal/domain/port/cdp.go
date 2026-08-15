@@ -56,9 +56,13 @@ type CDPMetadataReader interface {
 
 // CDPMetadataWriter writes a user's CDP enrichment record.
 //
-// Implementations MUST enforce that a stored UUID is write-once: absent to
-// present is the only legal transition, and a rejection is a caller-guard bug
-// rather than a data problem.
+// Implementations reject a change to a stored UUID: absent to present is the
+// only legal transition, and a rejection is a caller-guard bug rather than a
+// data problem.
+//
+// This is best-effort, not atomic. The check is a read followed by a write, and
+// the Auth0 Management API offers no compare-and-set on `app_metadata`, so two
+// writers can both observe an absent UUID and both proceed.
 type CDPMetadataWriter interface {
 	WriteCDPMetadata(ctx context.Context, userID string, record CDPMetadata) error
 }

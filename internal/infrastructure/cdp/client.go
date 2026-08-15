@@ -112,6 +112,9 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 		httpclient.WithToken(token),
 		httpclient.WithDescription("resolve CDP member"),
 		httpclient.WithBody(payload),
+		// The body carries the LFID and a verified email, and the client logs
+		// request bodies verbatim at debug level.
+		httpclient.WithSensitiveBody(),
 	)
 
 	var response resolveResponse
@@ -169,6 +172,8 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 			DisplayName: displayName,
 			Identities:  []Identity{identity},
 		}),
+		// Carries the display name and the LFID.
+		httpclient.WithSensitiveBody(),
 	)
 
 	var response createMemberResponse
@@ -223,6 +228,8 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 		httpclient.WithToken(token),
 		httpclient.WithDescription("attach CDP member identity"),
 		httpclient.WithBody(identity),
+		// Carries the LFID.
+		httpclient.WithSensitiveBody(),
 	)
 
 	statusCode, errCall := request.Call(ctx, nil)
