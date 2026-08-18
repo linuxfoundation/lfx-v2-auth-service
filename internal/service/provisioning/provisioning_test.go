@@ -23,6 +23,7 @@ type mockCDPClient struct {
 	createResult   cdp.CreateResult
 	createErr      error
 	attachErr      error
+	attachOutcome  cdp.Outcome
 	identities     []cdp.MemberIdentity
 	identitiesErr  error
 
@@ -63,10 +64,16 @@ func (m *mockCDPClient) CreateMember(_ context.Context, displayName string, _ cd
 	return m.createResult, m.createErr
 }
 
-func (m *mockCDPClient) AttachIdentity(_ context.Context, memberID string, _ cdp.Identity) error {
+func (m *mockCDPClient) AttachIdentity(_ context.Context, memberID string, _ cdp.Identity) (cdp.Outcome, error) {
 	m.attachCalls++
 	m.attachedTo = memberID
-	return m.attachErr
+	if m.attachErr != nil {
+		return "", m.attachErr
+	}
+	if m.attachOutcome != "" {
+		return m.attachOutcome, nil
+	}
+	return cdp.OutcomeFound, nil
 }
 
 // mockMetadataStore records the write it was asked to make and serves the
@@ -343,6 +350,24 @@ func TestProvisionFlow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, OutcomeProvisioned, result.Outcome, "case differences and other platforms are not another person")
 		assert.Equal(t, 1, client.attachCalls)
+	})
+
+	t.Run("an attach conflict is not recorded as provisioned", func(t *testing.T) {
+		// 409 on attach means the LFID is verified on a different member than
+		// the one resolve returned. Writing the member id would store a
+		// permanent identifier the LFID was never attached to.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			attachOutcome:  cdp.OutcomeConflict,
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
+		assert.Zero(t, store.calls, "no uuid is written when the identity did not attach")
 	})
 
 	t.Run("the created member is named from Auth0, not from the payload", func(t *testing.T) {

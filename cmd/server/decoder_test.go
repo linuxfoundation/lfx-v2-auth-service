@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,7 +45,9 @@ func TestRequestDecoderRawBody(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(""))
 
 		var body []byte
-		require.Error(t, requestDecoder(request).Decode(&body))
+		// io.EOF specifically: goa maps it to a missing-payload response, so a
+		// generic error here would change what the caller sees.
+		require.ErrorIs(t, requestDecoder(request).Decode(&body), io.EOF)
 	})
 
 	t.Run("a non-bytes target still uses the standard decoder", func(t *testing.T) {

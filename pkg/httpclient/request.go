@@ -32,6 +32,9 @@ type apiRequest struct {
 	Token         string
 	Description   string
 	sensitiveBody bool // when true, the request body is replaced with [REDACTED] in logs
+	// sensitiveResponse does the same for an error response body, which some
+	// providers fill with the identity that was submitted.
+	sensitiveResponse bool
 }
 
 // WithMethod sets the HTTP method for the request
@@ -68,6 +71,15 @@ func WithToken(token string) RequestOption {
 func WithSensitiveBody() RequestOption {
 	return func(req *apiRequest) {
 		req.sensitiveBody = true
+	}
+}
+
+// WithSensitiveResponse marks the response body as sensitive so an error
+// response is logged and wrapped by status code alone.
+// Use this for endpoints whose error bodies echo back the submitted identity.
+func WithSensitiveResponse() RequestOption {
+	return func(req *apiRequest) {
+		req.sensitiveResponse = true
 	}
 }
 
@@ -132,7 +144,13 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 
 	// Make the HTTP request
-	response, err := a.httpClient.Request(ctx, a.Method, a.URL, bodyReader, headers)
+	response, err := a.httpClient.Do(ctx, Request{
+		Method:            a.Method,
+		URL:               a.URL,
+		Headers:           headers,
+		Body:              bodyReader,
+		SensitiveResponse: a.sensitiveResponse,
+	})
 	if err != nil {
 		slog.ErrorContext(ctx, "API request failed",
 			"error", err,
@@ -145,9 +163,13 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		loggedResponse := string(response.Body)
+		if a.sensitiveResponse {
+			loggedResponse = redactedBody
+		}
 		slog.ErrorContext(ctx, "API returned error",
 			"status_code", response.StatusCode,
-			"response_body", string(response.Body),
+			"response_body", loggedResponse,
 			"method", a.Method,
 			"description", a.Description)
 		return response.StatusCode, errors.NewUnexpected("API returned error", fmt.Errorf("status code: %d", response.StatusCode))

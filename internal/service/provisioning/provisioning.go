@@ -89,6 +89,11 @@ const (
 	// different person. Counting these is how a rise in cross-person merges
 	// becomes visible.
 	reasonMemberHoldsForeignLFID = "cdp-member-holds-foreign-lfid"
+
+	// reasonLFIDOnAnotherMember marks the write-side twin: the attach was
+	// refused because this LFID is verified on a different member. Kept
+	// separate from the read-side reason so the two are countable apart.
+	reasonLFIDOnAnotherMember = "cdp-lfid-on-another-member"
 )
 
 // Orchestrator provisions a CDP identity for a verified user.
@@ -254,8 +259,21 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			return "", skip(reasonMemberHoldsForeignLFID), nil
 		}
 
-		if err := o.cdpClient.AttachIdentity(ctx, resolved.MemberID, lfidIdentity(username)); err != nil {
-			return "", Result{}, err
+		attached, errAttach := o.cdpClient.AttachIdentity(ctx, resolved.MemberID, lfidIdentity(username))
+		if errAttach != nil {
+			return "", Result{}, errAttach
+		}
+		if attached == cdp.OutcomeConflict {
+			// The LFID is verified on a different member than the one resolve
+			// returned, so CDP disagrees with itself. Storing this member id
+			// would record a permanent identifier the LFID was never attached
+			// to. The read-side guard above cannot see this: the foreign
+			// identity is on the other member, not this one.
+			slog.WarnContext(ctx, "CDP LFID belongs to another member, skipping provisioning",
+				"user_id", redaction.Redact(req.UserID),
+				"member_id", redaction.Redact(resolved.MemberID),
+			)
+			return "", skip(reasonLFIDOnAnotherMember), nil
 		}
 		return resolved.MemberID, Result{}, nil
 

@@ -13,6 +13,7 @@ package cdp
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -61,7 +62,7 @@ type Client interface {
 	Resolve(ctx context.Context, lfid string, verifiedEmail string) (ResolveResult, error)
 	ListIdentities(ctx context.Context, memberID string) ([]MemberIdentity, error)
 	CreateMember(ctx context.Context, displayName string, identity Identity) (CreateResult, error)
-	AttachIdentity(ctx context.Context, memberID string, identity Identity) error
+	AttachIdentity(ctx context.Context, memberID string, identity Identity) (Outcome, error)
 }
 
 // NewClient creates a CDP v1 API client.
@@ -80,6 +81,21 @@ func NewClient(config Config) Client {
 		}),
 		config: config,
 	}
+}
+
+// sanitize strips a provider response body out of an error before it is logged
+// or wrapped.
+//
+// The shared client puts the raw body in RetryableError.Message, and CDP error
+// bodies echo the identity back — the create-409 body is {platform, value,
+// type}. Carrying that into an error chain would print the LFID in plain text
+// everywhere this flow otherwise redacts it. A transport failure has no body
+// and is worth keeping intact.
+func sanitize(statusCode int, err error) error {
+	if statusCode <= 0 {
+		return err
+	}
+	return fmt.Errorf("status code: %d", statusCode)
 }
 
 // Resolve maps an LFID username (optionally widened by a verified email) to a
@@ -113,6 +129,8 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/resolve"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("resolve CDP member"),
+		// CDP error bodies echo the submitted identity back.
+		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(payload),
 		// The body carries the LFID and a verified email, and the client logs
 		// request bodies verbatim at debug level.
@@ -132,11 +150,10 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 			return ResolveResult{Outcome: OutcomeConflict}, nil
 		}
 		slog.ErrorContext(ctx, "CDP resolve failed",
-			"error", errCall,
 			"status_code", statusCode,
 			"lfid", redaction.Redact(lfid),
 		)
-		return ResolveResult{}, errors.NewUnexpected("CDP resolve failed", errCall)
+		return ResolveResult{}, errors.NewUnexpected("CDP resolve failed", sanitize(statusCode, errCall))
 	}
 
 	if strings.TrimSpace(response.MemberID) == "" {
@@ -170,6 +187,8 @@ func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberI
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/"+url.PathEscape(memberID)+"/identities"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("list CDP member identities"),
+		// CDP error bodies echo the submitted identity back.
+		httpclient.WithSensitiveResponse(),
 	)
 
 	var response memberIdentitiesResponse
@@ -179,11 +198,10 @@ func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberI
 			return nil, nil
 		}
 		slog.ErrorContext(ctx, "CDP member identities list failed",
-			"error", errCall,
 			"status_code", statusCode,
 			"member_id", redaction.Redact(memberID),
 		)
-		return nil, errors.NewUnexpected("CDP member identities list failed", errCall)
+		return nil, errors.NewUnexpected("CDP member identities list failed", sanitize(statusCode, errCall))
 	}
 
 	return response.Identities, nil
@@ -213,6 +231,8 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 		httpclient.WithURL(c.config.BaseURL+"/v1/members"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("create CDP member"),
+		// CDP error bodies echo the submitted identity back.
+		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(createMemberRequest{
 			DisplayName: displayName,
 			Identities:  []Identity{identity},
@@ -231,11 +251,10 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 			return CreateResult{Outcome: OutcomeConflict}, nil
 		}
 		slog.ErrorContext(ctx, "CDP member create failed",
-			"error", errCall,
 			"status_code", statusCode,
 			"identity_value", redaction.Redact(identity.Value),
 		)
-		return CreateResult{}, errors.NewUnexpected("CDP member create failed", errCall)
+		return CreateResult{}, errors.NewUnexpected("CDP member create failed", sanitize(statusCode, errCall))
 	}
 
 	if strings.TrimSpace(response.MemberID) == "" {
@@ -247,23 +266,26 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 
 // AttachIdentity attaches an identity to an existing CDP member.
 //
-// A 409 means the identity is already attached, which is the desired end state,
-// so it is reported as success to keep the caller idempotent under the
-// at-least-once delivery the provisioning trigger provides.
-func (c *client) AttachIdentity(ctx context.Context, memberID string, identity Identity) error {
+// Re-attaching the same identity to the same member is not a conflict: the
+// provider finds the exact match and answers 200, which keeps the caller
+// idempotent under at-least-once delivery. A 409 means the opposite — the
+// identity is already verified on a *different* member — so it is reported as
+// a conflict rather than swallowed, or the caller would store a member id whose
+// LFID was never attached.
+func (c *client) AttachIdentity(ctx context.Context, memberID string, identity Identity) (Outcome, error) {
 	if strings.TrimSpace(memberID) == "" {
-		return errors.NewValidation("member id is required to attach an identity")
+		return "", errors.NewValidation("member id is required to attach an identity")
 	}
 	if strings.TrimSpace(identity.Value) == "" {
-		return errors.NewValidation("identity value is required to attach an identity")
+		return "", errors.NewValidation("identity value is required to attach an identity")
 	}
 	if c.config.TokenManager == nil {
-		return errors.NewUnexpected("CDP token manager is not configured")
+		return "", errors.NewUnexpected("CDP token manager is not configured")
 	}
 
 	token, err := c.config.TokenManager.GetToken(ctx)
 	if err != nil {
-		return errors.NewUnexpected("failed to get CDP M2M token", err)
+		return "", errors.NewUnexpected("failed to get CDP M2M token", err)
 	}
 
 	request := httpclient.NewAPIRequest(
@@ -272,6 +294,8 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/"+url.PathEscape(memberID)+"/identities"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("attach CDP member identity"),
+		// CDP error bodies echo the submitted identity back.
+		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(identity),
 		// Carries the LFID.
 		httpclient.WithSensitiveBody(),
@@ -280,18 +304,17 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 	statusCode, errCall := request.Call(ctx, nil)
 	if errCall != nil {
 		if statusCode == http.StatusConflict {
-			slog.InfoContext(ctx, "CDP identity already attached to member",
+			slog.WarnContext(ctx, "CDP identity belongs to another member",
 				"member_id", redaction.Redact(memberID),
 			)
-			return nil
+			return OutcomeConflict, nil
 		}
 		slog.ErrorContext(ctx, "CDP identity attach failed",
-			"error", errCall,
 			"status_code", statusCode,
 			"member_id", redaction.Redact(memberID),
 		)
-		return errors.NewUnexpected("CDP identity attach failed", errCall)
+		return "", errors.NewUnexpected("CDP identity attach failed", sanitize(statusCode, errCall))
 	}
 
-	return nil
+	return OutcomeFound, nil
 }

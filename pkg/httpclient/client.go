@@ -27,7 +27,15 @@ type Request struct {
 	URL     string
 	Headers map[string]string
 	Body    io.Reader
+
+	// SensitiveResponse keeps an error response body out of the error and out
+	// of the logs. Some providers echo the submitted identity back in their
+	// error bodies, and this client would otherwise print it in full.
+	SensitiveResponse bool
 }
+
+// redactedBody stands in for a body that must not reach the logs.
+const redactedBody = "[REDACTED]"
 
 // Response represents an HTTP response
 type Response struct {
@@ -117,9 +125,13 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 
 	// Check for HTTP errors
 	if resp.StatusCode >= http.StatusBadRequest {
+		message := string(body)
+		if reqConfig.SensitiveResponse {
+			message = redactedBody
+		}
 		err := &RetryableError{
 			StatusCode: resp.StatusCode,
-			Message:    string(body),
+			Message:    message,
 		}
 		return response, err
 	}

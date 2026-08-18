@@ -235,23 +235,47 @@ func TestAttachIdentity(t *testing.T) {
 
 	t.Run("201 succeeds and escapes the member id in the path", func(t *testing.T) {
 		transport := &recordingTransport{status: http.StatusCreated}
-		err := newTestClient(transport).AttachIdentity(context.Background(), "mem/1", identity)
+		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem/1", identity)
 
 		require.NoError(t, err)
+		assert.Equal(t, OutcomeFound, outcome)
 		assert.Equal(t, "https://cdp.example.org/v1/members/mem%2F1/identities", transport.requests[0].url)
 	})
 
-	t.Run("409 already attached is treated as success", func(t *testing.T) {
-		// Delivery is at-least-once, so re-attaching must not fail the flow.
-		transport := &recordingTransport{status: http.StatusConflict}
-		err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+	t.Run("200 is the idempotent re-attach", func(t *testing.T) {
+		// Delivery is at-least-once. The provider finds the exact identity on
+		// this member and answers 200, so a redelivery is not a conflict.
+		transport := &recordingTransport{status: http.StatusOK}
+		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
 
 		require.NoError(t, err)
+		assert.Equal(t, OutcomeFound, outcome)
+	})
+
+	t.Run("409 is a conflict, not a success", func(t *testing.T) {
+		// The provider reserves 409 for an identity verified on a *different*
+		// member. Reporting it as success would let the caller store a member
+		// id whose LFID was never attached.
+		transport := &recordingTransport{status: http.StatusConflict}
+		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeConflict, outcome)
+	})
+
+	t.Run("an error carries the status, not the provider body", func(t *testing.T) {
+		// CDP error bodies echo the identity back, and the shared client puts
+		// the raw body in the error message.
+		transport := &recordingTransport{status: http.StatusInternalServerError, body: `{"platform":"lfid","value":"psmith","type":"username"}`}
+		_, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "psmith")
 	})
 
 	t.Run("an empty member id is refused without calling CDP", func(t *testing.T) {
 		transport := &recordingTransport{status: http.StatusCreated}
-		err := newTestClient(transport).AttachIdentity(context.Background(), "", identity)
+		_, err := newTestClient(transport).AttachIdentity(context.Background(), "", identity)
 
 		require.Error(t, err)
 		assert.Empty(t, transport.requests)
