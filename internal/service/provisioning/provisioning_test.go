@@ -23,12 +23,15 @@ type mockCDPClient struct {
 	createResult   cdp.CreateResult
 	createErr      error
 	attachErr      error
+	identities     []cdp.MemberIdentity
+	identitiesErr  error
 
-	resolveCalls int
-	createCalls  int
-	attachCalls  int
-	attachedTo   string
-	resolvedLFID string
+	resolveCalls    int
+	createCalls     int
+	attachCalls     int
+	identitiesCalls int
+	attachedTo      string
+	resolvedLFID    string
 
 	createdDisplayName string
 }
@@ -47,6 +50,11 @@ func (m *mockCDPClient) Resolve(_ context.Context, lfid string, _ string) (cdp.R
 		index = len(m.resolveResults) - 1
 	}
 	return m.resolveResults[index], nil
+}
+
+func (m *mockCDPClient) ListIdentities(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+	m.identitiesCalls++
+	return m.identities, m.identitiesErr
 }
 
 func (m *mockCDPClient) CreateMember(_ context.Context, displayName string, _ cdp.Identity) (cdp.CreateResult, error) {
@@ -293,6 +301,48 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, "auth0|1", store.userID)
 		assert.Equal(t, "mem-1", store.written.UUID, "the stored uuid is lowercased")
 		assert.Equal(t, constants.CDPUUIDSourceProvisioning, store.written.Source)
+	})
+
+	t.Run("a member already holding another LFID is not attached to", func(t *testing.T) {
+		// Two LFID usernames on one member means it holds two people. CDP
+		// answers a single confident match, so nothing else in the flow
+		// notices; attaching would add a third person to a record that
+		// already needs splitting.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			identities: []cdp.MemberIdentity{
+				{Value: "someoneelse", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err, "a skip is a final answer, not a retry")
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberHoldsForeignLFID, result.Reason)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, client.createCalls)
+		assert.Zero(t, store.calls, "no uuid is written, so a later run can retry once CDP is fixed")
+	})
+
+	t.Run("the user's own LFID on the member does not block the attach", func(t *testing.T) {
+		// Re-delivery is at-least-once, so the identity may already be there.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			identities: []cdp.MemberIdentity{
+				{Value: "PSmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+				{Value: "psmith@example.org", Platform: constants.LFIDPlatform, Type: "email"},
+				{Value: "someoneelse", Platform: "github", Type: constants.CDPIdentityTypeUsername},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeProvisioned, result.Outcome, "case differences and other platforms are not another person")
+		assert.Equal(t, 1, client.attachCalls)
 	})
 
 	t.Run("the created member is named from Auth0, not from the payload", func(t *testing.T) {

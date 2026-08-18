@@ -84,6 +84,11 @@ const (
 	reasonNoLFIDUsername     = "missing-lfid-username"
 	reasonUserNotFound       = "user-not-found"
 	reasonConflict           = "cdp-identity-conflict"
+
+	// reasonMemberHoldsForeignLFID marks a member that already belongs to a
+	// different person. Counting these is how a rise in cross-person merges
+	// becomes visible.
+	reasonMemberHoldsForeignLFID = "cdp-member-holds-foreign-lfid"
 )
 
 // Orchestrator provisions a CDP identity for a verified user.
@@ -232,6 +237,23 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 
 	switch resolved.Outcome {
 	case cdp.OutcomeFound:
+		held, errIdentities := o.cdpClient.ListIdentities(ctx, resolved.MemberID)
+		if errIdentities != nil {
+			return "", Result{}, errIdentities
+		}
+		if other, occupied := foreignLFID(held, username); occupied {
+			// The member already carries somebody else's LFID, so it holds
+			// more than one person. Attaching would add a third and make the
+			// eventual split harder. A resolve conflict is CDP telling us it
+			// is unsure; this is the same ambiguity with CDP unaware of it.
+			slog.WarnContext(ctx, "CDP member already holds another LFID, skipping provisioning",
+				"user_id", redaction.Redact(req.UserID),
+				"member_id", redaction.Redact(resolved.MemberID),
+				"existing_lfid", redaction.Redact(other),
+			)
+			return "", skip(reasonMemberHoldsForeignLFID), nil
+		}
+
 		if err := o.cdpClient.AttachIdentity(ctx, resolved.MemberID, lfidIdentity(username)); err != nil {
 			return "", Result{}, err
 		}
@@ -271,6 +293,24 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 	}
 
 	return created.MemberID, Result{}, nil
+}
+
+// foreignLFID reports the first LFID username on the member that is not this
+// user's, if there is one.
+//
+// LFID usernames are one per person, so a member carrying two of them holds
+// two people. Comparison is case-insensitive because CDP stores identity
+// values as they arrive from each source.
+func foreignLFID(held []cdp.MemberIdentity, username string) (string, bool) {
+	for _, identity := range held {
+		if identity.Platform != constants.LFIDPlatform || identity.Type != constants.CDPIdentityTypeUsername {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(identity.Value), username) {
+			return identity.Value, true
+		}
+	}
+	return "", false
 }
 
 // lfidIdentity builds the CDP identity for an LFID username.

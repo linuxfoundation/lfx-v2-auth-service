@@ -3,8 +3,9 @@
 
 // Package cdp is the client for the CDP (crowd.dev) v1 transactional API.
 //
-// Three operations are consumed: resolve an identity to a member, create a
-// member, and attach an identity to an existing member. The API is shared with
+// Four operations are consumed: resolve an identity to a member, list a
+// member's identities, create a member, and attach an identity to an existing
+// member. The API is shared with
 // other services under a global rate limit, so callers are expected to pass a
 // bounded context and to treat a 429 as a reason to back off rather than to
 // retry immediately.
@@ -58,6 +59,7 @@ type client struct {
 // consume.
 type Client interface {
 	Resolve(ctx context.Context, lfid string, verifiedEmail string) (ResolveResult, error)
+	ListIdentities(ctx context.Context, memberID string) ([]MemberIdentity, error)
 	CreateMember(ctx context.Context, displayName string, identity Identity) (CreateResult, error)
 	AttachIdentity(ctx context.Context, memberID string, identity Identity) error
 }
@@ -142,6 +144,49 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 	}
 
 	return ResolveResult{Outcome: OutcomeFound, MemberID: response.MemberID}, nil
+}
+
+// ListIdentities returns the identities a CDP member already holds.
+//
+// Read-only, and used to decide whether attaching to a member is safe. A 404
+// means the member is gone between the resolve and this call, which is not an
+// error the caller can act on, so it reads as an empty list.
+func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberIdentity, error) {
+	if strings.TrimSpace(memberID) == "" {
+		return nil, errors.NewValidation("member id is required to list identities")
+	}
+	if c.config.TokenManager == nil {
+		return nil, errors.NewUnexpected("CDP token manager is not configured")
+	}
+
+	token, err := c.config.TokenManager.GetToken(ctx)
+	if err != nil {
+		return nil, errors.NewUnexpected("failed to get CDP M2M token", err)
+	}
+
+	request := httpclient.NewAPIRequest(
+		c.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(c.config.BaseURL+"/v1/members/"+url.PathEscape(memberID)+"/identities"),
+		httpclient.WithToken(token),
+		httpclient.WithDescription("list CDP member identities"),
+	)
+
+	var response memberIdentitiesResponse
+	statusCode, errCall := request.Call(ctx, &response)
+	if errCall != nil {
+		if statusCode == http.StatusNotFound {
+			return nil, nil
+		}
+		slog.ErrorContext(ctx, "CDP member identities list failed",
+			"error", errCall,
+			"status_code", statusCode,
+			"member_id", redaction.Redact(memberID),
+		)
+		return nil, errors.NewUnexpected("CDP member identities list failed", errCall)
+	}
+
+	return response.Identities, nil
 }
 
 // CreateMember creates a CDP member seeded with the given identity.

@@ -29,6 +29,22 @@ type Identity struct {
 	VerifiedBy string `json:"verifiedBy,omitempty"`
 }
 
+// MemberIdentity is one identity already held by a CDP member, as returned by
+// GET /v1/members/{memberId}/identities.
+type MemberIdentity struct {
+	ID       string `json:"id"`
+	Value    string `json:"value"`
+	Platform string `json:"platform"`
+	Type     string `json:"type"`
+	Verified bool   `json:"verified"`
+}
+
+// memberIdentitiesResponse is the 200 body for
+// GET /v1/members/{memberId}/identities.
+type memberIdentitiesResponse struct {
+	Identities []MemberIdentity `json:"identities"`
+}
+
 // createMemberRequest is the body for POST /v1/members.
 type createMemberRequest struct {
 	DisplayName string     `json:"displayName"`

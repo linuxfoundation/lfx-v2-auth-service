@@ -188,6 +188,48 @@ func TestCreateMember(t *testing.T) {
 	})
 }
 
+func TestListIdentities(t *testing.T) {
+	t.Run("200 returns the member's identities", func(t *testing.T) {
+		transport := &recordingTransport{
+			status: http.StatusOK,
+			body:   `{"identities":[{"id":"i-1","value":"psmith","platform":"lfid","type":"username","verified":true}]}`,
+		}
+		identities, err := newTestClient(transport).ListIdentities(context.Background(), "mem-1")
+
+		require.NoError(t, err)
+		require.Len(t, identities, 1)
+		assert.Equal(t, "psmith", identities[0].Value)
+		assert.Equal(t, "lfid", identities[0].Platform)
+		assert.Equal(t, http.MethodGet, transport.requests[0].method)
+		assert.Equal(t, "https://cdp.example.org/v1/members/mem-1/identities", transport.requests[0].url)
+	})
+
+	t.Run("404 reads as no identities", func(t *testing.T) {
+		// The member vanished between the resolve and this call. There is
+		// nothing to attach to, and nothing the caller can do about it.
+		transport := &recordingTransport{status: http.StatusNotFound}
+		identities, err := newTestClient(transport).ListIdentities(context.Background(), "mem-1")
+
+		require.NoError(t, err)
+		assert.Empty(t, identities)
+	})
+
+	t.Run("an empty member id is rejected before the call", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusOK}
+		_, err := newTestClient(transport).ListIdentities(context.Background(), "")
+
+		require.Error(t, err)
+		assert.Empty(t, transport.requests)
+	})
+
+	t.Run("a 500 is an error", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusInternalServerError}
+		_, err := newTestClient(transport).ListIdentities(context.Background(), "mem-1")
+
+		require.Error(t, err)
+	})
+}
+
 func TestAttachIdentity(t *testing.T) {
 	identity := Identity{Value: "psmith", Platform: "lfid", Type: "username"}
 
