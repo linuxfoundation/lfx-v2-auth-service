@@ -233,7 +233,7 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 
 	slog.DebugContext(ctx, "CDP provisioning initialized", "cdp_base_url", cdpBaseURL)
 
-	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.DefaultConfig(), auth0Config)
+	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.Config{MaxRetries: 0}, auth0Config)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to create the CDP metadata writer", "error", err)
 		return nil

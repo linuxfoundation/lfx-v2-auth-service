@@ -307,6 +307,18 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonConflict), nil
 		}
+		held, errIdentities := o.cdpClient.ListIdentities(ctx, reResolved.MemberID)
+		if errIdentities != nil {
+			return "", Result{}, errIdentities
+		}
+		if other, occupied := foreignLFID(held, username); occupied {
+			slog.WarnContext(ctx, "CDP member already holds another LFID, skipping provisioning",
+				"user_id", redaction.Redact(req.UserID),
+				"member_id", redaction.Redact(reResolved.MemberID),
+				"existing_lfid", redaction.Redact(other),
+			)
+			return "", skip(reasonMemberHoldsForeignLFID), nil
+		}
 		return reResolved.MemberID, Result{}, nil
 	}
 

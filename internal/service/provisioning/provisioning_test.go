@@ -429,6 +429,27 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, "raced-1", store.written.UUID)
 	})
 
+	t.Run("a create conflict re-resolve skips a member holding another LFID", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeFound, MemberID: "raced-1"},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+			identities: []cdp.MemberIdentity{
+				{Value: "someoneelse", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberHoldsForeignLFID, result.Reason)
+		assert.Zero(t, store.calls)
+	})
+
 	t.Run("a create conflict that still cannot resolve is skipped, not looped", func(t *testing.T) {
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{

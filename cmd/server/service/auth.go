@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
@@ -50,6 +51,6 @@ func NewAuthService(ctx context.Context) authservice.Service {
 	return &authService{
 		natsClient:         getNATSClient(),
 		provisioner:        newProvisioningOrchestrator(ctx),
-		provisioningSecret: os.Getenv(constants.ProvisioningWebhookSecretEnvKey),
+		provisioningSecret: strings.TrimSpace(os.Getenv(constants.ProvisioningWebhookSecretEnvKey)),
 	}
 }

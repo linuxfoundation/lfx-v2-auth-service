@@ -88,7 +88,9 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	var handler http.Handler = mux
 	if dbg {
 		// Log query and response bodies if debug logs are enabled.
-		handler = debug.HTTP()(handler)
+		// Skip the provisioning webhook: Auth0 events carry PII and the
+		// handler already logs a shape-only summary.
+		handler = skipPathMiddleware(authserver.ProvisionCdpUUIDAuthServicePath(), debug.HTTP())(handler)
 	}
 	// Applied last so it wraps everything above, including the debug handler —
 	// otherwise that reads the body before the cap takes effect.
@@ -103,7 +105,14 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 
 	// Start HTTP server using default configuration, change the code to
 	// configure the server as required by your service.
-	srv := &http.Server{Addr: host, Handler: handler, ReadHeaderTimeout: time.Second * 60}
+	srv := &http.Server{
+		Addr:              host,
+		Handler:           handler,
+		ReadHeaderTimeout: 60 * time.Second,
+		// Caps how long an unauthenticated caller may trickle a body through
+		// MaxBytesReader before the bearer check runs.
+		ReadTimeout: 60 * time.Second,
+	}
 	for _, m := range authServer.Mounts {
 		slog.InfoContext(ctx, "HTTP endpoint mounted",
 			"method", m.Method,
@@ -192,6 +201,20 @@ func limitRequestBody(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// skipPathMiddleware applies mw only when the request path differs from path.
+func skipPathMiddleware(path string, mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		wrapped := mw(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
+			wrapped.ServeHTTP(w, r)
+		})
+	}
 }
 
 // errorHandler returns a function that writes and logs the given error.

@@ -236,6 +236,7 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 		httpclient.WithToken(token),
 		httpclient.WithDescription("write CDP app_metadata"),
 		httpclient.WithBody(patch),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var patchResponse map[string]any
