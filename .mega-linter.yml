@@ -31,6 +31,13 @@ YAML_YAMLLINT_CONFIG_FILE: .yamllint
 # yamllint disable-line rule:line-length
 REPOSITORY_KICS_ARGUMENTS: scan --no-progress --exclude-severities="medium,low,info,trace" --exclude-paths="gen/*"
 SPELL_CSPELL_ANALYZE_FILE_NAMES: false
+SPELL_CSPELL_PRE_COMMANDS:
+  - command: >-
+      curl -sf
+      https://raw.githubusercontent.com/linuxfoundation/lfx-public-workflows/main/cspell/flagwords.snippet.json
+      -o /tmp/flagwords.snippet.json &&
+      sed -i -e '/"flagWords": \[\]/{r /tmp/flagwords.snippet.json' -e 'd}' .cspell.json
+    cwd: "workspace"
 # Make sure Vale is setup to run with the styles it needs.
 SPELL_VALE_PRE_COMMANDS:
   - command: mkdir -p styles
