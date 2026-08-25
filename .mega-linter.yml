@@ -35,8 +35,9 @@ SPELL_CSPELL_PRE_COMMANDS:
   - command: >-
       cp .cspell.json /tmp/cspell.json.orig &&
       curl -sSf
-      https://raw.githubusercontent.com/linuxfoundation/lfx-public-workflows/main/cspell/flagwords.snippet.json
+      https://raw.githubusercontent.com/linuxfoundation/lfx-public-workflows/main/cspell/flagwords.json.snippet
       -o /tmp/flagwords.snippet.json &&
+      grep -q '"flagWords": \[\]' .cspell.json &&
       sed -i -e '/"flagWords": \[\]/{r /tmp/flagwords.snippet.json' -e 'd}' .cspell.json
     cwd: "workspace"
     continue_if_failed: false
