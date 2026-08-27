@@ -84,6 +84,10 @@ func (a *auth0TokenSource) Token() (*oauth2.Token, error) {
 	return token, nil
 }
 
+// tokenFetchTimeout bounds a single call to /oauth/token. It is the only place
+// a token fetch can be bounded: oauth2.TokenSource.Token() accepts no context.
+const tokenFetchTimeout = 30 * time.Second
+
 // GetToken returns a valid M2M access token
 func (tm *TokenManager) GetToken(ctx context.Context) (string, error) {
 	token, err := tm.tokenSource.Token()
@@ -206,12 +210,19 @@ func newM2MTokenManager(ctx context.Context, config Config, audienceOverride str
 		m2mConfig.Audience = audienceOverride
 	}
 
-	// Create Auth0 authentication client with private key assertion
+	// Create Auth0 authentication client with private key assertion.
+	//
+	// The explicit client is what bounds a token fetch. oauth2.TokenSource.Token()
+	// takes no context, so GetToken cannot pass a deadline down and a per-call
+	// context.WithTimeout around it bounds nothing. Without a timeout here the
+	// SDK falls back to http.DefaultClient, which has none — and a stalled
+	// /oauth/token would then park the single elected stream reader forever.
 	authConfig, err := authentication.New(
 		ctx,
 		config.Domain,
 		authentication.WithClientID(m2mConfig.ClientID),
 		authentication.WithClientAssertion(m2mConfig.PrivateKey, "RS256"),
+		authentication.WithClient(&http.Client{Timeout: tokenFetchTimeout}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Auth0 client: %w", err)

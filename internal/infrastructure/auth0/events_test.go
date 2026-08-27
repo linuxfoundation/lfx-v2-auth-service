@@ -238,10 +238,18 @@ func TestSubscribeStream(t *testing.T) {
 		messages, err := collect(t, server, SubscribeOptions{})
 
 		require.NoError(t, err, "one outsized frame must not fail the connection")
-		require.Len(t, messages, 2, "the oversized frame is dropped, not delivered half-parsed")
+		require.Len(t, messages, 3)
 		assert.Equal(t, "off-1", messages[0].Offset)
-		assert.Equal(t, "off-3", messages[1].Offset,
-			"the offset moves past the dropped frame so reconnecting does not replay into it")
+
+		// The dropped frame still has to move the stored position, or a close
+		// right here would replay straight back into it on the next connection.
+		assert.Equal(t, EventTypeOffsetOnly, messages[1].Type,
+			"the drop is reported as a position marker, not as an event")
+		assert.Equal(t, "off-2", messages[1].Offset)
+		assert.Empty(t, messages[1].Data, "a dropped frame carries no payload")
+
+		assert.Equal(t, "user.created", messages[2].Type)
+		assert.Equal(t, "off-3", messages[2].Offset)
 	})
 
 	t.Run("an oversized comment does not disturb the frames around it", func(t *testing.T) {
@@ -300,8 +308,32 @@ func TestSubscribeStream(t *testing.T) {
 		messages, err := collect(t, server, SubscribeOptions{})
 
 		require.NoError(t, err)
-		require.Len(t, messages, 1, "the unbounded frame is dropped, the healthy one still arrives")
-		assert.Equal(t, "off-2", messages[0].Offset)
+		require.Len(t, messages, 2)
+		assert.Equal(t, EventTypeOffsetOnly, messages[0].Type, "the unbounded frame is dropped")
+		assert.Equal(t, "off-1", messages[0].Offset)
+		assert.Equal(t, "user.created", messages[1].Type, "the healthy frame still arrives")
+		assert.Equal(t, "off-2", messages[1].Offset)
+	})
+
+	t.Run("a close right after a dropped frame still moves the position", func(t *testing.T) {
+		// The replay-loop case: if the drop does not reach the offset store
+		// before the connection ends, the next one resumes from the previous
+		// offset and meets the same frame again, forever.
+		huge := strings.Repeat("x", maxEventLineBytes+1024)
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"event: user.created\nid: off-1\ndata: {\"offset\":\"off-1\"}\n\n",
+				"event: user.updated\nid: off-2\ndata: "+huge+"\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, messages, 2)
+		assert.Equal(t, EventTypeOffsetOnly, messages[1].Type)
+		assert.Equal(t, "off-2", messages[1].Offset,
+			"the last thing the caller sees must be the dropped frame's position")
 	})
 
 	t.Run("a retry hint does not dispatch a message", func(t *testing.T) {

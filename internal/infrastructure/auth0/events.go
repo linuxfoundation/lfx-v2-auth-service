@@ -67,10 +67,6 @@ const (
 // defaultConnectTimeout bounds establishing the stream, never the stream itself.
 const defaultConnectTimeout = 10 * time.Second
 
-// tokenTimeout bounds fetching the M2M token before the stream is dialled. The
-// stream transport's timeouts do not cover that call.
-const tokenTimeout = 30 * time.Second
-
 // defaultReadIdleTimeout bounds the gap between two reads on an established
 // stream.
 //
@@ -242,14 +238,11 @@ func (c *eventsClient) Subscribe(ctx context.Context, opts SubscribeOptions, han
 		return errs.NewValidation("a message handler is required to subscribe to the events stream")
 	}
 
-	// Bounded separately from the stream: connectTimeout lives on the stream
-	// transport and does not cover this call, and the SDK's token source
-	// defaults to http.DefaultClient, which has no timeout at all. Without a
-	// deadline here a stalled token endpoint parks the one elected reader
-	// before the stream is ever dialled.
-	tokenCtx, cancelToken := context.WithTimeout(ctx, tokenTimeout)
-	token, err := c.config.M2MTokenManager.GetToken(tokenCtx)
-	cancelToken()
+	// Bounded by the token manager's own HTTP client, not from here:
+	// oauth2.TokenSource.Token() takes no context, so wrapping this call in a
+	// context.WithTimeout would look like a deadline while enforcing nothing.
+	// See tokenFetchTimeout in token.go.
+	token, err := c.config.M2MTokenManager.GetToken(ctx)
 	if err != nil {
 		return errs.NewUnexpected("failed to get M2M token to read the events stream", err)
 	}
@@ -537,6 +530,15 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 				return ErrStreamTerminated
 			}
 			eventType, data, hasData, oversized = "", nil, false, false
+
+			// Dropping the frame is only half the job: the position has to be
+			// persisted too. Nothing else here reaches the offset store, so if
+			// Auth0 closed the connection now, the next one would resume from
+			// the last saved offset and meet the same frame again, forever.
+			// An offset-only marker is exactly the "moved, no event" signal.
+			if err := handle(ctx, EventMessage{Offset: lastOffset, Type: EventTypeOffsetOnly}); err != nil {
+				return err
+			}
 			continue
 		}
 
