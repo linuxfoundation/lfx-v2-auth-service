@@ -214,6 +214,9 @@ func NewClient(ctx context.Context, config Config) (*NATSClient, error) {
 		buckets = append(buckets, constants.KVBucketNameAutheliaUsers)
 		buckets = append(buckets, constants.KVBucketNameAutheliaEmailOTP)
 	}
+	if os.Getenv(constants.ProvisioningConsumerEnabledEnvKey) == "true" {
+		buckets = append(buckets, constants.KVBucketNameProvisioningCursor)
+	}
 
 	for _, bucketName := range buckets {
 		if err := client.KeyValueStore(ctx, bucketName); err != nil {

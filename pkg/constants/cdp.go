@@ -3,6 +3,8 @@
 
 package constants
 
+import "time"
+
 // Auth0 `app_metadata` keys holding the CDP enrichment record.
 //
 // These MUST stay identical to the block at the top of
@@ -46,12 +48,30 @@ const (
 	// CDPAudienceEnvKey is the M2M audience for the CDP public API.
 	CDPAudienceEnvKey = "CDP_AUDIENCE"
 
-	// ProvisioningWebhookSecretEnvKey is the static bearer secret the Auth0
-	// Event Stream presents on the provisioning webhook. The webhook
-	// destination supports static-secret auth only, so this is the whole of
-	// the endpoint's authorization.
-	ProvisioningWebhookSecretEnvKey = "PROVISIONING_WEBHOOK_SECRET"
+	// ProvisioningConsumerEnabledEnvKey switches on the Auth0 events consumer.
+	// Off unless explicitly enabled, so a deployment that has not been
+	// configured for it does not open a stream.
+	ProvisioningConsumerEnabledEnvKey = "PROVISIONING_CONSUMER_ENABLED"
+
+	// ProvisioningReplayWindowEnvKey bounds how far back the consumer restarts
+	// when it has no usable offset. See DefaultProvisioningReplayWindow.
+	ProvisioningReplayWindowEnvKey = "PROVISIONING_REPLAY_WINDOW"
+
+	// Auth0EventsHostEnvKey overrides the host the events stream is read from.
+	// Unset means Auth0DomainEnvKey, which in production is the tenant's
+	// custom domain.
+	Auth0EventsHostEnvKey = "AUTH0_EVENTS_HOST"
 )
+
+// DefaultProvisioningReplayWindow is how far back the consumer restarts with
+// no usable offset — a cold start, or an offset Auth0 has aged out.
+//
+// Auth0 does not publish how long it retains offsets, so this is chosen for
+// the asymmetry rather than fitted to a documented window: re-reading is cheap
+// because the gate skips anyone already provisioned, while reading too little
+// loses users outright. The login self-heal and the population sweep remain
+// the floor either way.
+const DefaultProvisioningReplayWindow = 24 * time.Hour
 
 // LFIDPlatform is the CDP identity platform for a Linux Foundation ID.
 const LFIDPlatform = "lfid"

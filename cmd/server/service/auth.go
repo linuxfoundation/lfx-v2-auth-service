@@ -6,26 +6,13 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
-	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/provisioning"
-	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 )
 
 type authService struct {
 	natsClient *nats.NATSClient
-
-	// provisioner is nil when the CDP provisioning dependencies are not
-	// configured; the webhook then answers 5xx so events are retried rather
-	// than silently dropped.
-	provisioner provisioning.Orchestrator
-
-	// provisioningSecret is the static bearer secret the Auth0 Event Stream
-	// presents on the provisioning webhook.
-	provisioningSecret string
 }
 
 // Livez implements the liveness check endpoint
@@ -47,10 +34,8 @@ func (s *authService) Readyz(ctx context.Context) ([]byte, error) {
 }
 
 // NewAuthService creates a new auth service
-func NewAuthService(ctx context.Context) authservice.Service {
+func NewAuthService() authservice.Service {
 	return &authService{
-		natsClient:         getNATSClient(),
-		provisioner:        newProvisioningOrchestrator(ctx),
-		provisioningSecret: strings.TrimSpace(os.Getenv(constants.ProvisioningWebhookSecretEnvKey)),
+		natsClient: getNATSClient(),
 	}
 }

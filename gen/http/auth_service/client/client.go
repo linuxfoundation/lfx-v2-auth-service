@@ -20,10 +20,6 @@ type Client struct {
 	// Livez Doer is the HTTP client used to make requests to the livez endpoint.
 	LivezDoer goahttp.Doer
 
-	// ProvisionCdpUUID Doer is the HTTP client used to make requests to the
-	// provision-cdp-uuid endpoint.
-	ProvisionCdpUUIDDoer goahttp.Doer
-
 	// Readyz Doer is the HTTP client used to make requests to the readyz endpoint.
 	ReadyzDoer goahttp.Doer
 
@@ -47,14 +43,13 @@ func NewClient(
 	restoreBody bool,
 ) *Client {
 	return &Client{
-		LivezDoer:            doer,
-		ProvisionCdpUUIDDoer: doer,
-		ReadyzDoer:           doer,
-		RestoreResponseBody:  restoreBody,
-		scheme:               scheme,
-		host:                 host,
-		decoder:              dec,
-		encoder:              enc,
+		LivezDoer:           doer,
+		ReadyzDoer:          doer,
+		RestoreResponseBody: restoreBody,
+		scheme:              scheme,
+		host:                host,
+		decoder:             dec,
+		encoder:             enc,
 	}
 }
 
@@ -72,30 +67,6 @@ func (c *Client) Livez() goa.Endpoint {
 		resp, err := c.LivezDoer.Do(req)
 		if err != nil {
 			return nil, goahttp.ErrRequestError("auth-service", "livez", err)
-		}
-		return decodeResponse(resp)
-	}
-}
-
-// ProvisionCdpUUID returns an endpoint that makes HTTP requests to the
-// auth-service service provision-cdp-uuid server.
-func (c *Client) ProvisionCdpUUID() goa.Endpoint {
-	var (
-		encodeRequest  = EncodeProvisionCdpUUIDRequest(c.encoder)
-		decodeResponse = DecodeProvisionCdpUUIDResponse(c.decoder, c.RestoreResponseBody)
-	)
-	return func(ctx context.Context, v any) (any, error) {
-		req, err := c.BuildProvisionCdpUUIDRequest(ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		err = encodeRequest(req, v)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := c.ProvisionCdpUUIDDoer.Do(req)
-		if err != nil {
-			return nil, goahttp.ErrRequestError("auth-service", "provision-cdp-uuid", err)
 		}
 		return decodeResponse(resp)
 	}

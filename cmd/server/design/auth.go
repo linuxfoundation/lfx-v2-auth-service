@@ -32,40 +32,6 @@ var _ = dsl.Service("auth-service", func() {
 		})
 	})
 
-	// Provisioning webhook, called by an Auth0 Event Stream.
-	//
-	// The webhook destination supports static-secret auth only, so there is no
-	// caller identity for the edge to pin and the handler performs the
-	// authorization itself.
-	dsl.Method("provision-cdp-uuid", func() {
-		dsl.Description("Provision a CDP member for a newly verified user, from an Auth0 event.")
-		dsl.Meta("swagger:generate", "false")
-
-		dsl.Payload(func() {
-			dsl.Attribute("authorization", dsl.String, "Static bearer secret configured on the event stream")
-			dsl.Attribute("body", dsl.Bytes, "Auth0 event payload")
-			dsl.Required("body")
-		})
-
-		dsl.Error("Unauthorized", dsl.String, "Missing or invalid bearer secret")
-		dsl.Error("BadRequest", dsl.String, "Unparseable event payload")
-		dsl.Error("InternalServerError", dsl.String, "Transient failure; the event should be redelivered")
-
-		dsl.HTTP(func() {
-			dsl.POST("/webhooks/auth0/cdp-provisioning")
-			dsl.Header("authorization:Authorization")
-			dsl.Body("body")
-			dsl.Response(dsl.StatusNoContent)
-
-			// The status code decides whether Auth0 redelivers, so these
-			// mappings are correctness rather than cosmetics: a 4xx suppresses
-			// retry and is reserved for permanently bad requests.
-			dsl.Response("Unauthorized", dsl.StatusUnauthorized)
-			dsl.Response("BadRequest", dsl.StatusBadRequest)
-			dsl.Response("InternalServerError", dsl.StatusInternalServerError)
-		})
-	})
-
 	// Readiness probe endpoint
 	dsl.Method("readyz", func() {
 		dsl.Description("Check if the service is ready to accept requests.")

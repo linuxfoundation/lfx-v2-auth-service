@@ -15,8 +15,6 @@ import (
 type Service interface {
 	// Check if the service is alive.
 	Livez(context.Context) (res []byte, err error)
-	// Provision a CDP member for a newly verified user, from an Auth0 event.
-	ProvisionCdpUUID(context.Context, *ProvisionCdpUUIDPayload) (err error)
 	// Check if the service is ready to accept requests.
 	Readyz(context.Context) (res []byte, err error)
 }
@@ -35,62 +33,10 @@ const ServiceName = "auth-service"
 // MethodNames lists the service method names as defined in the design. These
 // are the same values that are set in the endpoint request contexts under the
 // MethodKey key.
-var MethodNames = [3]string{"livez", "provision-cdp-uuid", "readyz"}
-
-// Unparseable event payload
-type BadRequest string
-
-// Transient failure; the event should be redelivered
-type InternalServerError string
-
-// ProvisionCdpUUIDPayload is the payload type of the auth-service service
-// provision-cdp-uuid method.
-type ProvisionCdpUUIDPayload struct {
-	// Static bearer secret configured on the event stream
-	Authorization *string
-	// Auth0 event payload
-	Body []byte
-}
+var MethodNames = [2]string{"livez", "readyz"}
 
 // Service unavailable
 type ServiceUnavailable string
-
-// Missing or invalid bearer secret
-type Unauthorized string
-
-// Error returns an error description.
-func (e BadRequest) Error() string {
-	return "Unparseable event payload"
-}
-
-// ErrorName returns "BadRequest".
-//
-// Deprecated: Use GoaErrorName - https://github.com/goadesign/goa/issues/3105
-func (e BadRequest) ErrorName() string {
-	return e.GoaErrorName()
-}
-
-// GoaErrorName returns "BadRequest".
-func (e BadRequest) GoaErrorName() string {
-	return "BadRequest"
-}
-
-// Error returns an error description.
-func (e InternalServerError) Error() string {
-	return "Transient failure; the event should be redelivered"
-}
-
-// ErrorName returns "InternalServerError".
-//
-// Deprecated: Use GoaErrorName - https://github.com/goadesign/goa/issues/3105
-func (e InternalServerError) ErrorName() string {
-	return e.GoaErrorName()
-}
-
-// GoaErrorName returns "InternalServerError".
-func (e InternalServerError) GoaErrorName() string {
-	return "InternalServerError"
-}
 
 // Error returns an error description.
 func (e ServiceUnavailable) Error() string {
@@ -107,21 +53,4 @@ func (e ServiceUnavailable) ErrorName() string {
 // GoaErrorName returns "ServiceUnavailable".
 func (e ServiceUnavailable) GoaErrorName() string {
 	return "ServiceUnavailable"
-}
-
-// Error returns an error description.
-func (e Unauthorized) Error() string {
-	return "Missing or invalid bearer secret"
-}
-
-// ErrorName returns "Unauthorized".
-//
-// Deprecated: Use GoaErrorName - https://github.com/goadesign/goa/issues/3105
-func (e Unauthorized) ErrorName() string {
-	return e.GoaErrorName()
-}
-
-// GoaErrorName returns "Unauthorized".
-func (e Unauthorized) GoaErrorName() string {
-	return "Unauthorized"
 }

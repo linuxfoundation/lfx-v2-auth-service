@@ -11,13 +11,13 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 )
 
-// Event is an Auth0 Event Stream delivery.
+// Event is one Auth0 event.
 //
 // The payload is Auth0's, not ours, and the field paths below are recorded from
-// the event-type documentation rather than from a captured event. The handler
-// therefore logs the raw body on arrival: the first real delivery is what
-// confirms these paths, and a mismatch shows up as visible data rather than as
-// a silently empty struct.
+// the event-type documentation rather than from a captured event. The consumer
+// therefore logs the shape of each message on arrival: the first real event is
+// what confirms these paths, and a mismatch shows up as visible data rather
+// than as a silently empty struct.
 type Event struct {
 	ID   string          `json:"id"`
 	Type string          `json:"type"`
@@ -63,10 +63,30 @@ const (
 	EventTypeUserCreated = "user.created"
 )
 
+// streamMessage is the envelope the events stream wraps each event in. The
+// offset is duplicated here and in the SSE `id` field; the consumer tracks the
+// `id`, so only the event is read back out.
+type streamMessage struct {
+	Event json.RawMessage `json:"event"`
+}
+
+// ParseStreamMessage decodes one `data:` payload from the events stream.
+//
+// A message that carries no event envelope is treated as the bare event, so a
+// captured webhook body still parses. That tolerance exists because the exact
+// shape has not been confirmed against a live tenant.
+func ParseStreamMessage(raw []byte) (Event, EventUser, error) {
+	var message streamMessage
+	if err := json.Unmarshal(raw, &message); err == nil && len(message.Event) > 0 {
+		return ParseEvent(message.Event)
+	}
+	return ParseEvent(raw)
+}
+
 // ParseEvent decodes an Auth0 event body.
 //
-// A parse failure is permanent: redelivering the same bytes cannot help, so the
-// caller answers 4xx rather than 5xx.
+// A parse failure is permanent: the same bytes will not parse on a retry, so
+// the caller advances past the message rather than reconnecting onto it.
 func ParseEvent(raw []byte) (Event, EventUser, error) {
 	var event Event
 	if err := json.Unmarshal(raw, &event); err != nil {

@@ -1,0 +1,40 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+
+# Lets the replicas elect one reader for the Auth0 events stream. Separate from
+# the Authelia role, which is gated on a different repository type.
+{{- if .Values.provisioningConsumer.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Chart.Name }}-provisioning
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+rules:
+# `create` is needed once, for whichever replica gets there first.
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["lfx-v2-auth-service-provisioning"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Chart.Name }}-provisioning
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Chart.Name }}-provisioning
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.serviceAccount.name | default .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

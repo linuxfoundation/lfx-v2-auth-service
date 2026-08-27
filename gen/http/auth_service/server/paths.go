@@ -12,11 +12,6 @@ func LivezAuthServicePath() string {
 	return "/livez"
 }
 
-// ProvisionCdpUUIDAuthServicePath returns the URL path to the auth-service service provision-cdp-uuid HTTP endpoint.
-func ProvisionCdpUUIDAuthServicePath() string {
-	return "/webhooks/auth0/cdp-provisioning"
-}
-
 // ReadyzAuthServicePath returns the URL path to the auth-service service readyz HTTP endpoint.
 func ReadyzAuthServicePath() string {
 	return "/readyz"

@@ -10,7 +10,6 @@ package server
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
@@ -28,88 +27,6 @@ func EncodeLivezResponse(encoder func(context.Context, http.ResponseWriter) goah
 		body := res
 		w.WriteHeader(http.StatusOK)
 		return enc.Encode(body)
-	}
-}
-
-// EncodeProvisionCdpUUIDResponse returns an encoder for responses returned by
-// the auth-service provision-cdp-uuid endpoint.
-func EncodeProvisionCdpUUIDResponse(encoder func(context.Context, http.ResponseWriter) goahttp.Encoder) func(context.Context, http.ResponseWriter, any) error {
-	return func(ctx context.Context, w http.ResponseWriter, v any) error {
-		w.WriteHeader(http.StatusNoContent)
-		return nil
-	}
-}
-
-// DecodeProvisionCdpUUIDRequest returns a decoder for requests sent to the
-// auth-service provision-cdp-uuid endpoint.
-func DecodeProvisionCdpUUIDRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) (*authservice.ProvisionCdpUUIDPayload, error) {
-	return func(r *http.Request) (*authservice.ProvisionCdpUUIDPayload, error) {
-		var (
-			body []byte
-			err  error
-		)
-		err = decoder(r).Decode(&body)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil, goa.MissingPayloadError()
-			}
-			var gerr *goa.ServiceError
-			if errors.As(err, &gerr) {
-				return nil, gerr
-			}
-			return nil, goa.DecodePayloadError(err.Error())
-		}
-
-		var (
-			authorization *string
-		)
-		authorizationRaw := r.Header.Get("Authorization")
-		if authorizationRaw != "" {
-			authorization = &authorizationRaw
-		}
-		payload := NewProvisionCdpUUIDPayload(body, authorization)
-
-		return payload, nil
-	}
-}
-
-// EncodeProvisionCdpUUIDError returns an encoder for errors returned by the
-// provision-cdp-uuid auth-service endpoint.
-func EncodeProvisionCdpUUIDError(encoder func(context.Context, http.ResponseWriter) goahttp.Encoder, formatter func(ctx context.Context, err error) goahttp.Statuser) func(context.Context, http.ResponseWriter, error) error {
-	encodeError := goahttp.ErrorEncoder(encoder, formatter)
-	return func(ctx context.Context, w http.ResponseWriter, v error) error {
-		var en goa.GoaErrorNamer
-		if !errors.As(v, &en) {
-			return encodeError(ctx, w, v)
-		}
-		switch en.GoaErrorName() {
-		case "BadRequest":
-			var res authservice.BadRequest
-			errors.As(v, &res)
-			enc := encoder(ctx, w)
-			body := res
-			w.Header().Set("goa-error", res.GoaErrorName())
-			w.WriteHeader(http.StatusBadRequest)
-			return enc.Encode(body)
-		case "InternalServerError":
-			var res authservice.InternalServerError
-			errors.As(v, &res)
-			enc := encoder(ctx, w)
-			body := res
-			w.Header().Set("goa-error", res.GoaErrorName())
-			w.WriteHeader(http.StatusInternalServerError)
-			return enc.Encode(body)
-		case "Unauthorized":
-			var res authservice.Unauthorized
-			errors.As(v, &res)
-			enc := encoder(ctx, w)
-			body := res
-			w.Header().Set("goa-error", res.GoaErrorName())
-			w.WriteHeader(http.StatusUnauthorized)
-			return enc.Encode(body)
-		default:
-			return encodeError(ctx, w, v)
-		}
 	}
 }
 

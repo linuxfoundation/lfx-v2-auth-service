@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -30,7 +29,7 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	// Other encodings can be used by providing the corresponding functions,
 	// see goa.design/implement/encoding.
 	var (
-		dec = requestDecoder
+		dec = goahttp.RequestDecoder
 		enc = goahttp.ResponseEncoder
 	)
 
@@ -88,13 +87,8 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	var handler http.Handler = mux
 	if dbg {
 		// Log query and response bodies if debug logs are enabled.
-		// Skip the provisioning webhook: Auth0 events carry PII and the
-		// handler already logs a shape-only summary.
-		handler = skipPathMiddleware(authserver.ProvisionCdpUUIDAuthServicePath(), debug.HTTP())(handler)
+		handler = debug.HTTP()(handler)
 	}
-	// Applied last so it wraps everything above, including the debug handler —
-	// otherwise that reads the body before the cap takes effect.
-	handler = limitRequestBody(handler)
 	// Wrap the handler with OpenTelemetry instrumentation
 	handler = otelhttp.NewHandler(handler, "auth-service",
 		otelhttp.WithFilter(func(r *http.Request) bool {
@@ -105,14 +99,7 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 
 	// Start HTTP server using default configuration, change the code to
 	// configure the server as required by your service.
-	srv := &http.Server{
-		Addr:              host,
-		Handler:           handler,
-		ReadHeaderTimeout: 60 * time.Second,
-		// Caps how long an unauthenticated caller may trickle a body through
-		// MaxBytesReader before the bearer check runs.
-		ReadTimeout: 60 * time.Second,
-	}
+	srv := &http.Server{Addr: host, Handler: handler, ReadHeaderTimeout: time.Second * 60}
 	for _, m := range authServer.Mounts {
 		slog.InfoContext(ctx, "HTTP endpoint mounted",
 			"method", m.Method,
@@ -143,78 +130,6 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 			errc <- err
 		}
 	}()
-}
-
-// rawBodyDecoder reads a request body verbatim when the target is a byte
-// slice, and defers to goa's usual decoder otherwise.
-//
-// A goa `Bytes` payload is decoded with encoding/json, which accepts only a
-// base64 string for that target — so a plain JSON body fails to decode before
-// any handler runs. The provisioning webhook receives Auth0's own JSON and
-// parses it itself, precisely because the exact shape is not pinned down, so
-// it needs the bytes as sent.
-type rawBodyDecoder struct {
-	request *http.Request
-}
-
-// Decode implements goahttp.Decoder.
-func (d rawBodyDecoder) Decode(v any) error {
-	target, ok := v.(*[]byte)
-	if !ok {
-		return goahttp.RequestDecoder(d.request).Decode(v)
-	}
-
-	body, err := io.ReadAll(d.request.Body)
-	if err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		// goa maps io.EOF to a missing-payload error.
-		return io.EOF
-	}
-
-	*target = body
-	return nil
-}
-
-// requestDecoder returns the decoder used for every inbound request.
-func requestDecoder(r *http.Request) goahttp.Decoder {
-	return rawBodyDecoder{request: r}
-}
-
-// maxRequestBodyBytes caps an inbound request body. Auth0 user events are a
-// few KB; this leaves generous headroom while keeping a single request far
-// below the pod's memory limit.
-const maxRequestBodyBytes = 1 << 20 // 1 MiB
-
-// limitRequestBody caps how much of a request body the server will read.
-//
-// The generated transport decodes the whole body before any handler runs, so
-// the provisioning webhook's bearer check happens after the allocation. That
-// endpoint is reachable from the internet and unauthenticated at the edge by
-// design, which would otherwise let an unauthenticated caller size the
-// allocation.
-func limitRequestBody(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// skipPathMiddleware applies mw only when the request path differs from path.
-func skipPathMiddleware(path string, mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		wrapped := mw(next)
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == path {
-				next.ServeHTTP(w, r)
-				return
-			}
-			wrapped.ServeHTTP(w, r)
-		})
-	}
 }
 
 // errorHandler returns a function that writes and logs the given error.

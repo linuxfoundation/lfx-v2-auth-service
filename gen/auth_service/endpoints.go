@@ -15,24 +15,21 @@ import (
 
 // Endpoints wraps the "auth-service" service endpoints.
 type Endpoints struct {
-	Livez            goa.Endpoint
-	ProvisionCdpUUID goa.Endpoint
-	Readyz           goa.Endpoint
+	Livez  goa.Endpoint
+	Readyz goa.Endpoint
 }
 
 // NewEndpoints wraps the methods of the "auth-service" service with endpoints.
 func NewEndpoints(s Service) *Endpoints {
 	return &Endpoints{
-		Livez:            NewLivezEndpoint(s),
-		ProvisionCdpUUID: NewProvisionCdpUUIDEndpoint(s),
-		Readyz:           NewReadyzEndpoint(s),
+		Livez:  NewLivezEndpoint(s),
+		Readyz: NewReadyzEndpoint(s),
 	}
 }
 
 // Use applies the given middleware to all the "auth-service" service endpoints.
 func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 	e.Livez = m(e.Livez)
-	e.ProvisionCdpUUID = m(e.ProvisionCdpUUID)
 	e.Readyz = m(e.Readyz)
 }
 
@@ -41,15 +38,6 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 func NewLivezEndpoint(s Service) goa.Endpoint {
 	return func(ctx context.Context, req any) (any, error) {
 		return s.Livez(ctx)
-	}
-}
-
-// NewProvisionCdpUUIDEndpoint returns an endpoint function that calls the
-// method "provision-cdp-uuid" of service "auth-service".
-func NewProvisionCdpUUIDEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req any) (any, error) {
-		p := req.(*ProvisionCdpUUIDPayload)
-		return nil, s.ProvisionCdpUUID(ctx, p)
 	}
 }
 

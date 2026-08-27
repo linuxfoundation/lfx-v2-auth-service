@@ -23,7 +23,7 @@ import (
 //	command (subcommand1|subcommand2|...)
 func UsageCommands() []string {
 	return []string{
-		"auth-service (livez|provision-cdp-uuid|readyz)",
+		"auth-service (livez|readyz)",
 	}
 }
 
@@ -47,15 +47,10 @@ func ParseEndpoint(
 
 		authServiceLivezFlags = flag.NewFlagSet("livez", flag.ExitOnError)
 
-		authServiceProvisionCdpUUIDFlags             = flag.NewFlagSet("provision-cdp-uuid", flag.ExitOnError)
-		authServiceProvisionCdpUUIDBodyFlag          = authServiceProvisionCdpUUIDFlags.String("body", "REQUIRED", "")
-		authServiceProvisionCdpUUIDAuthorizationFlag = authServiceProvisionCdpUUIDFlags.String("authorization", "", "")
-
 		authServiceReadyzFlags = flag.NewFlagSet("readyz", flag.ExitOnError)
 	)
 	authServiceFlags.Usage = authServiceUsage
 	authServiceLivezFlags.Usage = authServiceLivezUsage
-	authServiceProvisionCdpUUIDFlags.Usage = authServiceProvisionCdpUUIDUsage
 	authServiceReadyzFlags.Usage = authServiceReadyzUsage
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
@@ -95,9 +90,6 @@ func ParseEndpoint(
 			case "livez":
 				epf = authServiceLivezFlags
 
-			case "provision-cdp-uuid":
-				epf = authServiceProvisionCdpUUIDFlags
-
 			case "readyz":
 				epf = authServiceReadyzFlags
 
@@ -128,9 +120,6 @@ func ParseEndpoint(
 			switch epn {
 			case "livez":
 				endpoint = c.Livez()
-			case "provision-cdp-uuid":
-				endpoint = c.ProvisionCdpUUID()
-				data, err = authservicec.BuildProvisionCdpUUIDPayload(*authServiceProvisionCdpUUIDBodyFlag, *authServiceProvisionCdpUUIDAuthorizationFlag)
 			case "readyz":
 				endpoint = c.Readyz()
 			}
@@ -150,7 +139,6 @@ func authServiceUsage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n    %s [globalflags] auth-service COMMAND [flags]\n\n", os.Args[0])
 	fmt.Fprintln(os.Stderr, "COMMAND:")
 	fmt.Fprintln(os.Stderr, `    livez: Check if the service is alive.`)
-	fmt.Fprintln(os.Stderr, `    provision-cdp-uuid: Provision a CDP member for a newly verified user, from an Auth0 event.`)
 	fmt.Fprintln(os.Stderr, `    readyz: Check if the service is ready to accept requests.`)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Additional help:")
@@ -170,26 +158,6 @@ func authServiceLivezUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Example:")
 	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "auth-service livez")
-}
-
-func authServiceProvisionCdpUUIDUsage() {
-	// Header with flags
-	fmt.Fprintf(os.Stderr, "%s [flags] auth-service provision-cdp-uuid", os.Args[0])
-	fmt.Fprint(os.Stderr, " -body STRING")
-	fmt.Fprint(os.Stderr, " -authorization STRING")
-	fmt.Fprintln(os.Stderr)
-
-	// Description
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, `Provision a CDP member for a newly verified user, from an Auth0 event.`)
-
-	// Flags list
-	fmt.Fprintln(os.Stderr, `    -body STRING: `)
-	fmt.Fprintln(os.Stderr, `    -authorization STRING: `)
-
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Example:")
-	fmt.Fprintf(os.Stderr, "    %s %s\n", os.Args[0], "auth-service provision-cdp-uuid --body \"RnVnaXQgcG9zc2ltdXMgcXVvIG5lcXVlIGFiLg==\" --authorization \"Voluptatem non accusamus consequatur voluptas earum aut.\"")
 }
 
 func authServiceReadyzUsage() {

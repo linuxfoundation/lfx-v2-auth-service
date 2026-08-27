@@ -11,30 +11,6 @@ import (
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 )
 
-// NewProvisionCdpUUIDBadRequest builds a auth-service service
-// provision-cdp-uuid endpoint BadRequest error.
-func NewProvisionCdpUUIDBadRequest(body string) authservice.BadRequest {
-	v := authservice.BadRequest(body)
-
-	return v
-}
-
-// NewProvisionCdpUUIDInternalServerError builds a auth-service service
-// provision-cdp-uuid endpoint InternalServerError error.
-func NewProvisionCdpUUIDInternalServerError(body string) authservice.InternalServerError {
-	v := authservice.InternalServerError(body)
-
-	return v
-}
-
-// NewProvisionCdpUUIDUnauthorized builds a auth-service service
-// provision-cdp-uuid endpoint Unauthorized error.
-func NewProvisionCdpUUIDUnauthorized(body string) authservice.Unauthorized {
-	v := authservice.Unauthorized(body)
-
-	return v
-}
-
 // NewReadyzServiceUnavailable builds a auth-service service readyz endpoint
 // ServiceUnavailable error.
 func NewReadyzServiceUnavailable(body string) authservice.ServiceUnavailable {

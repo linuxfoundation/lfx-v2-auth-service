@@ -49,6 +49,10 @@ spec:
               {{- toYaml $config.valueFrom | nindent 14 }}
             {{- end }}
           {{- end }}
+          # Derived rather than configured, so the reader can never be on while
+          # the Lease permissions it needs are off.
+          - name: PROVISIONING_CONSUMER_ENABLED
+            value: {{ .Values.provisioningConsumer.enabled | quote }}
           {{- with .Values.app.extraEnv }}
           {{- toYaml . | nindent 10 }}
           {{- end }}
