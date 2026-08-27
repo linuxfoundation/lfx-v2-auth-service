@@ -305,8 +305,7 @@ func (c *Consumer) subscribeOptions(ctx context.Context) (auth0.SubscribeOptions
 // Returning an error ends the connection without advancing the offset, so the
 // next connection replays from the last message that was fully processed.
 func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error {
-	switch message.Type {
-	case auth0.EventTypeError:
+	if message.Type == auth0.EventTypeError {
 		// The client surfaces this as a terminal error from Subscribe. Not
 		// advancing means the message is seen again, which is correct: it says
 		// nothing about the event that follows it.
