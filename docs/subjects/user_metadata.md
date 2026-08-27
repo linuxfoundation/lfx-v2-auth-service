@@ -71,6 +71,7 @@ The service returns a structured reply with user metadata:
     "phone_number": "+1-555-0123",
     "t_shirt_size": "L",
     "bio": "Software engineer and open source contributor.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://example.com/avatar.jpg",
     "zoneinfo": "America/Los_Angeles"
   }
@@ -147,6 +148,7 @@ The request payload must be a JSON object containing the user data to update. Th
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
     "bio": "Cloud architect building resilient systems in the Skylands.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }
@@ -181,6 +183,7 @@ The service returns a structured reply indicating success or failure:
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
     "bio": "Cloud architect building resilient systems in the Skylands.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }

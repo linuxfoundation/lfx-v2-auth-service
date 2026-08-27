@@ -45,12 +45,23 @@ type UserMetadata struct {
 	PhoneNumber        *string `json:"phone_number,omitempty" yaml:"phone_number,omitempty"`
 	TShirtSize         *string `json:"t_shirt_size,omitempty" yaml:"t_shirt_size,omitempty"`
 	Bio                *string `json:"bio,omitempty" yaml:"bio,omitempty"`
+	Skills             *string `json:"skills,omitempty" yaml:"skills,omitempty"`
 }
 
 // bioMaxLength is the maximum number of characters allowed in the About Me (bio)
 // field. Auth0 imposes no limit, so this is the chokepoint cap; longer values are
 // truncated during sanitization.
 const bioMaxLength = 2000
+
+// skillsMaxLength is the maximum number of characters allowed in the
+// comma-separated Skills string. Auth0 imposes no limit, so this is the
+// chokepoint cap; the final joined value is truncated during sanitization.
+const skillsMaxLength = 2000
+
+// skillsMaxCount is the maximum number of individual skill items allowed in
+// the comma-separated Skills string. Items beyond this count are dropped
+// during sanitization, before the length cap is applied.
+const skillsMaxCount = 50
 
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
@@ -176,6 +187,31 @@ func (um *UserMetadata) userMetadataSanitize() {
 			*um.Bio = string(runes[:bioMaxLength])
 		}
 	}
+	if um.Skills != nil {
+		rawItems := strings.Split(*um.Skills, ",")
+		cleaned := make([]string, 0, len(rawItems))
+		seen := make(map[string]struct{}, len(rawItems))
+		for _, item := range rawItems {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			key := strings.ToLower(item)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			cleaned = append(cleaned, item)
+		}
+		if len(cleaned) > skillsMaxCount {
+			cleaned = cleaned[:skillsMaxCount]
+		}
+		joined := strings.Join(cleaned, ", ")
+		if runes := []rune(joined); len(runes) > skillsMaxLength {
+			joined = string(runes[:skillsMaxLength])
+		}
+		*um.Skills = joined
+	}
 	if um.Picture != nil {
 		*um.Picture = strings.TrimSpace(*um.Picture)
 	}
@@ -269,6 +305,11 @@ func (a *UserMetadata) Patch(update *UserMetadata) bool {
 
 	if update.Bio != nil {
 		a.Bio = update.Bio
+		updated = true
+	}
+
+	if update.Skills != nil {
+		a.Skills = update.Skills
 		updated = true
 	}
 

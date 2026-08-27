@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -161,6 +162,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 					TShirtSize:         converters.StringPtr("  M  "),
 					Bio:                converters.StringPtr("  Passionate engineer  "),
+					Skills:             converters.StringPtr("  Go,  Python , Python, kubernetes  "),
 					Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 					Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 				},
@@ -185,6 +187,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 					TShirtSize:         converters.StringPtr("M"),
 					Bio:                converters.StringPtr("Passionate engineer"),
+					Skills:             converters.StringPtr("Go, Python, kubernetes"),
 					Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 					Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 				},
@@ -303,6 +306,7 @@ func TestUser_UserSanitize(t *testing.T) {
 			checkStringPtr("PhoneNumber", userCopy.UserMetadata.PhoneNumber, tt.expected.UserMetadata.PhoneNumber)
 			checkStringPtr("TShirtSize", userCopy.UserMetadata.TShirtSize, tt.expected.UserMetadata.TShirtSize)
 			checkStringPtr("Bio", userCopy.UserMetadata.Bio, tt.expected.UserMetadata.Bio)
+			checkStringPtr("Skills", userCopy.UserMetadata.Skills, tt.expected.UserMetadata.Skills)
 			checkStringPtr("Picture", userCopy.UserMetadata.Picture, tt.expected.UserMetadata.Picture)
 			checkStringPtr("Zoneinfo", userCopy.UserMetadata.Zoneinfo, tt.expected.UserMetadata.Zoneinfo)
 		})
@@ -326,6 +330,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 			TShirtSize:         converters.StringPtr("  M  "),
 			Bio:                converters.StringPtr("  Passionate engineer  "),
+			Skills:             converters.StringPtr("  Go,  Python , Python, kubernetes  "),
 			Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 			Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 		}
@@ -347,6 +352,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PhoneNumber":        "+1-555-123-4567",
 			"TShirtSize":         "M",
 			"Bio":                "Passionate engineer",
+			"Skills":             "Go, Python, kubernetes",
 			"Picture":            "https://example.com/pic.jpg",
 			"Zoneinfo":           "America/Los_Angeles",
 		}
@@ -366,6 +372,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PhoneNumber":        metadata.PhoneNumber,
 			"TShirtSize":         metadata.TShirtSize,
 			"Bio":                metadata.Bio,
+			"Skills":             metadata.Skills,
 			"Picture":            metadata.Picture,
 			"Zoneinfo":           metadata.Zoneinfo,
 		}
@@ -442,6 +449,95 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 		if !utf8.ValidString(*metadata.Bio) {
 			t.Error("Bio is not valid UTF-8 after truncation")
+		}
+	})
+
+	t.Run("skills: trims whitespace and rejoins with comma-space", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("  Go , Python ,Kubernetes "),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, Python, Kubernetes" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, Python, Kubernetes")
+		}
+	})
+
+	t.Run("skills: drops empty items", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Go,, ,Python,"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, Python" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, Python")
+		}
+	})
+
+	t.Run("skills: dedupes case-insensitively keeping first casing", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Go, python, GO, PYTHON, Rust"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, python, Rust" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, python, Rust")
+		}
+	})
+
+	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
+		items := make([]string, skillsMaxCount+10)
+		for i := range items {
+			items[i] = fmt.Sprintf("skill%d", i)
+		}
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Join(items, ",")),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want capped value")
+		}
+		got := strings.Split(*metadata.Skills, ", ")
+		if len(got) != skillsMaxCount {
+			t.Errorf("Skills item count = %d, want %d", len(got), skillsMaxCount)
+		}
+	})
+
+	t.Run("skills: truncated to skillsMaxLength characters", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("a", skillsMaxLength+100)),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Skills)); got != skillsMaxLength {
+			t.Errorf("Skills length = %d, want %d", got, skillsMaxLength)
+		}
+	})
+
+	t.Run("multibyte skills is truncated on a rune boundary", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("é", skillsMaxLength+50)),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Skills)); got != skillsMaxLength {
+			t.Errorf("Skills rune length = %d, want %d", got, skillsMaxLength)
+		}
+		if !utf8.ValidString(*metadata.Skills) {
+			t.Error("Skills is not valid UTF-8 after truncation")
 		}
 	})
 }
@@ -1027,6 +1123,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
 				Bio:                converters.StringPtr("Engineer bio"),
+				Skills:             converters.StringPtr("Go, Python"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
@@ -1046,6 +1143,24 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
 				Bio:                converters.StringPtr("Engineer bio"),
+				Skills:             converters.StringPtr("Go, Python"),
+			},
+		},
+		{
+			name:           "update skills field",
+			original:       &UserMetadata{},
+			update:         &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+			expectedResult: true,
+			expectedFinal:  &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+		},
+		{
+			name:           "nil skills update preserves existing skills",
+			original:       &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+			update:         &UserMetadata{Name: converters.StringPtr("John")},
+			expectedResult: true,
+			expectedFinal: &UserMetadata{
+				Name:   converters.StringPtr("John"),
+				Skills: converters.StringPtr("Go, Python"),
 			},
 		},
 		{
@@ -1187,6 +1302,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 			checkStringPtr("PhoneNumber", originalCopy.PhoneNumber, tt.expectedFinal.PhoneNumber)
 			checkStringPtr("TShirtSize", originalCopy.TShirtSize, tt.expectedFinal.TShirtSize)
 			checkStringPtr("Bio", originalCopy.Bio, tt.expectedFinal.Bio)
+			checkStringPtr("Skills", originalCopy.Skills, tt.expectedFinal.Skills)
 		})
 	}
 }

@@ -24,6 +24,7 @@ users:
       phone_number: "+1-555-123-4567"
       t_shirt_size: "M"
       bio: "Cloud architect and open source enthusiast. I build resilient distributed systems and mentor engineers on their cloud journey."
+      skills: "Go, Kubernetes, Terraform, AWS, Distributed Systems"
     identities:
       - provider: "google-oauth2"
         identity_id: "google-zephyr-001"
@@ -59,6 +60,7 @@ users:
       phone_number: "+44-20-7946-0958"
       t_shirt_size: "L"
       bio: "Senior DevOps engineer passionate about automation and CI/CD. Traveler and foodie in my spare time."
+      skills: "Python, CI/CD, Docker, Ansible, Site Reliability Engineering"
 
   - token: "mock-token-phoenix-003"
     user_id: "auth0|phoenix003"
@@ -82,3 +84,4 @@ users:
       phone_number: "+1-415-555-9876"
       t_shirt_size: "XL"
       bio: "Full stack developer who loves shipping delightful products. Always learning, always building."
+      skills: "TypeScript, React, Node.js, GraphQL, PostgreSQL"
