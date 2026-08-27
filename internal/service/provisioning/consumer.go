@@ -59,6 +59,16 @@ const maxBarrenReconnects = 3
 // offsetAgeInterval is how often the offset-age gauge is emitted.
 const offsetAgeInterval = 1 * time.Minute
 
+// forbiddenRetryInterval is the wait after a 403.
+//
+// The contract says to surface a 403 for a human rather than retry blindly,
+// because it means either the read:events grant is missing — which no amount
+// of retrying fixes — or the tenant's concurrent-connection allowance is
+// used up, where retrying every second is actively part of the problem. The
+// stream is not abandoned, since a handover can produce a 403 that clears on
+// its own, but it is retried slowly and logged loudly enough to be noticed.
+const forbiddenRetryInterval = 5 * time.Minute
+
 // Consumer reads the Auth0 events stream and provisions the users it names.
 //
 // Exactly one replica may run it. The stream has no competing-consumer
@@ -74,8 +84,9 @@ type Consumer struct {
 
 	// Reconnection backoff bounds. Fields rather than constants so tests can
 	// exercise the reconnect paths without sleeping through them.
-	minBackoff time.Duration
-	maxBackoff time.Duration
+	minBackoff     time.Duration
+	maxBackoff     time.Duration
+	refusalBackoff time.Duration
 
 	// Failure bookkeeping for the message currently being retried.
 	failedOffset string
@@ -123,11 +134,12 @@ func WithReplayWindow(window time.Duration) ConsumerOption {
 // NewConsumer creates the events consumer.
 func NewConsumer(options ...ConsumerOption) (*Consumer, error) {
 	consumer := &Consumer{
-		eventTypes:   []string{EventTypeUserCreated, EventTypeUserUpdated},
-		replayWindow: 24 * time.Hour,
-		now:          time.Now,
-		minBackoff:   minReconnectBackoff,
-		maxBackoff:   maxReconnectBackoff,
+		eventTypes:     []string{EventTypeUserCreated, EventTypeUserUpdated},
+		replayWindow:   24 * time.Hour,
+		now:            time.Now,
+		minBackoff:     minReconnectBackoff,
+		maxBackoff:     maxReconnectBackoff,
+		refusalBackoff: forbiddenRetryInterval,
 	}
 	for _, option := range options {
 		option(consumer)
@@ -219,7 +231,12 @@ func (c *Consumer) Run(ctx context.Context) {
 		// it did the same from this offset, the offset itself is the common
 		// factor — which is the only signal available when Auth0 ends an
 		// established stream in-band without documenting how to read why.
-		if c.barren(opts.From, madeProgress) {
+		//
+		// Refusals are excluded. A 401 or 403 is answered before the offset is
+		// ever looked at, so counting them would throw away a perfectly good
+		// position over a missing grant and buy a needless replay once it is
+		// granted.
+		if !refused(err) && c.barren(opts.From, madeProgress) {
 			slog.ErrorContext(ctx, "events offset has produced only failed connections, restarting from the replay window",
 				"error", err,
 				"attempts", maxBarrenReconnects,
@@ -233,8 +250,24 @@ func (c *Consumer) Run(ctx context.Context) {
 
 		wait := backoff
 		var rateLimited *auth0.RateLimitedError
-		if errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0 {
+		switch {
+		case errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0:
 			wait = rateLimited.RetryAfter
+
+		case refused(err):
+			// Named rather than left to the generic line, because the two
+			// causes need different people and the ordinary reconnect message
+			// would bury both under a stream that looks merely flaky.
+			wait = c.refusalBackoff
+			slog.ErrorContext(ctx, "Auth0 refused the events stream, needs a human",
+				"error", err,
+				"causes", "the read:events grant is missing, or the tenant's concurrent connection allowance is used up",
+				"retry_in", wait,
+			)
+			if !sleep(ctx, wait) {
+				return
+			}
+			continue
 		}
 
 		slog.ErrorContext(ctx, "Auth0 events stream ended, reconnecting",
@@ -413,6 +446,16 @@ func (c *Consumer) barren(from string, madeProgress bool) bool {
 func (c *Consumer) forgetBarrenOffset() {
 	c.barrenOffset = ""
 	c.barrenRuns = 0
+}
+
+// refused reports whether Auth0 turned the subscription away before it read
+// the offset, which is a grant or capacity problem rather than a stream one.
+func refused(err error) bool {
+	var (
+		forbidden    errs.Forbidden
+		unauthorized errs.Unauthorized
+	)
+	return errors.As(err, &forbidden) || errors.As(err, &unauthorized)
 }
 
 // recordAdvance marks the position as having moved.

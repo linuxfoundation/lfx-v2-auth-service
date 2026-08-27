@@ -511,6 +511,43 @@ func TestConsumerRun(t *testing.T) {
 			"two failures then a message means the count restarts, so three total must not trip it")
 	})
 
+	t.Run("a refusal is retried slowly, not in the ordinary reconnect loop", func(t *testing.T) {
+		// The contract says surface a 403 for a human rather than retry
+		// blindly: a missing grant never heals by retrying, and a used-up
+		// connection allowance is made worse by it.
+		events := &mockEventsClient{alwaysErr: errs.NewForbidden("auth0 refused the events stream")}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, &mockOffsetStore{offset: "healthy"})
+		consumer.refusalBackoff = 60 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		consumer.Run(ctx)
+
+		assert.LessOrEqual(t, len(events.subscribeCalls()), 3,
+			"the refusal wait must apply instead of the ordinary reconnect backoff")
+	})
+
+	t.Run("a refusal never costs the stored offset", func(t *testing.T) {
+		// A 403 is answered before Auth0 looks at the offset, so it is no
+		// evidence at all that the offset is bad.
+		events := &mockEventsClient{alwaysErr: errs.NewForbidden("auth0 refused the events stream")}
+		offsets := &mockOffsetStore{offset: "healthy"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+		consumer.refusalBackoff = time.Millisecond
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < maxBarrenReconnects+2 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		assert.Zero(t, offsets.clears, "a grant problem must not throw away a good position")
+		assert.Equal(t, "healthy", offsets.offset)
+	})
+
 	t.Run("returns promptly when the context is already done", func(t *testing.T) {
 		events := &mockEventsClient{}
 		consumer := newTestConsumer(t, events, &mockProvisioner{}, &mockOffsetStore{})
