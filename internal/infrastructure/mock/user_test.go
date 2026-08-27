@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	jwtpkg "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 )
 
@@ -703,4 +704,43 @@ func TestUserWriter_SetPrimaryEmail(t *testing.T) {
 			t.Error("SetPrimaryEmail() expected error for unknown user but got none")
 		}
 	})
+}
+
+// TestUserWriter_UpdateUser_Skills verifies that the mock adapter's manual
+// PATCH-semantics field list (UpdateUser) picks up the Skills field: both in
+// the returned user and in what ends up persisted in the in-memory store.
+func TestUserWriter_UpdateUser_Skills(t *testing.T) {
+	ctx := context.Background()
+
+	writer := &userWriter{users: map[string]*model.User{
+		"auth0|u1": {
+			UserID: "auth0|u1",
+			UserMetadata: &model.UserMetadata{
+				Name:   converters.StringPtr("Jane Doe"),
+				Skills: converters.StringPtr("Go, Python"),
+			},
+		},
+	}}
+
+	updated, err := writer.UpdateUser(ctx, &model.User{
+		UserID: "auth0|u1",
+		UserMetadata: &model.UserMetadata{
+			Skills: converters.StringPtr("Rust, Kubernetes"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateUser() unexpected error: %v", err)
+	}
+
+	if updated.UserMetadata == nil || updated.UserMetadata.Skills == nil || *updated.UserMetadata.Skills != "Rust, Kubernetes" {
+		t.Errorf("UpdateUser() returned Skills = %v, want %q", updated.UserMetadata.Skills, "Rust, Kubernetes")
+	}
+	if updated.UserMetadata.Name == nil || *updated.UserMetadata.Name != "Jane Doe" {
+		t.Errorf("UpdateUser() should preserve Name when not specified in input, got %v", updated.UserMetadata.Name)
+	}
+
+	stored := writer.users["auth0|u1"]
+	if stored.UserMetadata.Skills == nil || *stored.UserMetadata.Skills != "Rust, Kubernetes" {
+		t.Errorf("stored user Skills = %v, want %q", stored.UserMetadata.Skills, "Rust, Kubernetes")
+	}
 }

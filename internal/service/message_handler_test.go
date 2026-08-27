@@ -341,7 +341,9 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					if organizationDomain, exists := metadata["organization_domain"]; exists && organizationDomain != "techcorp.com" {
 						t.Errorf("Result metadata organization_domain incorrect: got %v, want techcorp.com", organizationDomain)
 					}
-					if skills, exists := metadata["skills"]; exists && skills != "Go, Python, Kubernetes" {
+					if skills, exists := metadata["skills"]; !exists {
+						t.Error("Result metadata skills is missing")
+					} else if skills != "Go, Python, Kubernetes" {
 						t.Errorf("Result metadata skills incorrect: got %v, want Go, Python, Kubernetes", skills)
 					}
 				} else {

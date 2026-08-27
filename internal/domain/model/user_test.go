@@ -488,6 +488,22 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: dedupes Unicode case variants beyond simple lowercase", func(t *testing.T) {
+		// "Σ" (capital sigma), "σ" (lowercase sigma), and "ς" (final sigma) are
+		// all the same letter under Unicode case folding, but strings.ToLower
+		// leaves "ς" unchanged, so a naive lowercase comparison would treat it
+		// as a distinct value. Use case folding here to catch a regression.
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Σ, σ, ς, Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Σ, Go" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Σ, Go")
+		}
+	})
+
 	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
 		items := make([]string, skillsMaxCount+10)
 		for i := range items {

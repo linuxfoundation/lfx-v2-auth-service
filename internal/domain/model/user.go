@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"golang.org/x/text/cases"
+
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
@@ -191,20 +193,23 @@ func (um *UserMetadata) userMetadataSanitize() {
 		rawItems := strings.Split(*um.Skills, ",")
 		cleaned := make([]string, 0, len(rawItems))
 		seen := make(map[string]struct{}, len(rawItems))
+		folder := cases.Fold()
 		for _, item := range rawItems {
 			item = strings.TrimSpace(item)
 			if item == "" {
 				continue
 			}
-			key := strings.ToLower(item)
+			// Use Unicode case folding (not strings.ToLower) so that case
+			// variants like "Σ" and "ς" are recognized as duplicates.
+			key := folder.String(item)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
 			cleaned = append(cleaned, item)
-		}
-		if len(cleaned) > skillsMaxCount {
-			cleaned = cleaned[:skillsMaxCount]
+			if len(cleaned) == skillsMaxCount {
+				break
+			}
 		}
 		joined := strings.Join(cleaned, ", ")
 		if runes := []rune(joined); len(runes) > skillsMaxLength {
