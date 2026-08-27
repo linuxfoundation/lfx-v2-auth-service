@@ -65,6 +65,14 @@ const skillsMaxLength = 2000
 // during sanitization, before the length cap is applied.
 const skillsMaxCount = 50
 
+// skillsMaxRawLength bounds the raw comma-separated Skills value before it is
+// split into items. Without this guard, strings.Split (and the cleaned/seen
+// slices sized from it) would allocate proportionally to every comma in the
+// input before skillsMaxCount can be applied, letting a delimiter-heavy
+// payload cause an oversized temporary allocation. This is set well above
+// skillsMaxLength to leave slack for whitespace around items.
+const skillsMaxRawLength = 4000
+
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
 
@@ -190,6 +198,11 @@ func (um *UserMetadata) userMetadataSanitize() {
 		}
 	}
 	if um.Skills != nil {
+		// Bound the raw input before splitting so a delimiter-heavy payload
+		// can't force an oversized allocation ahead of the item-count cap.
+		if runes := []rune(*um.Skills); len(runes) > skillsMaxRawLength {
+			*um.Skills = string(runes[:skillsMaxRawLength])
+		}
 		rawItems := strings.Split(*um.Skills, ",")
 		cleaned := make([]string, 0, len(rawItems))
 		seen := make(map[string]struct{}, len(rawItems))

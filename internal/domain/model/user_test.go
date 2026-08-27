@@ -504,6 +504,26 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: raw input beyond skillsMaxRawLength is discarded before splitting", func(t *testing.T) {
+		// Build enough duplicate "dup," repetitions to push the raw length past
+		// skillsMaxRawLength (4000 runes) using content that collapses to a
+		// single deduped item, then place a uniquely identifiable marker item
+		// right after that boundary. If the raw-length guard works, the marker
+		// is discarded before it ever reaches the split/dedup logic, even
+		// though it would easily fit under skillsMaxLength on its own.
+		const repCount = 1001 // 1001 * len("dup,") = 4004 runes, crossing the 4000 boundary
+		raw := strings.Repeat("dup,", repCount) + "UNIQUE_MARKER"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup" {
+			t.Errorf("Skills = %v, want %q (marker beyond the raw-length boundary must be discarded)", metadata.Skills, "dup")
+		}
+	})
+
 	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
 		items := make([]string, skillsMaxCount+10)
 		for i := range items {
