@@ -191,9 +191,9 @@ func TestProvisionGate(t *testing.T) {
 		assert.NotEqual(t, reasonEmailNotVerified, result.Reason)
 	})
 
-	// A forged or stale payload claiming eligibility must not get past the
-	// authoritative read: the shared secret proves who sent the request, not
-	// that its fields are true.
+	// A stale or malformed event claiming eligibility must not get past the
+	// authoritative read: the stream proves Auth0 sent the event, not that its
+	// fields are still true.
 	stateTests := []struct {
 		name   string
 		state  port.UserProvisioningState
@@ -272,8 +272,8 @@ func TestProvisionGate(t *testing.T) {
 	})
 
 	t.Run("a deleted user is a terminal skip, not a retry", func(t *testing.T) {
-		// Redelivering cannot bring the user back, so a 5xx here would have
-		// Auth0 retry until the stream disables itself.
+		// Replaying cannot bring the user back, so a retryable error here would
+		// just burn the attempt ceiling.
 		client := &mockCDPClient{}
 		store := &mockMetadataStore{stateErr: errs.NewNotFound("user not found")}
 
@@ -548,8 +548,8 @@ func TestProvisionFlow(t *testing.T) {
 	})
 
 	t.Run("a write-once rejection ends the event rather than retrying it", func(t *testing.T) {
-		// Another writer got there first. The end state is correct, so asking
-		// Auth0 to redeliver would just repeat the same rejection.
+		// Another writer got there first. The end state is correct, so replaying
+		// would just repeat the same rejection.
 		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}}}
 		store := &mockMetadataStore{err: errs.NewConflict("cdp_uuid is write-once")}
 

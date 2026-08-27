@@ -19,9 +19,10 @@ type CDPMetadata struct {
 // UserProvisioningState is the authoritative view of a user, read from Auth0
 // rather than taken from an event payload.
 //
-// A webhook body is only as trustworthy as the shared secret in front of it,
-// and the fields below decide whether this service writes to CDP on a user's
-// behalf — so they are re-read before any write rather than believed.
+// A stream event carries a snapshot taken when it was produced, which may be
+// stale by the time it is read and may be replayed after a reconnect — and the
+// fields below decide whether this service writes to CDP on a user's behalf, so
+// they are re-read before any write rather than believed.
 type UserProvisioningState struct {
 	CDPMetadata
 

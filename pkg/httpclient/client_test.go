@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -276,5 +277,37 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !config.RetryBackoff {
 		t.Error("Expected default retry backoff to be true")
+	}
+}
+
+// TestTransportErrorDoesNotLeakURL pins the privacy fix. The debug line that
+// used to print the URL is gone, but url.Error renders the whole URL too, and
+// that one surfaces at ERROR on any transport failure.
+func TestTransportErrorDoesNotLeakURL(t *testing.T) {
+	const sub = "auth0|68b0SECRETSUB"
+
+	client := NewClient(Config{Timeout: time.Second, MaxRetries: 0})
+
+	// Port 1 refuses immediately, which is the transport failure we care about.
+	_, err := client.Request(
+		context.Background(),
+		"GET",
+		"http://127.0.0.1:1/api/v2/users/"+url.PathEscape(sub)+"/identities",
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+
+	for _, leak := range []string{sub, url.PathEscape(sub), "/api/v2/users"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error text leaks %q: %s", leak, err.Error())
+		}
+	}
+
+	// Scheme and host stay, so the failing provider is still identifiable.
+	if !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("error text dropped the host, which is needed to triage: %s", err.Error())
 	}
 }

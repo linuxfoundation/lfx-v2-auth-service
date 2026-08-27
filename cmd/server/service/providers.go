@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
@@ -185,6 +188,10 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 // the consumer path. It matches httpclient.DefaultConfig.
 const provisioningAuth0Timeout = 30 * time.Second
 
+// provisioningBucketRetryWait spaces out retries while the offset bucket's
+// JetStream CR is still reconciling.
+const provisioningBucketRetryWait = 10 * time.Second
+
 // newProvisioningOrchestrator wires the CDP provisioning flow.
 //
 // It returns nil when the CDP configuration is absent, which leaves the
@@ -302,30 +309,6 @@ func startProvisioningConsumer(ctx context.Context) {
 		return
 	}
 
-	kv, found := getNATSClient().GetKVStore(constants.KVBucketNameProvisioningCursor)
-	if !found {
-		slog.ErrorContext(ctx, "the provisioning offset bucket is not available, not starting the consumer",
-			"bucket", constants.KVBucketNameProvisioningCursor,
-		)
-		return
-	}
-	offsets, err := provisioning.NewKVOffsetStore(kv)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to create the provisioning offset store", "error", err)
-		return
-	}
-
-	consumer, err := provisioning.NewConsumer(
-		provisioning.WithEventsClient(eventsClient),
-		provisioning.WithProvisioner(orchestrator),
-		provisioning.WithOffsetStore(offsets),
-		provisioning.WithReplayWindow(provisioningReplayWindow(ctx)),
-	)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to create the Auth0 events consumer", "error", err)
-		return
-	}
-
 	namespace := k8s.PodNamespace()
 	if namespace == "" {
 		slog.ErrorContext(ctx, "cannot determine the pod namespace, not starting the consumer")
@@ -339,10 +322,74 @@ func startProvisioningConsumer(ctx context.Context) {
 	}
 
 	go func() {
+		// Opened here rather than during the NATS bootstrap: the bucket is
+		// created by a JetStream CR from this same release, so on a first
+		// install it can lag the pod. Failing that lookup at bootstrap would
+		// take down every unrelated subscription with it.
+		offsets, err := openProvisioningOffsetStore(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "gave up opening the provisioning offset bucket", "error", err)
+			return
+		}
+
+		consumer, err := provisioning.NewConsumer(
+			provisioning.WithEventsClient(eventsClient),
+			provisioning.WithProvisioner(orchestrator),
+			provisioning.WithOffsetStore(offsets),
+			provisioning.WithReplayWindow(provisioningReplayWindow(ctx)),
+		)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to create the Auth0 events consumer", "error", err)
+			return
+		}
+
 		if err := k8s.RunAsLeader(ctx, lease, consumer.Run); err != nil {
 			slog.ErrorContext(ctx, "the Auth0 events consumer stopped", "error", err)
 		}
 	}()
+}
+
+// provisioningCursorBucket is the offset bucket name the chart rendered.
+func provisioningCursorBucket() string {
+	if name := strings.TrimSpace(os.Getenv(constants.ProvisioningCursorBucketEnvKey)); name != "" {
+		return name
+	}
+	return constants.KVBucketNameProvisioningCursor
+}
+
+// openProvisioningOffsetStore opens the offset bucket, retrying until it exists
+// or ctx ends. Only the consumer waits; the rest of the service is unaffected.
+func openProvisioningOffsetStore(ctx context.Context) (provisioning.OffsetStore, error) {
+	bucket := provisioningCursorBucket()
+
+	for attempt := 1; ; attempt++ {
+		err := getNATSClient().KeyValueStore(ctx, bucket)
+		if err == nil {
+			if kv, found := getNATSClient().GetKVStore(bucket); found {
+				return provisioning.NewKVOffsetStore(kv)
+			}
+			err = fmt.Errorf("bucket %q opened but was not registered", bucket)
+		}
+
+		// A name NATS rejects is a typo in the chart, not a bucket that has not
+		// reconciled yet. Retrying it forever would leave the consumer dead
+		// behind a warning indistinguishable from the benign first-install case.
+		if errors.Is(err, jetstream.ErrInvalidBucketName) {
+			return nil, err
+		}
+
+		slog.WarnContext(ctx, "the provisioning offset bucket is not available yet, retrying",
+			"bucket", bucket,
+			"attempt", attempt,
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(provisioningBucketRetryWait):
+		}
+	}
 }
 
 // provisioningReplayWindow reads the configured replay window.

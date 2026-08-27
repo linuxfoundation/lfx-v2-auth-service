@@ -32,8 +32,7 @@ const (
 // Without a ceiling a single user whose provisioning keeps failing would wedge
 // the stream for everyone behind them. Skipping loses that user from this
 // trigger only — the login self-heal and the population sweep still reach
-// them, which is the same guarantee that covered a webhook delivery Auth0 gave
-// up redelivering.
+// them.
 const maxEventAttempts = 5
 
 // maxBarrenReconnects bounds how many times the consumer will reconnect from

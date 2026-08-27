@@ -67,6 +67,10 @@ const (
 // defaultConnectTimeout bounds establishing the stream, never the stream itself.
 const defaultConnectTimeout = 10 * time.Second
 
+// tokenTimeout bounds fetching the M2M token before the stream is dialled. The
+// stream transport's timeouts do not cover that call.
+const tokenTimeout = 30 * time.Second
+
 // defaultReadIdleTimeout bounds the gap between two reads on an established
 // stream.
 //
@@ -83,6 +87,19 @@ const defaultReadIdleTimeout = 10 * time.Minute
 // user event carrying a large `app_metadata` can exceed; a bufio.Reader would
 // grow without any ceiling at all, so the limit is raised and kept explicit.
 const maxEventLineBytes = 1 << 20
+
+// maxEventFrameBytes caps the `data:` a single frame may accumulate. The
+// per-line cap does not bound a frame, because a frame may carry any number of
+// legal `data:` lines and is only flushed on a blank line.
+const maxEventFrameBytes = 4 << 20
+
+// maxDrainBytes bounds discarding one oversized line before the connection is
+// given up on. A line with no terminator would otherwise be read forever.
+const maxDrainBytes = 8 << 20
+
+// linePrefixBytes is how much of a dropped line is kept, purely so the caller
+// can still tell a comment from a field.
+const linePrefixBytes = 64
 
 // EventMessage is one message read from the Auth0 events stream.
 type EventMessage struct {
@@ -225,7 +242,14 @@ func (c *eventsClient) Subscribe(ctx context.Context, opts SubscribeOptions, han
 		return errs.NewValidation("a message handler is required to subscribe to the events stream")
 	}
 
-	token, err := c.config.M2MTokenManager.GetToken(ctx)
+	// Bounded separately from the stream: connectTimeout lives on the stream
+	// transport and does not cover this call, and the SDK's token source
+	// defaults to http.DefaultClient, which has no timeout at all. Without a
+	// deadline here a stalled token endpoint parks the one elected reader
+	// before the stream is ever dialled.
+	tokenCtx, cancelToken := context.WithTimeout(ctx, tokenTimeout)
+	token, err := c.config.M2MTokenManager.GetToken(tokenCtx)
+	cancelToken()
 	if err != nil {
 		return errs.NewUnexpected("failed to get M2M token to read the events stream", err)
 	}
@@ -419,23 +443,51 @@ func retryAfter(header http.Header) time.Duration {
 
 // readStream parses SSE frames off the open connection until it ends.
 func readStream(ctx context.Context, body io.Reader, handle func(context.Context, EventMessage) error) error {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxEventLineBytes)
+	reader := bufio.NewReader(body)
 
 	var (
 		eventType  string
 		data       []byte
 		hasData    bool
 		lastOffset string
+		oversized  bool
 	)
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, tooLong, err := readSSELine(reader, maxEventLineBytes)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if err != io.EOF {
+				return errs.NewUnexpected("failed to read the events stream", err)
+			}
+			// Auth0 recycles stream connections every few minutes to rebalance
+			// load, so a clean close is the ordinary end of a healthy
+			// subscription.
+			slog.InfoContext(ctx, "auth0 closed the events stream", "last_offset", lastOffset)
+			return nil
+		}
 
-		// `:connected` and `: heartbeat` are comments. They keep the connection
-		// warm and are not frame boundaries, so they neither dispatch nor
-		// discard whatever the current frame has accumulated.
+		// A comment is ignored entirely under the SSE spec, so an oversized one
+		// must not disturb the frame being assembled around it. `:connected`
+		// and `: heartbeat` keep the connection warm and are not frame
+		// boundaries — they neither dispatch nor discard what has accumulated.
 		if strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		// An oversized field is dropped rather than failing the connection. It
+		// was never delivered, so no retry can turn it into a success, and
+		// killing the stream here would wedge every later event behind it with
+		// no ceiling — the per-event attempt limit lives in the handler, which
+		// this frame never reaches. Dropping it lets the offset move on.
+		if tooLong {
+			oversized = true
+			slog.ErrorContext(ctx, "dropping an oversized frame from the events stream",
+				"limit_bytes", maxEventLineBytes,
+				"last_offset", lastOffset,
+			)
 			continue
 		}
 
@@ -445,6 +497,17 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 			case "event":
 				eventType = value
 			case "data":
+				// A frame is capped as well as a line: any number of legal
+				// lines can otherwise accumulate into one unbounded frame.
+				if len(data)+len(value) > maxEventFrameBytes {
+					oversized = true
+					data, hasData = nil, false
+					slog.ErrorContext(ctx, "dropping an oversized frame from the events stream",
+						"limit_bytes", maxEventFrameBytes,
+						"last_offset", lastOffset,
+					)
+					continue
+				}
 				if hasData {
 					data = append(data, '\n')
 				}
@@ -457,6 +520,23 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 				// recorded rather than acted on.
 				slog.DebugContext(ctx, "auth0 events stream sent a reconnection hint", "retry_ms", value)
 			}
+			continue
+		}
+
+		// A frame that lost a line to a size cap is incomplete, so it is
+		// discarded whole rather than dispatched with a hole in it. Its `id`
+		// still counts: the offset advances past it so the next connection
+		// does not replay straight back into it.
+		if oversized {
+			// The event name survived even though the payload did not, and a
+			// terminal error stays terminal whatever its size.
+			if eventType == EventTypeError {
+				slog.ErrorContext(ctx, "auth0 ended the events stream with a terminal error event",
+					"offset", lastOffset,
+				)
+				return ErrStreamTerminated
+			}
+			eventType, data, hasData, oversized = "", nil, false, false
 			continue
 		}
 
@@ -490,18 +570,72 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 			return ErrStreamTerminated
 		}
 	}
+}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if err := scanner.Err(); err != nil {
-		return errs.NewUnexpected("failed to read the events stream", err)
+// readSSELine reads one newline-terminated line, reporting whether it exceeded
+// max. An oversized line is drained to its terminator and discarded, so the
+// connection stays usable instead of dying on one outsized frame.
+//
+// A dropped line still returns its first linePrefixBytes. Without them an
+// oversized comment would be indistinguishable from an oversized field, and the
+// caller has to tell those apart: a comment must not disturb the frame around
+// it. Draining is itself bounded — a line that never terminates would otherwise
+// spin here forever, resetting the idle deadline on every read.
+func readSSELine(reader *bufio.Reader, max int) (string, bool, error) {
+	var (
+		buf     []byte
+		prefix  []byte
+		content int
+		tooLong bool
+	)
+
+	finish := func() (string, bool, error) {
+		out := buf
+		if tooLong {
+			out = prefix
+		}
+		return strings.TrimSuffix(string(out), "\r"), tooLong, nil
 	}
 
-	// Auth0 recycles stream connections every few minutes to rebalance load, so
-	// a clean close is the ordinary end of a healthy subscription.
-	slog.InfoContext(ctx, "auth0 closed the events stream", "last_offset", lastOffset)
-	return nil
+	for {
+		chunk, err := reader.ReadSlice('\n')
+
+		// ReadSlice keeps the delimiter; the cap is about the line's content.
+		line := chunk
+		if err == nil {
+			line = chunk[:len(chunk)-1]
+		}
+		content += len(line)
+
+		if len(prefix) < linePrefixBytes {
+			prefix = append(prefix, line[:min(len(line), linePrefixBytes-len(prefix))]...)
+		}
+
+		if !tooLong && content > max {
+			tooLong = true
+			buf = nil
+		}
+		if !tooLong {
+			buf = append(buf, line...)
+		}
+
+		if content > maxDrainBytes {
+			return "", true, errs.NewUnexpected("the events stream sent a line that never terminated")
+		}
+
+		switch {
+		case err == bufio.ErrBufferFull:
+			continue
+		case err != nil:
+			// A trailing line without a terminator still counts as read.
+			if err == io.EOF && content > 0 {
+				return finish()
+			}
+			return "", tooLong, err
+		}
+
+		return finish()
+	}
 }
 
 // splitSSEField splits an SSE line into its field name and value, dropping the

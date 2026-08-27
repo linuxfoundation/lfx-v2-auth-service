@@ -53,60 +53,53 @@ const rejoinDelay = 5 * time.Second
 //
 // fn is given a context cancelled the moment leadership is lost, so whatever
 // it owns must stop when that context is done. It may be called again if this
-// replica reacquires the lease. RunAsLeader returns when ctx is cancelled.
+// replica reacquires the lease. RunAsLeader returns when ctx is cancelled, or
+// immediately if config is invalid — the one failure retrying cannot fix.
 func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Context)) error {
 	if config.Name == "" || config.Namespace == "" || config.Identity == "" {
 		return errors.NewValidation("lease name, namespace and identity are all required")
 	}
 
-	client, err := newClient(ctx)
-	if err != nil {
-		return err
-	}
-
-	lock := &resourcelock.LeaseLock{
-		LeaseMeta: metav1.ObjectMeta{
-			Name:      config.Name,
-			Namespace: config.Namespace,
-		},
-		Client: client.CoordinationV1(),
-		LockConfig: resourcelock.ResourceLockConfig{
-			Identity: config.Identity,
-		},
-	}
-
-	electionConfig := leaderelection.LeaderElectionConfig{
-		Lock:          lock,
-		LeaseDuration: leaseDuration,
-		RenewDeadline: renewDeadline,
-		RetryPeriod:   retryPeriod,
-		// A pod that is shutting down should hand the lease over rather than
-		// let its peers wait out the full duration.
-		ReleaseOnCancel: true,
-		Callbacks: leaderelection.LeaderCallbacks{
-			// OnStartedLeading is set per attempt below, so each one can be
-			// waited on before the next begins.
-			OnStoppedLeading: func() {
-				slog.WarnContext(ctx, "lost leadership", "lease", config.Name, "identity", config.Identity)
-			},
-			OnNewLeader: func(identity string) {
-				if identity == config.Identity {
-					return
-				}
-				slog.InfoContext(ctx, "standing by, another replica holds the lease",
-					"lease", config.Name,
-					"leader", identity,
-				)
-			},
-		},
-	}
+	// Held across iterations so a working client is not rebuilt every round,
+	// and rebuilt only after one could not be made.
+	var client kubernetes.Interface
 
 	// Run returns whenever this replica stops holding the lease, not only when
 	// ctx ends. Returning with it would retire the pod from the election for
 	// the rest of its life over one failed renewal, and a shared API-server
 	// blip would do that to every replica at once, leaving the stream unread
 	// with nothing reporting an error. Re-entering keeps it a candidate.
+	//
+	// Client and elector construction are retried in here for the same reason:
+	// the caller runs this fire-and-forget, so a slow-mounted service-account
+	// token or a cold API-server DNS lookup at startup would otherwise disable
+	// provisioning for the life of the pod behind a single log line.
 	for ctx.Err() == nil {
+		if client == nil {
+			built, err := newClient(ctx)
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to build the Kubernetes client, retrying",
+					"lease", config.Name,
+					"error", err,
+					"after", rejoinDelay,
+				)
+				waitBeforeRejoin(ctx)
+				continue
+			}
+			client = built
+		}
+
+		lock := &resourcelock.LeaseLock{
+			LeaseMeta: metav1.ObjectMeta{
+				Name:      config.Name,
+				Namespace: config.Namespace,
+			},
+			Client: client.CoordinationV1(),
+			LockConfig: resourcelock.ResourceLockConfig{
+				Identity: config.Identity,
+			},
+		}
+
 		// client-go runs OnStartedLeading in a goroutine and does not wait for
 		// it when Run returns, so fn may still be unwinding — it can be inside
 		// a call that takes seconds to time out. Rejoining before it returns
@@ -116,16 +109,43 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 			stopped = make(chan struct{})
 			led     atomic.Bool
 		)
-		attempt := electionConfig
-		attempt.Callbacks.OnStartedLeading = func(leaderCtx context.Context) {
-			led.Store(true)
-			defer close(stopped)
-			fn(leaderCtx)
-		}
 
-		elector, err := leaderelection.NewLeaderElector(attempt)
+		elector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+			Lock:          lock,
+			LeaseDuration: leaseDuration,
+			RenewDeadline: renewDeadline,
+			RetryPeriod:   retryPeriod,
+			// A pod that is shutting down should hand the lease over rather
+			// than let its peers wait out the full duration.
+			ReleaseOnCancel: true,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(leaderCtx context.Context) {
+					led.Store(true)
+					defer close(stopped)
+					fn(leaderCtx)
+				},
+				OnStoppedLeading: func() {
+					slog.WarnContext(ctx, "lost leadership", "lease", config.Name, "identity", config.Identity)
+				},
+				OnNewLeader: func(identity string) {
+					if identity == config.Identity {
+						return
+					}
+					slog.InfoContext(ctx, "standing by, another replica holds the lease",
+						"lease", config.Name,
+						"leader", identity,
+					)
+				},
+			},
+		})
 		if err != nil {
-			return errors.NewUnexpected("failed to create the leader elector", err)
+			slog.ErrorContext(ctx, "failed to create the leader elector, retrying",
+				"lease", config.Name,
+				"error", err,
+				"after", rejoinDelay,
+			)
+			waitBeforeRejoin(ctx)
+			continue
 		}
 
 		elector.Run(ctx)
@@ -152,13 +172,18 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 			"identity", config.Identity,
 			"after", rejoinDelay,
 		)
-		select {
-		case <-ctx.Done():
-		case <-time.After(rejoinDelay):
-		}
+		waitBeforeRejoin(ctx)
 	}
 
 	return nil
+}
+
+// waitBeforeRejoin spaces out re-entry, returning early if ctx ends first.
+func waitBeforeRejoin(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(rejoinDelay):
+	}
 }
 
 // PodIdentity returns a value unique to this pod, for use as a lease identity.

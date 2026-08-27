@@ -117,9 +117,12 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	if a.sensitiveBody {
 		loggedBody = "[REDACTED]"
 	}
+	// The URL is deliberately not logged: identifiers such as an Auth0 sub or a
+	// CDP member id are embedded in the path, and this line runs at the default
+	// level, so logging it would leak PII past the redaction every caller applies.
 	slog.DebugContext(ctx, "calling API",
 		"method", a.Method,
-		"url", a.URL,
+		"description", a.Description,
 		"request_body", loggedBody)
 
 	// Prepare headers; only add Authorization when a token is provided

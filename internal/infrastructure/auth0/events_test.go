@@ -225,6 +225,85 @@ func TestSubscribeStream(t *testing.T) {
 		assert.Equal(t, "off-1", messages[0].Offset)
 	})
 
+	t.Run("an oversized frame is dropped and the stream keeps going", func(t *testing.T) {
+		huge := strings.Repeat("x", maxEventLineBytes+1024)
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"event: user.created\nid: off-1\ndata: {\"offset\":\"off-1\"}\n\n",
+				"event: user.updated\nid: off-2\ndata: "+huge+"\n\n",
+				"event: user.created\nid: off-3\ndata: {\"offset\":\"off-3\"}\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err, "one outsized frame must not fail the connection")
+		require.Len(t, messages, 2, "the oversized frame is dropped, not delivered half-parsed")
+		assert.Equal(t, "off-1", messages[0].Offset)
+		assert.Equal(t, "off-3", messages[1].Offset,
+			"the offset moves past the dropped frame so reconnecting does not replay into it")
+	})
+
+	t.Run("an oversized comment does not disturb the frames around it", func(t *testing.T) {
+		// A padding comment is a real anti-buffering trick on proxied streams.
+		// Classifying it as a dropped field would take an unrelated event with
+		// it, because the drop is only cleared on the next frame boundary.
+		huge := strings.Repeat("x", maxEventLineBytes+1024)
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"event: user.created\nid: off-1\ndata: {\"offset\":\"off-1\"}\n\n",
+				":"+huge+"\n\n",
+				"event: user.created\nid: off-2\ndata: {\"offset\":\"off-2\"}\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, messages, 2, "a comment, however large, is not an event and eats no event")
+		assert.Equal(t, "off-1", messages[0].Offset)
+		assert.Equal(t, "off-2", messages[1].Offset)
+	})
+
+	t.Run("a terminal error event stays terminal even when oversized", func(t *testing.T) {
+		huge := strings.Repeat("x", maxEventLineBytes+1024)
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"event: error\nid: off-1\ndata: "+huge+"\n\n",
+				"event: user.created\nid: off-2\ndata: {\"offset\":\"off-2\"}\n\n",
+			)
+		})
+
+		_, err := collect(t, server, SubscribeOptions{})
+
+		require.ErrorIs(t, err, ErrStreamTerminated,
+			"discarding the payload must not discard the signal that the stream ended")
+	})
+
+	t.Run("one frame cannot accumulate unbounded data", func(t *testing.T) {
+		// Every line here is legal on its own; only the frame is not.
+		line := strings.Repeat("y", 512*1024)
+		var frame strings.Builder
+		frame.WriteString("event: user.created\nid: off-1\n")
+		for range 16 {
+			frame.WriteString("data: " + line + "\n")
+		}
+		frame.WriteString("\n")
+
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				frame.String(),
+				"event: user.created\nid: off-2\ndata: {\"offset\":\"off-2\"}\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, messages, 1, "the unbounded frame is dropped, the healthy one still arrives")
+		assert.Equal(t, "off-2", messages[0].Offset)
+	})
+
 	t.Run("a retry hint does not dispatch a message", func(t *testing.T) {
 		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeSSE(w,

@@ -130,8 +130,8 @@ nats:
     # set it to false if you want the bucket to be deleted when the chart is uninstalled
     keep: true
     # name is the name of the KV bucket for storing the stream position.
-    # The application looks the bucket up by this exact name, so overriding it
-    # here without changing the application leaves the consumer unable to start.
+    # Rendered into PROVISIONING_CURSOR_BUCKET, so the bucket created here and
+    # the one the consumer opens cannot drift apart.
     name: cdp-provisioning-cursor
     # history is the number of history entries to keep for the KV bucket
     history: 1

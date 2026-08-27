@@ -72,9 +72,9 @@ type streamMessage struct {
 
 // ParseStreamMessage decodes one `data:` payload from the events stream.
 //
-// A message that carries no event envelope is treated as the bare event, so a
-// captured webhook body still parses. That tolerance exists because the exact
-// shape has not been confirmed against a live tenant.
+// A message that carries no event envelope is treated as the bare event. That
+// tolerance exists because the exact shape has not been confirmed against a
+// live tenant.
 func ParseStreamMessage(raw []byte) (Event, EventUser, error) {
 	var message streamMessage
 	if err := json.Unmarshal(raw, &message); err == nil && len(message.Event) > 0 {

@@ -5,10 +5,12 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -91,6 +93,29 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 	return nil, lastErr
 }
 
+// scrubURLError strips the path and query from a *url.Error.
+//
+// url.Error.Error() renders the whole URL, and net/http only removes userinfo
+// from it. Our paths carry an Auth0 sub or a CDP member id, so the rendered
+// error is a PII sink — one that fires on any transport failure, at ERROR
+// level, and then travels up the stack into every caller that logs it. Scheme
+// and host are kept because they identify the provider without identifying a
+// person.
+func scrubURLError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+
+	scrubbed := *urlErr
+	if parsed, parseErr := url.Parse(urlErr.URL); parseErr == nil {
+		scrubbed.URL = parsed.Scheme + "://" + parsed.Host
+	} else {
+		scrubbed.URL = "[REDACTED]"
+	}
+	return &scrubbed
+}
+
 // doRequest performs a single HTTP request
 func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, reqConfig.Method, reqConfig.URL, reqConfig.Body)
@@ -108,7 +133,7 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, fmt.Errorf("HTTP request failed: %w", scrubURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

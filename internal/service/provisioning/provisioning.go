@@ -64,12 +64,12 @@ const (
 
 	// OutcomeSkipped means the request was deliberately not acted on. It is a
 	// success from the trigger's point of view — the event must not be
-	// redelivered.
+	// replayed.
 	OutcomeSkipped Outcome = "skipped"
 )
 
-// Result reports what happened, so the caller can log it and choose a status
-// code. Reason is always set on a skip.
+// Result reports what happened, so the caller can log it and decide whether
+// to advance the offset. Reason is always set on a skip.
 type Result struct {
 	Outcome  Outcome
 	Reason   string
@@ -136,8 +136,9 @@ func NewOrchestrator(options ...Option) Orchestrator {
 // Provision runs resolve, then attach or create, then writes the member id
 // back to Auth0.
 //
-// A returned error means the attempt is worth retrying and the caller should
-// answer with a 5xx; a skip is a final answer and must not be redelivered.
+// A returned error means the attempt is worth retrying: the consumer leaves the
+// offset unadvanced and replays the event on reconnect. A skip is a final
+// answer and must not be replayed.
 func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, error) {
 	if o.cdpClient == nil || o.metadata == nil {
 		return Result{}, errs.NewUnexpected("provisioning orchestrator is not fully configured")
@@ -170,7 +171,8 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 	state, err := o.metadata.ReadProvisioningState(ctx, req.UserID)
 	if err != nil {
 		// A deleted user is a permanent answer. Surfacing it as a failure
-		// would have Auth0 redeliver the event until the stream gives up.
+		// would have the consumer replay the event until the attempt ceiling
+		// gives up.
 		var notFound errs.NotFound
 		if errors.As(err, &notFound) {
 			return skip(reasonUserNotFound), nil

@@ -59,6 +59,10 @@ spec:
           # with none of the RBAC, ServiceAccount or bucket it depends on.
           - name: PROVISIONING_CONSUMER_ENABLED
             value: {{ .Values.provisioningConsumer.enabled | quote }}
+          {{- if .Values.provisioningConsumer.enabled }}
+          - name: PROVISIONING_CURSOR_BUCKET
+            value: {{ .Values.nats.provisioning_cursor_kv_bucket.name | quote }}
+          {{- end }}
           {{- $otelServiceName := .Values.app.otel.serviceName | toString | trim }}
           {{- if ne $otelServiceName "" }}
           - name: OTEL_SERVICE_NAME

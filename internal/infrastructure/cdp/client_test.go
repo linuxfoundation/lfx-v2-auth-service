@@ -247,7 +247,7 @@ func TestAttachIdentity(t *testing.T) {
 
 	t.Run("200 is the idempotent re-attach", func(t *testing.T) {
 		// Delivery is at-least-once. The provider finds the exact identity on
-		// this member and answers 200, so a redelivery is not a conflict.
+		// this member and answers 200, so a replay is not a conflict.
 		transport := &recordingTransport{status: http.StatusOK}
 		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
 
