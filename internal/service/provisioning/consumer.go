@@ -59,14 +59,27 @@ const maxBarrenReconnects = 3
 // offsetAgeInterval is how often the offset-age gauge is emitted.
 const offsetAgeInterval = 1 * time.Minute
 
+// minHealthyConnection is the shortest a clean, empty connection may last
+// before it is treated as a fault rather than as Auth0's ordinary recycle.
+//
+// It is a floor, not an estimate of the rotation interval, and does not need
+// to be accurate to be safe: Auth0 holds a stream open for minutes, so no
+// genuine rotation comes near a second and nothing on the healthy path is
+// delayed by this. What it stops is a peer answering 200 and closing at once,
+// which on the immediate-reconnect path spins the reader as fast as the
+// network allows.
+const minHealthyConnection = 1 * time.Second
+
 // forbiddenRetryInterval is the wait after a 403.
 //
-// The contract says to surface a 403 for a human rather than retry blindly,
-// because it means either the read:events grant is missing — which no amount
-// of retrying fixes — or the tenant's concurrent-connection allowance is
-// used up, where retrying every second is actively part of the problem. The
-// stream is not abandoned, since a handover can produce a 403 that clears on
-// its own, but it is retried slowly and logged loudly enough to be noticed.
+// The contract says to surface a 403 for a human rather than retry blindly.
+// Auth0 answers it either because the read:events grant is missing, which no
+// amount of retrying fixes, or because the tenant's concurrent-connection
+// allowance is used up. The second is now unlikely — the tenant is Enterprise,
+// so the cap is 8 and this service runs one reader — which makes the grant the
+// first thing to check. The stream is not abandoned, because a revoked grant
+// can be restored without a redeploy, but it is retried slowly and logged
+// loudly enough to be noticed.
 const forbiddenRetryInterval = 5 * time.Minute
 
 // Consumer reads the Auth0 events stream and provisions the users it names.
@@ -190,8 +203,10 @@ func (c *Consumer) Run(ctx context.Context) {
 		)
 
 		processedBefore := c.processed
+		openedAt := c.now()
 		err = c.events.Subscribe(ctx, opts, c.handle)
 		madeProgress := c.processed > processedBefore
+		lasted := c.now().Sub(openedAt)
 
 		switch {
 		case ctx.Err() != nil:
@@ -204,6 +219,24 @@ func (c *Consumer) Run(ctx context.Context) {
 			// the offset even when it carried no messages, so the barren
 			// count starts over.
 			c.forgetBarrenOffset()
+
+			if !madeProgress && lasted < minHealthyConnection {
+				// A 200 answered and closed immediately is not a rotation. On
+				// the immediate-reconnect path it becomes a hot loop that
+				// mints a token and opens a connection as fast as the network
+				// allows, against an API whose rate limit is shared with other
+				// services. The backoff is left to escalate instead.
+				slog.WarnContext(ctx, "Auth0 events stream closed immediately without delivering, backing off",
+					"lasted", lasted,
+					"retry_in", backoff,
+				)
+				if !sleep(ctx, backoff) {
+					return
+				}
+				backoff = c.nextBackoff(backoff)
+				continue
+			}
+
 			backoff = c.minBackoff
 			continue
 
@@ -261,7 +294,7 @@ func (c *Consumer) Run(ctx context.Context) {
 			wait = c.refusalBackoff
 			slog.ErrorContext(ctx, "Auth0 refused the events stream, needs a human",
 				"error", err,
-				"causes", "the read:events grant is missing, or the tenant's concurrent connection allowance is used up",
+				"causes", "the read:events grant is missing or was revoked, or the tenant's concurrent connection allowance is used up (Enterprise: 8, this service uses 1)",
 				"retry_in", wait,
 			)
 			if !sleep(ctx, wait) {

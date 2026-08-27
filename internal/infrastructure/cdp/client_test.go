@@ -204,13 +204,16 @@ func TestListIdentities(t *testing.T) {
 		assert.Equal(t, "https://cdp.example.org/v1/members/mem-1/identities", transport.requests[0].url)
 	})
 
-	t.Run("404 reads as no identities", func(t *testing.T) {
-		// The member vanished between the resolve and this call. There is
-		// nothing to attach to, and nothing the caller can do about it.
+	t.Run("404 is reported, not read as an empty list", func(t *testing.T) {
+		// The member vanished between the resolve and this call. Reading that
+		// as "holds no identities" is indistinguishable from a free member,
+		// and on the create-conflict path the caller then returns the dead id
+		// to be stored write-once as a Segment user_id.
 		transport := &recordingTransport{status: http.StatusNotFound}
 		identities, err := newTestClient(transport).ListIdentities(context.Background(), "mem-1")
 
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrMemberNotFound,
+			"callers branch on this, so it must survive errors.Is")
 		assert.Empty(t, identities)
 	})
 

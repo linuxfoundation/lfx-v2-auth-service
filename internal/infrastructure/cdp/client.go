@@ -165,9 +165,17 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 
 // ListIdentities returns the identities a CDP member already holds.
 //
-// Read-only, and used to decide whether attaching to a member is safe. A 404
-// means the member is gone between the resolve and this call, which is not an
-// error the caller can act on, so it reads as an empty list.
+// Read-only, and used to decide whether attaching to a member is safe. A
+// successful call is also the caller's proof that the member exists: a 404
+// means it disappeared between the resolve and this read, and is reported as
+// ErrMemberNotFound rather than as an empty list.
+//
+// Reading it as empty was wrong in a way that could not be undone. A caller
+// checking "does this member hold somebody else's LFID" gets false from an
+// empty list either way, so a vanished member looked exactly like a free one —
+// and on the create-conflict path that answer is returned as the member id,
+// written to Auth0 as a write-once cdp_uuid and later emitted as the Segment
+// user_id. A dead id recorded there is permanent.
 func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberIdentity, error) {
 	if strings.TrimSpace(memberID) == "" {
 		return nil, errors.NewValidation("member id is required to list identities")
@@ -195,7 +203,10 @@ func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberI
 	statusCode, errCall := request.Call(ctx, &response)
 	if errCall != nil {
 		if statusCode == http.StatusNotFound {
-			return nil, nil
+			slog.WarnContext(ctx, "CDP member disappeared between resolve and identity read",
+				"member_id", redaction.Redact(memberID),
+			)
+			return nil, ErrMemberNotFound
 		}
 		slog.ErrorContext(ctx, "CDP member identities list failed",
 			"status_code", statusCode,

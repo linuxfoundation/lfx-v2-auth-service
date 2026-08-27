@@ -491,6 +491,45 @@ func TestConsumerRun(t *testing.T) {
 		assert.Positive(t, offsets.clears, "an error frame is the failure, not evidence the offset works")
 	})
 
+	t.Run("a 200 that closes immediately without delivering is backed off", func(t *testing.T) {
+		// Not a rotation. On the immediate-reconnect path this mints a token
+		// and opens a connection as fast as the network allows, against an
+		// API whose rate limit is shared with other services.
+		events := &mockEventsClient{}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, &mockOffsetStore{offset: "healthy"})
+		consumer.minBackoff = 40 * time.Millisecond
+		consumer.maxBackoff = 40 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+		defer cancel()
+		consumer.Run(ctx)
+
+		assert.LessOrEqual(t, len(events.subscribeCalls()), 6,
+			"an empty instant close must not reconnect at network speed")
+	})
+
+	t.Run("a rotation that lasted is still reconnected at once", func(t *testing.T) {
+		// The floor is below any real rotation, so nothing on the healthy
+		// path pays for it. A clock that jumps past the floor stands in for a
+		// connection Auth0 held open for minutes.
+		events := &mockEventsClient{}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, &mockOffsetStore{offset: "healthy"})
+		consumer.minBackoff = 50 * time.Millisecond
+
+		clock := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+		consumer.now = func() time.Time {
+			clock = clock.Add(minHealthyConnection * 2)
+			return clock
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		consumer.Run(ctx)
+
+		assert.Greater(t, len(events.subscribeCalls()), 10,
+			"a genuine rotation must reconnect immediately, not wait out the backoff")
+	})
+
 	t.Run("a quiet stream closing cleanly is never mistaken for a bad offset", func(t *testing.T) {
 		// Auth0 recycles connections on purpose and a quiet one carries no
 		// messages. That must not look like a poisoned cursor.

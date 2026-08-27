@@ -3,6 +3,20 @@
 
 package cdp
 
+import "errors"
+
+// ErrMemberNotFound reports that a member id CDP handed us no longer resolves
+// to a member.
+//
+// Returned bare, never through pkg/errors: those types keep a wrapped error
+// for their message but implement no Unwrap, so errors.Is against one of them
+// is false however the message reads. A caller branching on this needs it to
+// match.
+//
+// It lives here rather than in client.go only because that file aliases
+// pkg/errors as `errors`.
+var ErrMemberNotFound = errors.New("CDP member not found")
+
 // resolveRequest is the body for POST /v1/members/resolve.
 //
 // `lfids` is required with at least one entry; the provider rejects an

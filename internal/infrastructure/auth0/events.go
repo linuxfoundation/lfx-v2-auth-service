@@ -173,10 +173,12 @@ type eventsClient struct {
 
 // NewEventsClient creates the reader for the Auth0 events stream.
 //
-// Auth0 caps concurrent event-stream connections per tenant by plan tier —
-// documented as Free 1 / Self-service 4 / Enterprise 8 — and answers 403 once
-// the cap is reached. Our tier is UNCONFIRMED, so the service runs exactly one
-// reader. REVIEWER: please confirm the tenant's tier before a second is added.
+// Auth0 caps concurrent event-stream connections per tenant by plan tier and
+// answers 403 once the cap is reached. The tenant is on Enterprise, so the cap
+// is 8 (confirmed 2026-08-27). The service still runs one reader, because the
+// stream fans out and a second would duplicate work rather than share it — but
+// the cap is no longer the reason, and the two connections a lease handover
+// briefly holds are comfortably within it.
 func NewEventsClient(streamConfig EventsConfig, auth0Config Config) (EventsClient, error) {
 	if auth0Config.M2MTokenManager == nil {
 		return nil, errs.NewUnexpected("M2M token manager is required")

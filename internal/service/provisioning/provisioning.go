@@ -314,6 +314,11 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonConflict), nil
 		}
+		// Nothing is attached on this path — the 409 means the identity is
+		// already attached — so this read is also what proves the member still
+		// exists. It fails rather than reading empty when the member has gone,
+		// which matters because the id below is stored write-once and becomes
+		// a Segment user_id that cannot be corrected afterwards.
 		held, errIdentities := o.cdpClient.ListIdentities(ctx, reResolved.MemberID)
 		if errIdentities != nil {
 			return "", Result{}, errIdentities
@@ -325,6 +330,20 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 				"existing_lfid", redaction.Redact(other),
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
+		}
+		if !holdsLFID(held, username) {
+			// Should not happen: the 409 says the identity is attached
+			// somewhere, and a single-member re-resolve should be the member
+			// holding it. Logged rather than enforced because CDP's
+			// read-after-write behaviour is undocumented, so this may simply
+			// be the attach not yet visible — and refusing on an unmeasured
+			// assumption would drop users this trigger provisions correctly
+			// today. Measure it here first; gate on it once it is known.
+			slog.WarnContext(ctx, "CDP create conflicted but the resolved member does not yet show the LFID",
+				"user_id", redaction.Redact(req.UserID),
+				"member_id", redaction.Redact(reResolved.MemberID),
+				"identities_held", len(held),
+			)
 		}
 		return reResolved.MemberID, Result{}, nil
 	}
@@ -348,6 +367,22 @@ func foreignLFID(held []cdp.MemberIdentity, username string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// holdsLFID reports whether the member already carries this user's own LFID.
+//
+// The mirror of foreignLFID, and case-insensitive for the same reason: CDP
+// stores identity values as each source supplies them.
+func holdsLFID(held []cdp.MemberIdentity, username string) bool {
+	for _, identity := range held {
+		if identity.Platform != constants.LFIDPlatform || identity.Type != constants.CDPIdentityTypeUsername {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(identity.Value), username) {
+			return true
+		}
+	}
+	return false
 }
 
 // lfidIdentity builds the CDP identity for an LFID username.

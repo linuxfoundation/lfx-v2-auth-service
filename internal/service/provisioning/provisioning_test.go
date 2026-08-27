@@ -467,6 +467,42 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls)
 	})
 
+	t.Run("a create conflict never stores a member that has vanished", func(t *testing.T) {
+		// This path attaches nothing, so the identity read is the only thing
+		// standing between a disappeared member and a permanent record of it.
+		// The id would go to Auth0 write-once and on to Segment as the
+		// user_id, neither of which can be corrected afterwards, so a
+		// retryable failure is the only safe answer.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeFound, MemberID: "vanished-1"},
+			},
+			createResult:  cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+			identitiesErr: cdp.ErrMemberNotFound,
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.ErrorIs(t, err, cdp.ErrMemberNotFound, "the event must be retried, not completed")
+		assert.Zero(t, store.calls, "nothing may be written for a member we cannot confirm exists")
+	})
+
+	t.Run("a vanished member is not stored on the attach path either", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "vanished-2"}},
+			identitiesErr:  cdp.ErrMemberNotFound,
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.ErrorIs(t, err, cdp.ErrMemberNotFound)
+		assert.Zero(t, client.attachCalls, "there is nothing to attach to")
+		assert.Zero(t, store.calls)
+	})
+
 	t.Run("a create conflict that still cannot resolve is skipped, not looped", func(t *testing.T) {
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{
