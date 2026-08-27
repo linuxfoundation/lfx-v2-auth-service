@@ -27,6 +27,11 @@ type mockEventsClient struct {
 	messages [][]auth0.EventMessage
 	errs     []error
 
+	// Used by every connection once the scripted scripts above run out, for
+	// tests of a fault that does not go away by itself.
+	alwaysMessages []auth0.EventMessage
+	alwaysErr      error
+
 	mu    sync.Mutex
 	calls []auth0.SubscribeOptions
 }
@@ -37,18 +42,20 @@ func (m *mockEventsClient) Subscribe(ctx context.Context, opts auth0.SubscribeOp
 	m.calls = append(m.calls, opts)
 	m.mu.Unlock()
 
+	deliver := m.alwaysMessages
 	if call < len(m.messages) {
-		for _, message := range m.messages[call] {
-			if err := handle(ctx, message); err != nil {
-				return err
-			}
+		deliver = m.messages[call]
+	}
+	for _, message := range deliver {
+		if err := handle(ctx, message); err != nil {
+			return err
 		}
 	}
 
 	if call < len(m.errs) {
 		return m.errs[call]
 	}
-	return nil
+	return m.alwaysErr
 }
 
 // subscribeCalls returns a snapshot of the options each connection used.
@@ -142,6 +149,10 @@ func newTestConsumer(t *testing.T, events auth0.EventsClient, provisioner Orches
 	require.NoError(t, err)
 
 	consumer.now = func() time.Time { return time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC) }
+	// The reconnect paths are what these tests exercise; the production
+	// backoff would make them sleep for seconds to see three attempts.
+	consumer.minBackoff = time.Millisecond
+	consumer.maxBackoff = 2 * time.Millisecond
 	return consumer
 }
 
@@ -290,6 +301,64 @@ func TestConsumerSubscribeOptions(t *testing.T) {
 	})
 }
 
+func TestConsumerOffsetAge(t *testing.T) {
+	ctx := context.Background()
+
+	// Age is what separates a connected-but-stalled reader from a quiet one:
+	// leadership and connection state look healthy in both.
+	newAgingConsumer := func(t *testing.T, clock *time.Time) *Consumer {
+		t.Helper()
+		consumer := newTestConsumer(t, &mockEventsClient{}, &mockProvisioner{}, &mockOffsetStore{})
+		consumer.now = func() time.Time { return *clock }
+		consumer.recordAdvance()
+		return consumer
+	}
+
+	t.Run("age climbs while the offset stands still", func(t *testing.T) {
+		clock := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+		consumer := newAgingConsumer(t, &clock)
+
+		assert.Zero(t, consumer.offsetAge())
+		clock = clock.Add(90 * time.Second)
+		assert.Equal(t, 90*time.Second, consumer.offsetAge())
+	})
+
+	t.Run("an offset-only marker resets it, so a quiet stream does not alarm", func(t *testing.T) {
+		// These markers are exactly the heartbeat that keeps a quiet stream's
+		// position fresh, so they must count as the offset advancing.
+		clock := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+		consumer := newAgingConsumer(t, &clock)
+
+		clock = clock.Add(10 * time.Minute)
+		require.NoError(t, consumer.handle(ctx, auth0.EventMessage{Offset: "o1", Type: auth0.EventTypeOffsetOnly}))
+
+		assert.Zero(t, consumer.offsetAge())
+	})
+
+	t.Run("a terminal error frame does not reset it", func(t *testing.T) {
+		// It moves nothing, and treating it as freshness would hide the exact
+		// stall this signal exists to expose.
+		clock := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+		consumer := newAgingConsumer(t, &clock)
+
+		clock = clock.Add(10 * time.Minute)
+		require.NoError(t, consumer.handle(ctx, auth0.EventMessage{Offset: "o1", Type: auth0.EventTypeError}))
+
+		assert.Equal(t, 10*time.Minute, consumer.offsetAge())
+	})
+
+	t.Run("a failed save does not count as an advance", func(t *testing.T) {
+		clock := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+		consumer := newAgingConsumer(t, &clock)
+		consumer.offsets = &mockOffsetStore{saveErr: errors.New("bucket unavailable")}
+
+		clock = clock.Add(5 * time.Minute)
+		require.Error(t, consumer.handle(ctx, auth0.EventMessage{Offset: "o1", Type: auth0.EventTypeOffsetOnly}))
+
+		assert.Equal(t, 5*time.Minute, consumer.offsetAge(), "the position did not actually move")
+	})
+}
+
 func TestConsumerRun(t *testing.T) {
 	t.Run("an expired offset restarts from the replay window", func(t *testing.T) {
 		events := &mockEventsClient{errs: []error{auth0.ErrOffsetExpired}}
@@ -331,16 +400,115 @@ func TestConsumerRun(t *testing.T) {
 	})
 
 	t.Run("a clear that fails backs off instead of spinning on the dead offset", func(t *testing.T) {
-		events := &mockEventsClient{errs: []error{auth0.ErrOffsetExpired, auth0.ErrOffsetExpired}}
+		events := &mockEventsClient{alwaysErr: auth0.ErrOffsetExpired}
 		offsets := &mockOffsetStore{offset: "stale", clearErr: errors.New("bucket unavailable")}
 		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+		// This one is about the wait itself, so it needs a backoff long
+		// enough that spinning and backing off produce different counts.
+		consumer.minBackoff = 50 * time.Millisecond
+		consumer.maxBackoff = 50 * time.Millisecond
 
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 220*time.Millisecond)
 		defer cancel()
 		consumer.Run(ctx)
 
-		assert.LessOrEqual(t, len(events.subscribeCalls()), 2,
+		assert.LessOrEqual(t, len(events.subscribeCalls()), 6,
 			"a still-stored dead offset earns the same rejection, so reconnecting must wait")
+	})
+
+	// An offset can also expire mid-stream, after the HTTP 200, and Auth0 only
+	// says so with an in-band `event: error` whose payload shape is not
+	// documented. The consumer therefore watches its own progress instead of
+	// reading that payload, which also covers any other way a cursor can go
+	// permanently bad.
+	t.Run("an offset that only ever fails is abandoned for the replay window", func(t *testing.T) {
+		events := &mockEventsClient{alwaysErr: auth0.ErrStreamTerminated}
+		offsets := &mockOffsetStore{offset: "poisoned"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < maxBarrenReconnects+1 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		calls := events.subscribeCalls()
+		require.Greater(t, len(calls), maxBarrenReconnects)
+		for i := 0; i < maxBarrenReconnects; i++ {
+			assert.Equal(t, "poisoned", calls[i].From, "attempt %d should still be trying the stored offset", i)
+		}
+		assert.Positive(t, offsets.clears, "the offset must be cleared, not retried forever")
+		assert.Empty(t, calls[maxBarrenReconnects].From, "the next attempt must not reuse it")
+		assert.False(t, calls[maxBarrenReconnects].FromTimestamp.IsZero(), "it must fall back to the replay window")
+	})
+
+	t.Run("a terminal error frame does not count as progress", func(t *testing.T) {
+		// The poisoned connection delivers exactly one error frame. Counting
+		// it as a message read would convince the guard the offset is fine and
+		// switch off the only defence there is.
+		events := &mockEventsClient{
+			alwaysMessages: []auth0.EventMessage{{Offset: "poisoned", Type: auth0.EventTypeError, Data: []byte(`{}`)}},
+			alwaysErr:      auth0.ErrStreamTerminated,
+		}
+		offsets := &mockOffsetStore{offset: "poisoned"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < maxBarrenReconnects+1 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		assert.Positive(t, offsets.clears, "an error frame is the failure, not evidence the offset works")
+	})
+
+	t.Run("a quiet stream closing cleanly is never mistaken for a bad offset", func(t *testing.T) {
+		// Auth0 recycles connections on purpose and a quiet one carries no
+		// messages. That must not look like a poisoned cursor.
+		events := &mockEventsClient{}
+		offsets := &mockOffsetStore{offset: "healthy"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		consumer.Run(ctx)
+
+		require.Greater(t, len(events.subscribeCalls()), maxBarrenReconnects,
+			"the point of this test is many clean reconnects")
+		assert.Zero(t, offsets.clears, "a clean close says nothing about the offset")
+		assert.Equal(t, "healthy", offsets.offset)
+	})
+
+	t.Run("a delivered message clears the suspicion", func(t *testing.T) {
+		events := &mockEventsClient{
+			messages: [][]auth0.EventMessage{
+				nil,
+				nil,
+				{{Offset: "o1", Type: auth0.EventTypeOffsetOnly}},
+			},
+			errs:      []error{auth0.ErrStreamTerminated, auth0.ErrStreamTerminated, auth0.ErrStreamTerminated},
+			alwaysErr: auth0.ErrStreamTerminated,
+		}
+		offsets := &mockOffsetStore{offset: "suspect"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < 4 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		assert.Zero(t, offsets.clears,
+			"two failures then a message means the count restarts, so three total must not trip it")
 	})
 
 	t.Run("returns promptly when the context is already done", func(t *testing.T) {

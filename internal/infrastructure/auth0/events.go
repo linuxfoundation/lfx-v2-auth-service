@@ -15,15 +15,37 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// ErrOffsetExpired reports a 410: the offset is no longer in the stream and
-// the caller must restart from a timestamp.
-var ErrOffsetExpired = errors.New("auth0 events offset has expired")
+// Sentinels the caller branches on.
+//
+// These are returned BARE, never through errs.New*. The types in pkg/errors
+// hold a wrapped error for their message but implement no Unwrap, so
+// errs.NewUnexpected("...", ErrOffsetExpired) renders as
+// "...: auth0 events offset has expired" while errors.Is against it is false.
+// Routing one of these through a wrapper is therefore a silent break of the
+// branch that depends on it.
+var (
+	// ErrOffsetExpired reports a 410: the offset is no longer in the stream
+	// and the caller must restart from a timestamp.
+	ErrOffsetExpired = errors.New("auth0 events offset has expired")
+
+	// ErrStreamTerminated reports an in-band `event: error` frame. Auth0
+	// documents it as terminal — an expired offset or a server-side problem —
+	// and closes the stream after sending it. Only the frame's documented
+	// `event:` name is read; its payload shape is not documented, so nothing
+	// here parses it and no cause can be told apart from another.
+	ErrStreamTerminated = errors.New("auth0 ended the events stream with a terminal error event")
+
+	// ErrStreamIdle reports that an established stream delivered nothing for
+	// longer than the configured idle timeout.
+	ErrStreamIdle = errors.New("auth0 events stream went idle")
+)
 
 // Stream-level event types, alongside the Auth0 event types such as
 // "user.created" that a subscription actually asks for.
@@ -44,6 +66,18 @@ const (
 
 // defaultConnectTimeout bounds establishing the stream, never the stream itself.
 const defaultConnectTimeout = 10 * time.Second
+
+// defaultReadIdleTimeout bounds the gap between two reads on an established
+// stream.
+//
+// Deliberately generous. Auth0 does not document its heartbeat interval, and
+// this deadline resets on every byte — heartbeat comments and offset-only
+// markers included — so for it to fire on a healthy stream Auth0 would have to
+// go completely silent for ten minutes. Cutting a healthy stream is the exact
+// mistake the absent http.Client.Timeout exists to avoid, so the bias is
+// towards waiting too long rather than too little. Tighten it once the real
+// heartbeat interval has been observed.
+const defaultReadIdleTimeout = 10 * time.Minute
 
 // maxEventLineBytes caps one SSE line. bufio.Scanner defaults to 64KiB, which a
 // user event carrying a large `app_metadata` can exceed; a bufio.Reader would
@@ -112,6 +146,19 @@ type EventsConfig struct {
 	// response headers. It deliberately does not bound the stream itself.
 	ConnectTimeout time.Duration
 
+	// ReadIdleTimeout bounds the wait for the NEXT byte on a stream that is
+	// already established, and is reset by every byte that arrives.
+	//
+	// This is not the same thing as http.Client.Timeout and must not be
+	// collapsed into one: that bounds reading the entire body, so on a
+	// response held open for minutes it severs healthy streams on a fixed
+	// schedule. A deadline between reads only fires when the stream has
+	// actually stopped delivering, which the transport's timeouts cannot
+	// detect — they are all spent by the time the first byte arrives.
+	//
+	// Zero uses defaultReadIdleTimeout.
+	ReadIdleTimeout time.Duration
+
 	// Transport is a test seam. Nil builds a transport tuned for a long-lived
 	// stream.
 	Transport http.RoundTripper
@@ -119,8 +166,9 @@ type EventsConfig struct {
 
 // eventsClient reads one Auth0 events stream connection at a time.
 type eventsClient struct {
-	httpClient *http.Client
-	config     Config
+	httpClient      *http.Client
+	config          Config
+	readIdleTimeout time.Duration
 }
 
 // NewEventsClient creates the reader for the Auth0 events stream.
@@ -142,6 +190,11 @@ func NewEventsClient(streamConfig EventsConfig, auth0Config Config) (EventsClien
 		connectTimeout = defaultConnectTimeout
 	}
 
+	readIdleTimeout := streamConfig.ReadIdleTimeout
+	if readIdleTimeout == 0 {
+		readIdleTimeout = defaultReadIdleTimeout
+	}
+
 	transport := streamConfig.Transport
 	if transport == nil {
 		transport = &http.Transport{
@@ -156,9 +209,11 @@ func NewEventsClient(streamConfig EventsConfig, auth0Config Config) (EventsClien
 		// entire body, so on a stream Auth0 holds open for minutes it would
 		// sever healthy connections on a fixed schedule. Getting connected is
 		// bounded on the transport above; the stream itself is bounded by the
-		// caller's context. Do not add a Timeout here.
-		httpClient: &http.Client{Transport: otelhttp.NewTransport(transport)},
-		config:     auth0Config,
+		// caller's context and by readIdleTimeout, which is a deadline between
+		// reads rather than over the whole body. Do not add a Timeout here.
+		httpClient:      &http.Client{Transport: otelhttp.NewTransport(transport)},
+		config:          auth0Config,
+		readIdleTimeout: readIdleTimeout,
 	}, nil
 }
 
@@ -173,7 +228,12 @@ func (c *eventsClient) Subscribe(ctx context.Context, opts SubscribeOptions, han
 		return errs.NewUnexpected("failed to get M2M token to read the events stream", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.streamURL(opts), nil)
+	// The stream runs on a context of its own so the idle deadline can tear
+	// the connection down without touching the caller's.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, c.streamURL(opts), nil)
 	if err != nil {
 		return errs.NewUnexpected("failed to build the events stream request", err)
 	}
@@ -197,9 +257,83 @@ func (c *eventsClient) Subscribe(ctx context.Context, opts SubscribeOptions, han
 		"from", opts.From,
 		"from_timestamp", formatFromTimestamp(opts.FromTimestamp),
 		"event_types", opts.EventTypes,
+		"read_idle_timeout", c.readIdleTimeout,
 	)
 
-	return readStream(ctx, response.Body, handle)
+	// Nothing below the transport bounds the wait for the next byte. A
+	// half-open connection — no FIN, no RST, which is what a NAT or load
+	// balancer idle timeout usually leaves behind — would otherwise park the
+	// reader here forever while it holds the lease, so the stream would be
+	// dead with no peer taking over and nothing saying so.
+	reader := newIdleReader(response.Body, c.readIdleTimeout, cancelStream)
+	defer reader.stop()
+
+	err = readStream(ctx, reader, handle)
+
+	// Disarmed before the check, so a timer firing in the gap cannot report a
+	// stream that already finished as idle.
+	reader.stop()
+
+	// The idle deadline works by cancelling the stream context, so the error
+	// that surfaces is a cancellation. Only this knows what it really was.
+	if reader.wentIdle() && ctx.Err() == nil {
+		slog.ErrorContext(ctx, "auth0 events stream delivered nothing within the idle timeout, reconnecting",
+			"read_idle_timeout", c.readIdleTimeout,
+		)
+		return ErrStreamIdle
+	}
+	return err
+}
+
+// idleReader fails the stream when no byte arrives within timeout.
+//
+// The deadline is between reads and is reset by every one that returns data,
+// so a heartbeat comment or an offset-only marker keeps it open indefinitely.
+// A blocked Read cannot be interrupted directly, so expiry cancels the request
+// context, which closes the connection and unblocks it.
+type idleReader struct {
+	reader  io.Reader
+	timeout time.Duration
+
+	mu      sync.Mutex
+	timer   *time.Timer
+	expired bool
+}
+
+func newIdleReader(reader io.Reader, timeout time.Duration, cancel context.CancelFunc) *idleReader {
+	r := &idleReader{reader: reader, timeout: timeout}
+	r.timer = time.AfterFunc(timeout, func() {
+		r.mu.Lock()
+		r.expired = true
+		r.mu.Unlock()
+		cancel()
+	})
+	return r
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.mu.Lock()
+		if !r.expired {
+			r.timer.Reset(r.timeout)
+		}
+		r.mu.Unlock()
+	}
+	return n, err
+}
+
+// wentIdle reports whether the deadline fired.
+func (r *idleReader) wentIdle() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.expired
+}
+
+func (r *idleReader) stop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.timer.Stop()
 }
 
 // streamURL builds the events endpoint for the requested starting point.
@@ -342,10 +476,16 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 		}
 
 		if message.Type == EventTypeError {
+			// Auth0 documents this as terminal — an expired offset or a
+			// server-side problem — but does not document the payload that
+			// says which. Returning a distinct sentinel lets the caller treat
+			// the offset as suspect without anything here guessing at a shape
+			// it cannot verify. Bare, because errs.* wrappers defeat
+			// errors.Is.
 			slog.ErrorContext(ctx, "auth0 ended the events stream with a terminal error event",
 				"offset", message.Offset,
 			)
-			return errs.NewUnexpected("auth0 events stream ended with a terminal error event")
+			return ErrStreamTerminated
 		}
 	}
 

@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
@@ -34,6 +36,29 @@ const (
 // up redelivering.
 const maxEventAttempts = 5
 
+// maxBarrenReconnects bounds how many times the consumer will reconnect from
+// the same offset, each time failing without reading a single message, before
+// it treats that offset as poisoned and falls back to the replay window.
+//
+// This is the shape-independent half of the expired-offset defence. A 410
+// arrives before the stream opens and is unambiguous, but Auth0 also ends an
+// established stream with an in-band `event: error` that it documents as
+// covering "an expired offset or a server-side problem" without documenting
+// how to tell those apart. Rather than guess at a payload shape that cannot be
+// verified, the consumer watches its own progress: an offset that produces
+// nothing but failed connections is unusable whatever the reason, so this also
+// catches any other way a cursor can become permanently poisoned.
+//
+// Only failures count. A clean close is Auth0's ordinary load-balancing
+// recycle and says nothing about the offset, so a quiet stream cannot trip
+// this. A genuine outage can, and the cost of that false positive is one
+// bounded replay — which the design already calls cheap, because the gate
+// drops anyone already provisioned before any CDP call is made.
+const maxBarrenReconnects = 3
+
+// offsetAgeInterval is how often the offset-age gauge is emitted.
+const offsetAgeInterval = 1 * time.Minute
+
 // Consumer reads the Auth0 events stream and provisions the users it names.
 //
 // Exactly one replica may run it. The stream has no competing-consumer
@@ -47,9 +72,24 @@ type Consumer struct {
 	replayWindow time.Duration
 	now          func() time.Time
 
+	// Reconnection backoff bounds. Fields rather than constants so tests can
+	// exercise the reconnect paths without sleeping through them.
+	minBackoff time.Duration
+	maxBackoff time.Duration
+
 	// Failure bookkeeping for the message currently being retried.
 	failedOffset string
 	failedCount  int
+
+	// Progress bookkeeping for the offset the current connection resumed
+	// from. Touched only by Run's goroutine.
+	barrenOffset string
+	barrenRuns   int
+	processed    int
+
+	// lastAdvance is the local-clock time the offset last moved, as UnixNano.
+	// The age reporter reads it from another goroutine.
+	lastAdvance atomic.Int64
 }
 
 // ConsumerOption configures the consumer.
@@ -86,6 +126,8 @@ func NewConsumer(options ...ConsumerOption) (*Consumer, error) {
 		eventTypes:   []string{EventTypeUserCreated, EventTypeUserUpdated},
 		replayWindow: 24 * time.Hour,
 		now:          time.Now,
+		minBackoff:   minReconnectBackoff,
+		maxBackoff:   maxReconnectBackoff,
 	}
 	for _, option := range options {
 		option(consumer)
@@ -100,12 +142,22 @@ func NewConsumer(options ...ConsumerOption) (*Consumer, error) {
 		return nil, errs.NewValidation("an offset store is required")
 	}
 
+	consumer.lastAdvance.Store(consumer.now().UnixNano())
+
 	return consumer, nil
 }
 
 // Run reads the stream until ctx is cancelled, reconnecting as needed.
 func (c *Consumer) Run(ctx context.Context) {
-	backoff := minReconnectBackoff
+	var reporter sync.WaitGroup
+	reporter.Add(1)
+	go func() {
+		defer reporter.Done()
+		c.reportOffsetAge(ctx)
+	}()
+	defer reporter.Wait()
+
+	backoff := c.minBackoff
 
 	for ctx.Err() == nil {
 		opts, err := c.subscribeOptions(ctx)
@@ -114,7 +166,7 @@ func (c *Consumer) Run(ctx context.Context) {
 			if !sleep(ctx, backoff) {
 				return
 			}
-			backoff = nextBackoff(backoff)
+			backoff = c.nextBackoff(backoff)
 			continue
 		}
 
@@ -122,9 +174,13 @@ func (c *Consumer) Run(ctx context.Context) {
 			"resuming", opts.From != "",
 			"from_timestamp", opts.FromTimestamp,
 			"event_types", opts.EventTypes,
+			"offset_age_seconds", int64(c.offsetAge().Seconds()),
 		)
 
+		processedBefore := c.processed
 		err = c.events.Subscribe(ctx, opts, c.handle)
+		madeProgress := c.processed > processedBefore
+
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -132,8 +188,11 @@ func (c *Consumer) Run(ctx context.Context) {
 		case err == nil:
 			// Auth0 cycles connections for load balancing. Reconnecting at
 			// once is expected; backing off here would idle the consumer for
-			// no reason every few minutes.
-			backoff = minReconnectBackoff
+			// no reason every few minutes. A clean close says nothing about
+			// the offset even when it carried no messages, so the barren
+			// count starts over.
+			c.forgetBarrenOffset()
+			backoff = c.minBackoff
 			continue
 
 		case errors.Is(err, auth0.ErrOffsetExpired):
@@ -143,19 +202,33 @@ func (c *Consumer) Run(ctx context.Context) {
 			slog.WarnContext(ctx, "stored events offset has expired, restarting from the replay window",
 				"replay_window", c.replayWindow,
 			)
-			c.forgetFailedEvent()
-			if errClear := c.offsets.Clear(ctx); errClear != nil {
+			if !c.restartFromReplayWindow(ctx) {
 				// The dead offset is still stored, so reconnecting now would
 				// present it again and earn the same rejection.
-				slog.ErrorContext(ctx, "could not clear the expired events offset", "error", errClear)
 				if !sleep(ctx, backoff) {
 					return
 				}
-				backoff = nextBackoff(backoff)
+				backoff = c.nextBackoff(backoff)
 				continue
 			}
-			backoff = minReconnectBackoff
+			backoff = c.minBackoff
 			continue
+		}
+
+		// The connection failed. If it also read nothing, and the one before
+		// it did the same from this offset, the offset itself is the common
+		// factor — which is the only signal available when Auth0 ends an
+		// established stream in-band without documenting how to read why.
+		if c.barren(opts.From, madeProgress) {
+			slog.ErrorContext(ctx, "events offset has produced only failed connections, restarting from the replay window",
+				"error", err,
+				"attempts", maxBarrenReconnects,
+				"replay_window", c.replayWindow,
+			)
+			if c.restartFromReplayWindow(ctx) {
+				backoff = c.minBackoff
+				continue
+			}
 		}
 
 		wait := backoff
@@ -171,7 +244,7 @@ func (c *Consumer) Run(ctx context.Context) {
 		if !sleep(ctx, wait) {
 			return
 		}
-		backoff = nextBackoff(backoff)
+		backoff = c.nextBackoff(backoff)
 	}
 }
 
@@ -200,17 +273,25 @@ func (c *Consumer) subscribeOptions(ctx context.Context) (auth0.SubscribeOptions
 // next connection replays from the last message that was fully processed.
 func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error {
 	switch message.Type {
-	case auth0.EventTypeOffsetOnly:
-		// Carries no event, but it does move the position. Recording it is
-		// what keeps a quiet stream from replaying the whole window on the
-		// next reconnect.
-		return c.offsets.Save(ctx, message.Offset)
-
 	case auth0.EventTypeError:
 		// The client surfaces this as a terminal error from Subscribe. Not
 		// advancing means the message is seen again, which is correct: it says
 		// nothing about the event that follows it.
+		//
+		// Deliberately not counted as progress. It is the failure itself, and
+		// a poisoned offset delivers exactly one of these per connection —
+		// counting it would tell the barren guard the offset is fine and
+		// disable the very defence it exists to provide.
 		return nil
+	}
+
+	c.processed++
+
+	if message.Type == auth0.EventTypeOffsetOnly {
+		// Carries no event, but it does move the position. Recording it is
+		// what keeps a quiet stream from replaying the whole window on the
+		// next reconnect.
+		return c.advance(ctx, message.Offset)
 	}
 
 	// The shape is logged, not the contents: an Auth0 user event carries
@@ -231,7 +312,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 			"event_type", message.Type,
 		)
 		c.count(ctx, event, "", "rejected")
-		return c.offsets.Save(ctx, message.Offset)
+		return c.advance(ctx, message.Offset)
 	}
 
 	request := user.ToRequest()
@@ -254,7 +335,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 				"event_id", event.ID,
 			)
 			c.count(ctx, event, request.UserID, "rejected")
-			return c.offsets.Save(ctx, message.Offset)
+			return c.advance(ctx, message.Offset)
 		}
 
 		if c.exhausted(message.Offset) {
@@ -266,7 +347,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 			)
 			c.count(ctx, event, request.UserID, "abandoned")
 			c.forgetFailedEvent()
-			return c.offsets.Save(ctx, message.Offset)
+			return c.advance(ctx, message.Offset)
 		}
 
 		slog.ErrorContext(ctx, "provisioning failed, reconnecting to retry the event",
@@ -290,7 +371,95 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 	)
 	c.count(ctx, event, request.UserID, string(result.Outcome))
 
-	return c.offsets.Save(ctx, message.Offset)
+	return c.advance(ctx, message.Offset)
+}
+
+// restartFromReplayWindow drops the stored offset so the next connection falls
+// back to the replay window. It reports whether the offset is actually gone —
+// a caller that gets false must back off rather than reconnect onto it again.
+func (c *Consumer) restartFromReplayWindow(ctx context.Context) bool {
+	if err := c.offsets.Clear(ctx); err != nil {
+		// The bookkeeping is left standing on purpose. It is what makes the
+		// next failed connection ask for the clear again, instead of waiting
+		// out another full count with the dead offset still stored.
+		slog.ErrorContext(ctx, "could not clear the unusable events offset", "error", err)
+		return false
+	}
+
+	c.forgetFailedEvent()
+	c.forgetBarrenOffset()
+	return true
+}
+
+// barren records a connection that failed, and reports whether this offset has
+// now failed that way often enough to be treated as unusable.
+func (c *Consumer) barren(from string, madeProgress bool) bool {
+	if from == "" || madeProgress {
+		// Nothing to hold against the offset: either the consumer is already
+		// on the replay window, or the stream did deliver from it.
+		c.forgetBarrenOffset()
+		return false
+	}
+
+	if c.barrenOffset != from {
+		c.barrenOffset = from
+		c.barrenRuns = 0
+	}
+	c.barrenRuns++
+
+	return c.barrenRuns >= maxBarrenReconnects
+}
+
+func (c *Consumer) forgetBarrenOffset() {
+	c.barrenOffset = ""
+	c.barrenRuns = 0
+}
+
+// recordAdvance marks the position as having moved.
+func (c *Consumer) recordAdvance() {
+	c.lastAdvance.Store(c.now().UnixNano())
+}
+
+// offsetAge is the time since the offset last moved.
+//
+// Measured on the local clock and updated by every message, offset-only
+// markers included, rather than from an event's own `time` field: those
+// markers carry no event and are precisely what keeps a quiet stream's
+// position fresh, so an event-time derivation would climb on a perfectly
+// healthy idle consumer and spike again through an ordinary replay.
+func (c *Consumer) offsetAge() time.Duration {
+	return c.now().Sub(time.Unix(0, c.lastAdvance.Load()))
+}
+
+// reportOffsetAge emits the stall signal until ctx ends.
+//
+// Leadership and connection state already show a consumer that has fallen
+// over. This is the one that separates a connected-but-stalled reader from a
+// quiet stream, which look identical on every other signal.
+func (c *Consumer) reportOffsetAge(ctx context.Context) {
+	ticker := time.NewTicker(offsetAgeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			slog.InfoContext(ctx, "provisioning offset age",
+				"metric", "provisioning_offset_age",
+				"age_seconds", int64(c.offsetAge().Seconds()),
+			)
+		}
+	}
+}
+
+// advance persists the offset and records that the position moved.
+func (c *Consumer) advance(ctx context.Context, offset string) error {
+	if err := c.offsets.Save(ctx, offset); err != nil {
+		return err
+	}
+	c.recordAdvance()
+	return nil
 }
 
 // exhausted reports whether this offset has failed too many times to keep
@@ -357,10 +526,10 @@ func payloadFlag(value *bool) string {
 	return strconv.FormatBool(*value)
 }
 
-func nextBackoff(current time.Duration) time.Duration {
+func (c *Consumer) nextBackoff(current time.Duration) time.Duration {
 	doubled := current * 2
-	if doubled > maxReconnectBackoff {
-		return maxReconnectBackoff
+	if doubled > c.maxBackoff {
+		return c.maxBackoff
 	}
 	return doubled
 }

@@ -305,10 +305,26 @@ func TestSubscribeStream(t *testing.T) {
 		messages, err := collect(t, server, SubscribeOptions{})
 
 		require.Error(t, err, "a terminal error is not a clean close")
+		require.ErrorIs(t, err, ErrStreamTerminated,
+			"the caller branches on this to suspect its offset, so it must survive errors.Is")
 		require.Len(t, messages, 2, "nothing after the error event may be delivered")
 		assert.Equal(t, EventTypeError, messages[1].Type)
 		assert.JSONEq(t, `{"code":"stream_error"}`, string(messages[1].Data),
 			"the caller only sees the failure payload if it is handed over")
+	})
+
+	t.Run("a terminal error is recognised whatever its payload says", func(t *testing.T) {
+		// The frame's `event:` name is documented; its payload shape is not.
+		// Nothing may depend on the latter.
+		for _, payload := range []string{`{}`, `{"unexpected":"shape"}`, `not json at all`} {
+			server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeSSE(w, "event: error\nid: off-1\ndata: "+payload+"\n\n")
+			})
+
+			_, err := collect(t, server, SubscribeOptions{})
+
+			assert.ErrorIs(t, err, ErrStreamTerminated, "payload %q must not change the outcome", payload)
+		}
 	})
 
 	t.Run("a handler error stops the stream and is returned unchanged", func(t *testing.T) {
@@ -358,6 +374,112 @@ func TestSubscribeStream(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the read loop did not unblock on cancellation")
 		}
+	})
+}
+
+// newIdleTestEventsClient builds a client with a short read idle timeout.
+func newIdleTestEventsClient(t *testing.T, server *eventsServer, idle time.Duration) EventsClient {
+	t.Helper()
+
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	client, err := NewEventsClient(
+		EventsConfig{Transport: eventsRewriteTransport{target: target}, ReadIdleTimeout: idle},
+		Config{
+			Domain:          "test-tenant.auth0.com",
+			M2MTokenManager: &TokenManager{tokenSource: eventsTokenSource{token: "test-m2m-token"}},
+		},
+	)
+	require.NoError(t, err)
+
+	return client
+}
+
+func TestSubscribeReadIdleTimeout(t *testing.T) {
+	t.Run("a stream that stops delivering fails instead of blocking", func(t *testing.T) {
+		// No FIN and no RST, which is what a NAT or load balancer idle
+		// timeout leaves behind. Without a read deadline Scan parks here for
+		// as long as the peer keeps the socket open.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
+		server := newEventsServer(t, func(w http.ResponseWriter, r *http.Request) {
+			writeSSE(w, "event: user.created\nid: off-1\ndata: {}\n\n")
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		})
+
+		var messages []EventMessage
+		done := make(chan error, 1)
+		go func() {
+			done <- newIdleTestEventsClient(t, server, 150*time.Millisecond).
+				Subscribe(context.Background(), SubscribeOptions{}, func(_ context.Context, m EventMessage) error {
+					messages = append(messages, m)
+					return nil
+				})
+		}()
+
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrStreamIdle)
+			assert.Len(t, messages, 1, "what arrived before the silence is still delivered")
+		case <-time.After(10 * time.Second):
+			t.Fatal("Subscribe never returned: the read deadline did not fire")
+		}
+	})
+
+	t.Run("traffic keeps the deadline open", func(t *testing.T) {
+		// Every byte resets it, so a stream that keeps heartbeating outlives
+		// an idle timeout many times shorter than its total life.
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			chunks := make([]string, 0, 12)
+			for i := 0; i < 12; i++ {
+				chunks = append(chunks, ": heartbeat\n\n")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			for _, chunk := range chunks {
+				_, _ = io.WriteString(w, chunk)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+
+		err := newIdleTestEventsClient(t, server, 150*time.Millisecond).
+			Subscribe(context.Background(), SubscribeOptions{}, func(context.Context, EventMessage) error { return nil })
+
+		assert.NoError(t, err, "240ms of heartbeats must survive a 150ms idle deadline")
+	})
+
+	t.Run("the caller cancelling is not reported as idle", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
+		server := newEventsServer(t, func(w http.ResponseWriter, r *http.Request) {
+			writeSSE(w, ": connected\n\n")
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
+
+		err := newIdleTestEventsClient(t, server, time.Hour).
+			Subscribe(ctx, SubscribeOptions{}, func(context.Context, EventMessage) error { return nil })
+
+		assert.NotErrorIs(t, err, ErrStreamIdle)
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 
