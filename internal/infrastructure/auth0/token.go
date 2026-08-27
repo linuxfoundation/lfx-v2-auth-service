@@ -263,12 +263,14 @@ func NewProfileClientAuthConfig(ctx context.Context, domain string) (*authentica
 		return nil, errors.NewUnexpected(constants.Auth0LFXProfileClientSecretEnvKey + " is required for email linking flow")
 	}
 
-	// Create Auth0 authentication client with client secret
+	// Create Auth0 authentication client with client secret. Bounded for the
+	// same reason as the M2M client above — the SDK default has no timeout.
 	authConfig, err := authentication.New(
 		ctx,
 		domain,
 		authentication.WithClientID(clientID),
 		authentication.WithClientSecret(clientSecret),
+		authentication.WithClient(&http.Client{Timeout: tokenFetchTimeout}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Auth0 LFX Profile client: %w", err)
