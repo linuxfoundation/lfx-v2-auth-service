@@ -20,8 +20,10 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
         with:
           go-version-file: go.mod
       - uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d  # v0.9
@@ -38,6 +40,8 @@ jobs:
         env:
           VERSION: ${{ steps.container_tag.outputs.tag }}
           GIT_COMMIT: ${{ github.sha }}
+          FULL_SHA: ${{ github.sha }}
+          CONTAINER_TAG: ${{ steps.container_tag.outputs.tag }}
         run: |
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
@@ -46,6 +50,6 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.sha }} \
-            -t ${{ steps.container_tag.outputs.tag }} \
+            -t "${FULL_SHA}" \
+            -t "${CONTAINER_TAG}" \
             --sbom spdx

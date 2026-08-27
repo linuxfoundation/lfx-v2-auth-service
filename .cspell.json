@@ -1,0 +1,25 @@
+{
+  "language": "en",
+  "dictionaries": [
+    "companies",
+    "filetypes",
+    "fullstack",
+    "softwareTerms"
+  ],
+  "words": [
+    "artipacked",
+    "lfx",
+    "lfxv",
+    "linuxfoundation",
+    "zizmor"
+  ],
+  "flagWords": [],
+  "ignorePaths": [
+    ".cspell.json",
+    "CODEOWNERS",
+    "LICENSE",
+    "LICENSE-docs",
+    "megalinter-reports",
+    "styles"
+  ]
+}
