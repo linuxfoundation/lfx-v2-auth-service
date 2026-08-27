@@ -252,10 +252,19 @@ func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg por
 
 	user, err := m.resolveUserFromAuthInput(ctx, input)
 	if err != nil {
-		slog.ErrorContext(ctx, "error getting user metadata",
-			"error", err,
-			"input", redaction.Redact(input),
-		)
+		var validationErr errs.Validation
+		var notFoundErr errs.NotFound
+		if errors.As(err, &validationErr) || errors.As(err, &notFoundErr) {
+			slog.DebugContext(ctx, "user not found or validation failed for input",
+				"error", err,
+				"input", redaction.Redact(input),
+			)
+		} else {
+			slog.ErrorContext(ctx, "error getting user metadata",
+				"error", err,
+				"input", redaction.Redact(input),
+			)
+		}
 		return nil, err
 	}
 
@@ -267,10 +276,6 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 
 	userRetrieved, errGetUser := m.getUserByInput(ctx, msg)
 	if errGetUser != nil {
-		slog.ErrorContext(ctx, "error getting user metadata",
-			"error", errGetUser,
-			"input", redaction.Redact(string(msg.Data())),
-		)
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 

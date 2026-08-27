@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
@@ -20,6 +21,7 @@ type MessageHandlerService struct {
 
 // HandleMessage routes NATS messages to appropriate handlers
 func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.TransportMessenger) {
+	start := time.Now()
 	subject := msg.Subject()
 	ctx = log.AppendCtx(ctx, slog.String("subject", subject))
 
@@ -53,16 +55,18 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 
 	handler, ok := handlers[subject]
 	if !ok {
-		slog.WarnContext(ctx, "unknown subject")
+		slog.WarnContext(ctx, "unknown subject", "subject", subject)
 		mhs.respondWithError(ctx, msg, "unknown subject")
 		return
 	}
 
 	response, errHandler := handler(ctx, msg)
+	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
 	if errHandler != nil {
 		slog.ErrorContext(ctx, "error handling message",
 			"error", errHandler,
 			"subject", subject,
+			"duration_ms", durationMs,
 		)
 		mhs.respondWithError(ctx, msg, errHandler.Error())
 		return
@@ -70,11 +74,11 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 
 	errRespond := msg.Respond(response)
 	if errRespond != nil {
-		slog.ErrorContext(ctx, "error responding to NATS message", "error", errRespond)
+		slog.ErrorContext(ctx, "error responding to NATS message", "error", errRespond, "duration_ms", durationMs)
 		return
 	}
 
-	slog.DebugContext(ctx, "responded to NATS message", "response", string(response))
+	slog.DebugContext(ctx, "responded to NATS message", "bytes", len(response), "duration_ms", durationMs)
 }
 
 func (mhs *MessageHandlerService) respondWithError(ctx context.Context, msg port.TransportMessenger, errorMsg string) {

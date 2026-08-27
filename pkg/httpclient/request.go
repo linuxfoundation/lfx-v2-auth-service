@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -107,7 +108,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 	slog.DebugContext(ctx, "calling API",
 		"method", a.Method,
-		"url", a.URL,
+		"url", sanitizeURL(a.URL),
 		"request_body", loggedBody)
 
 	// Prepare headers; only add Authorization when a token is provided
@@ -145,11 +146,17 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		slog.ErrorContext(ctx, "API returned error",
-			"status_code", response.StatusCode,
-			"response_body", string(response.Body),
-			"method", a.Method,
-			"description", a.Description)
+		if response.StatusCode < 500 {
+			slog.DebugContext(ctx, "API returned client error",
+				"status_code", response.StatusCode,
+				"method", a.Method,
+				"description", a.Description)
+		} else {
+			slog.ErrorContext(ctx, "API returned server error",
+				"status_code", response.StatusCode,
+				"method", a.Method,
+				"description", a.Description)
+		}
 		return response.StatusCode, errors.NewUnexpected("API returned error", fmt.Errorf("status code: %d", response.StatusCode))
 	}
 
@@ -158,8 +165,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 		slog.DebugContext(ctx, "API call successful",
 			"method", a.Method,
 			"status_code", response.StatusCode,
-			"description", a.Description,
-			"empty_body", len(response.Body) == 0)
+			"description", a.Description)
 		return response.StatusCode, nil
 	}
 
@@ -187,4 +193,23 @@ func NewAPIRequest(httpClient *Client, options ...RequestOption) Caller {
 	}
 
 	return req
+}
+
+// sanitizeURL redacts sensitive query parameters like email from outbound request URLs
+func sanitizeURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	for k, vals := range q {
+		if strings.Contains(strings.ToLower(k), "email") {
+			for i, v := range vals {
+				vals[i] = redaction.RedactEmail(v)
+			}
+			q[k] = vals
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }

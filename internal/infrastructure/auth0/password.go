@@ -152,16 +152,19 @@ func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username
 	var tokenResponse map[string]any
 	statusCode, errCall := apiRequest.Call(ctx, &tokenResponse)
 	if errCall != nil {
-		slog.ErrorContext(ctx, "current password validation failed",
+		if statusCode == http.StatusForbidden || statusCode == http.StatusUnauthorized {
+			slog.WarnContext(ctx, "current password validation failed",
+				"status_code", statusCode,
+				"username", redaction.Redact(username),
+			)
+			return errors.NewUnauthorized("current password is incorrect")
+		}
+
+		slog.ErrorContext(ctx, "failed to validate current password",
 			"error", errCall,
 			"status_code", statusCode,
 			"username", redaction.Redact(username),
 		)
-
-		if statusCode == http.StatusForbidden || statusCode == http.StatusUnauthorized {
-			return errors.NewUnauthorized("current password is incorrect")
-		}
-
 		return errors.NewUnexpected("failed to validate current password", errCall)
 	}
 
