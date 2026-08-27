@@ -104,8 +104,14 @@ func InitStructureLogConfig() {
 	h = slog.NewJSONHandler(os.Stdout, logOptions)
 	log.SetFlags(log.Llongfile)
 
-	// Wrap with slog-otel handler to add trace_id and span_id from context
-	otelHandler := slogotel.OtelHandler{Next: h}
+	// Wrap with slog-otel handler to add trace_id and span_id from context.
+	//
+	// NoTraceEvents is on: the handler otherwise copies every record and all
+	// its attributes onto the active span, which exports log content to the
+	// trace backend as well. That is a second sink with its own access model
+	// and retention, and it silently doubles the blast radius of anything
+	// sensitive that reaches a log line.
+	otelHandler := slogotel.OtelHandler{Next: h, NoTraceEvents: true}
 
 	// Wrap with contextHandler to support context-based attributes
 	logger := contextHandler{otelHandler}

@@ -5,9 +5,14 @@ package utils
 
 import (
 	"context"
+	"net/url"
+	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestOTelConfigFromEnv_Defaults verifies that OTelConfigFromEnv returns
@@ -554,5 +559,57 @@ func TestNewSampler_ParentHonored(t *testing.T) {
 	result = s.ShouldSample(trace.SamplingParameters{ParentContext: ctx})
 	if result.Decision != trace.RecordAndSample {
 		t.Errorf("expected RecordAndSample with sampled parent, got %v", result.Decision)
+	}
+}
+
+// TestURLScrubberDropsIdentifiers pins the second PII sink. Logs were fixed by
+// scrubbing url.Error, but otelhttp records the full URL as a span attribute,
+// which exports to the trace backend instead.
+func TestURLScrubberDropsIdentifiers(t *testing.T) {
+	const sub = "auth0|68b0SECRETSUB"
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := trace.NewTracerProvider(
+		trace.WithSpanProcessor(urlScrubber{}),
+		trace.WithSpanProcessor(recorder),
+	)
+
+	full := "https://tenant.auth0.com/api/v2/users/" + url.PathEscape(sub)
+	_, span := provider.Tracer("t").Start(
+		context.Background(),
+		"HTTP GET",
+		oteltrace.WithAttributes(
+			attribute.String("url.full", full),
+			attribute.String("http.url", full),
+			attribute.String("http.request.method", "GET"),
+		),
+	)
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(ended))
+	}
+
+	var sawMethod bool
+	for _, attr := range ended[0].Attributes() {
+		value := attr.Value.AsString()
+		if strings.Contains(value, sub) || strings.Contains(value, url.PathEscape(sub)) {
+			t.Errorf("span attribute %s leaks the sub: %s", attr.Key, value)
+		}
+		if strings.Contains(value, "/api/v2/users") {
+			t.Errorf("span attribute %s leaks the path: %s", attr.Key, value)
+		}
+		switch attr.Key {
+		case "url.full", "http.url":
+			if value != "https://tenant.auth0.com" {
+				t.Errorf("%s should keep scheme and host, got %q", attr.Key, value)
+			}
+		case "http.request.method":
+			sawMethod = true
+		}
+	}
+	if !sawMethod {
+		t.Error("scrubbing must not drop unrelated attributes")
 	}
 }
