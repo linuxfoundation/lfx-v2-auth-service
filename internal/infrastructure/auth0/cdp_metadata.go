@@ -172,8 +172,16 @@ func (w *cdpMetadataWriter) getUser(ctx context.Context, userID, fields string) 
 // **Best-effort, not atomic.** The read below and the patch are two Management
 // API calls, and the login Action writes the same keys directly, so two writers
 // can both observe an absent UUID and both proceed. Auth0 offers no
-// compare-and-set on `app_metadata`, so this cannot be closed here — it catches
-// the common case, and the residual window is tracked against the release gate.
+// compare-and-set on `app_metadata`, so this cannot be closed here.
+//
+// What it does instead is keep the gap as short as the API allows: the token is
+// obtained before the read, so nothing but the patch itself sits between
+// checking and writing. That shrinks the window to one round trip rather than
+// removing it. The guard still catches every ordering where one writer's patch
+// lands before the other's read, which is the common case; two patches issued
+// from reads taken in the same instant remain possible, and both writers derive
+// the value from the same CDP lookup, so such a write is normally identical
+// rather than conflicting.
 func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string, record port.CDPMetadata) error {
 	if strings.TrimSpace(userID) == "" {
 		return errors.NewValidation("user_id is required")
@@ -183,6 +191,13 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 	}
 	if !isValidCDPSource(record.Source) {
 		return errors.NewValidation("invalid cdp_uuid_source: " + record.Source)
+	}
+
+	// Fetched before the read so a cold token cache cannot stretch the gap
+	// between the write-once check and the patch it guards.
+	token, errToken := w.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token to write CDP metadata", errToken)
 	}
 
 	existing, err := w.ReadCDPMetadata(ctx, userID)
@@ -212,11 +227,6 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 	checkedAt := record.CheckedAt
 	if strings.TrimSpace(checkedAt) == "" {
 		checkedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-
-	token, errToken := w.config.M2MTokenManager.GetToken(ctx)
-	if errToken != nil {
-		return errors.NewUnexpected("failed to get M2M token to write CDP metadata", errToken)
 	}
 
 	// Built fresh, holding only the keys being changed — never from the value
