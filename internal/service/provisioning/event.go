@@ -119,8 +119,6 @@ func ParseEvent(raw []byte) (Event, EventUser, error) {
 
 // ToRequest maps an event's user record onto a provisioning request.
 func (u EventUser) ToRequest() Request {
-	verified := u.EmailVerified != nil && *u.EmailVerified
-
 	storedUUID := ""
 	if u.AppMetadata != nil {
 		storedUUID = u.AppMetadata.CDPUUID
@@ -130,7 +128,7 @@ func (u EventUser) ToRequest() Request {
 		UserID:              u.UserID,
 		Username:            u.Username,
 		Email:               u.Email,
-		EmailVerified:       verified,
+		EmailVerified:       u.EmailVerified,
 		StoredCDPUUID:       storedUUID,
 		HasDatabaseIdentity: u.hasDatabaseIdentity(),
 		DisplayName:         u.Name,

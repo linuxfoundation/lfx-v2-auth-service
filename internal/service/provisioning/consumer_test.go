@@ -6,6 +6,8 @@ package provisioning
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,16 +20,22 @@ import (
 
 // mockEventsClient replays a fixed set of messages, recording the options it
 // was subscribed with so a test can assert where the stream resumed from.
+//
+// Consumer.Run drives Subscribe from its own goroutine while a test watches
+// the recorded calls, so the recording is guarded.
 type mockEventsClient struct {
 	messages [][]auth0.EventMessage
 	errs     []error
 
+	mu    sync.Mutex
 	calls []auth0.SubscribeOptions
 }
 
 func (m *mockEventsClient) Subscribe(ctx context.Context, opts auth0.SubscribeOptions, handle func(context.Context, auth0.EventMessage) error) error {
+	m.mu.Lock()
 	call := len(m.calls)
 	m.calls = append(m.calls, opts)
+	m.mu.Unlock()
 
 	if call < len(m.messages) {
 		for _, message := range m.messages[call] {
@@ -43,12 +51,26 @@ func (m *mockEventsClient) Subscribe(ctx context.Context, opts auth0.SubscribeOp
 	return nil
 }
 
+// subscribeCalls returns a snapshot of the options each connection used.
+func (m *mockEventsClient) subscribeCalls() []auth0.SubscribeOptions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.calls)
+}
+
 // mockOffsetStore keeps the offset in memory and counts writes.
+//
+// Save drops an empty offset exactly as the KV store does. Mirroring that
+// matters: a mock that let an empty Save clear the offset would report the
+// expired-offset recovery as working when the real store silently keeps the
+// dead value.
 type mockOffsetStore struct {
 	offset   string
 	loadErr  error
 	saveErr  error
+	clearErr error
 	saves    []string
+	clears   int
 	loadCall int
 }
 
@@ -64,8 +86,20 @@ func (m *mockOffsetStore) Save(_ context.Context, offset string) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
+	if offset == "" {
+		return nil
+	}
 	m.saves = append(m.saves, offset)
 	m.offset = offset
+	return nil
+}
+
+func (m *mockOffsetStore) Clear(context.Context) error {
+	if m.clearErr != nil {
+		return m.clearErr
+	}
+	m.clears++
+	m.offset = ""
 	return nil
 }
 
@@ -266,17 +300,19 @@ func TestConsumerRun(t *testing.T) {
 		go func() {
 			// Two connections is enough to see the recovery: the first is
 			// rejected, the second must not reuse the dead offset.
-			for len(events.calls) < 2 {
+			for len(events.subscribeCalls()) < 2 {
 				time.Sleep(time.Millisecond)
 			}
 			cancel()
 		}()
 		consumer.Run(ctx)
 
-		require.GreaterOrEqual(t, len(events.calls), 2)
-		assert.Equal(t, "stale", events.calls[0].From)
-		assert.Empty(t, events.calls[1].From, "the dead offset must be dropped")
-		assert.False(t, events.calls[1].FromTimestamp.IsZero())
+		calls := events.subscribeCalls()
+		require.GreaterOrEqual(t, len(calls), 2)
+		assert.Equal(t, "stale", calls[0].From)
+		assert.Empty(t, calls[1].From, "the dead offset must be dropped")
+		assert.False(t, calls[1].FromTimestamp.IsZero())
+		assert.Positive(t, offsets.clears, "the stored offset must be cleared, not overwritten with an empty save")
 	})
 
 	t.Run("a clean close reconnects without backing off", func(t *testing.T) {
@@ -290,8 +326,21 @@ func TestConsumerRun(t *testing.T) {
 		defer cancel()
 		consumer.Run(ctx)
 
-		assert.Greater(t, len(events.calls), 1, "Auth0 cycles connections; idling for a second each time would stall the consumer")
+		assert.Greater(t, len(events.subscribeCalls()), 1, "Auth0 cycles connections; idling for a second each time would stall the consumer")
 		assert.Equal(t, "o10", offsets.offset)
+	})
+
+	t.Run("a clear that fails backs off instead of spinning on the dead offset", func(t *testing.T) {
+		events := &mockEventsClient{errs: []error{auth0.ErrOffsetExpired, auth0.ErrOffsetExpired}}
+		offsets := &mockOffsetStore{offset: "stale", clearErr: errors.New("bucket unavailable")}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		consumer.Run(ctx)
+
+		assert.LessOrEqual(t, len(events.subscribeCalls()), 2,
+			"a still-stored dead offset earns the same rejection, so reconnecting must wait")
 	})
 
 	t.Run("returns promptly when the context is already done", func(t *testing.T) {
@@ -302,6 +351,6 @@ func TestConsumerRun(t *testing.T) {
 		cancel()
 		consumer.Run(ctx)
 
-		assert.Empty(t, events.calls)
+		assert.Empty(t, events.subscribeCalls())
 	})
 }

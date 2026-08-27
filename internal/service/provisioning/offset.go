@@ -26,6 +26,11 @@ type OffsetStore interface {
 	// Save records the offset. It is called for every message, including the
 	// position markers that carry no event.
 	Save(ctx context.Context, offset string) error
+
+	// Clear discards the stored offset so the next connection falls back to
+	// the replay window. Saving an empty string cannot express this: an empty
+	// offset is not a position, so Save ignores it.
+	Clear(ctx context.Context) error
 }
 
 type kvOffsetStore struct {
@@ -56,5 +61,13 @@ func (s *kvOffsetStore) Save(ctx context.Context, offset string) error {
 		return nil
 	}
 	_, err := s.kv.Put(ctx, constants.KVKeyProvisioningCursor, []byte(offset))
+	return err
+}
+
+func (s *kvOffsetStore) Clear(ctx context.Context) error {
+	err := s.kv.Delete(ctx, constants.KVKeyProvisioningCursor)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil
+	}
 	return err
 }

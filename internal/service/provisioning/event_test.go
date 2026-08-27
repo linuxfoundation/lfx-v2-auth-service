@@ -64,19 +64,29 @@ func TestParseEvent(t *testing.T) {
 }
 
 func TestEventUserToRequest(t *testing.T) {
-	t.Run("a null email_verified is not treated as true", func(t *testing.T) {
-		// The field has a real third state, so it is checked strictly.
+	t.Run("a null email_verified stays unknown rather than becoming false", func(t *testing.T) {
+		// Absent is a third state. Collapsing it to false here would let the
+		// gate skip the user without ever asking Auth0.
 		_, user, err := ParseEvent([]byte(`{"id":"e","type":"user.updated","data":{"object":{"user_id":"auth0|1","email_verified":null}}}`))
 		require.NoError(t, err)
 
-		assert.False(t, user.ToRequest().EmailVerified)
+		assert.Nil(t, user.ToRequest().EmailVerified)
+	})
+
+	t.Run("an omitted email_verified stays unknown", func(t *testing.T) {
+		_, user, err := ParseEvent([]byte(`{"id":"e","type":"user.updated","data":{"object":{"user_id":"auth0|1"}}}`))
+		require.NoError(t, err)
+
+		assert.Nil(t, user.ToRequest().EmailVerified)
 	})
 
 	t.Run("false email_verified is preserved", func(t *testing.T) {
 		_, user, err := ParseEvent([]byte(`{"id":"e","type":"user.updated","data":{"object":{"user_id":"auth0|1","email_verified":false}}}`))
 		require.NoError(t, err)
 
-		assert.False(t, user.ToRequest().EmailVerified)
+		verified := user.ToRequest().EmailVerified
+		require.NotNil(t, verified)
+		assert.False(t, *verified)
 	})
 
 	t.Run("a stored cdp_uuid is carried onto the request", func(t *testing.T) {

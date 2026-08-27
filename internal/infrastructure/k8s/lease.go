@@ -44,6 +44,10 @@ const (
 	retryPeriod   = 2 * time.Second
 )
 
+// rejoinDelay spaces out re-entry into the election after leadership is lost,
+// so a replica that cannot reach the API server does not spin against it.
+const rejoinDelay = 5 * time.Second
+
 // RunAsLeader runs fn on exactly one replica at a time.
 //
 // fn is given a context cancelled the moment leadership is lost, so whatever
@@ -70,7 +74,7 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 		},
 	}
 
-	elector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+	electionConfig := leaderelection.LeaderElectionConfig{
 		Lock:          lock,
 		LeaseDuration: leaseDuration,
 		RenewDeadline: renewDeadline,
@@ -79,7 +83,8 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 		// let its peers wait out the full duration.
 		ReleaseOnCancel: true,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: fn,
+			// OnStartedLeading is set per attempt below, so each one can be
+			// waited on before the next begins.
 			OnStoppedLeading: func() {
 				slog.WarnContext(ctx, "lost leadership", "lease", config.Name, "identity", config.Identity)
 			},
@@ -93,12 +98,53 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 				)
 			},
 		},
-	})
-	if err != nil {
-		return errors.NewUnexpected("failed to create the leader elector", err)
 	}
 
-	elector.Run(ctx)
+	// Run returns whenever this replica stops holding the lease, not only when
+	// ctx ends. Returning with it would retire the pod from the election for
+	// the rest of its life over one failed renewal, and a shared API-server
+	// blip would do that to every replica at once, leaving the stream unread
+	// with nothing reporting an error. Re-entering keeps it a candidate.
+	for ctx.Err() == nil {
+		// client-go runs OnStartedLeading in a goroutine and does not wait for
+		// it when Run returns, so fn may still be unwinding — it can be inside
+		// a call that takes seconds to time out. Rejoining before it returns
+		// would put two of them on one pod, which is the thing the lease is
+		// here to prevent.
+		stopped := make(chan struct{})
+		attempt := electionConfig
+		attempt.Callbacks.OnStartedLeading = func(leaderCtx context.Context) {
+			defer close(stopped)
+			fn(leaderCtx)
+		}
+
+		elector, err := leaderelection.NewLeaderElector(attempt)
+		if err != nil {
+			return errors.NewUnexpected("failed to create the leader elector", err)
+		}
+
+		elector.Run(ctx)
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Run only gives up without leading when ctx ends, which the check
+		// above already caught. Getting here means the lease was held and
+		// lost, so the callback did start and will close this.
+		<-stopped
+
+		slog.InfoContext(ctx, "rejoining the lease election",
+			"lease", config.Name,
+			"identity", config.Identity,
+			"after", rejoinDelay,
+		)
+		select {
+		case <-ctx.Done():
+		case <-time.After(rejoinDelay):
+		}
+	}
+
 	return nil
 }
 

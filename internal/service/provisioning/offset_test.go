@@ -11,6 +11,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 )
 
 // mockKV embeds the interface so only the two methods under test need a body;
@@ -18,9 +20,11 @@ import (
 type mockKV struct {
 	jetstream.KeyValue
 
-	value  string
-	getErr error
-	puts   []string
+	value     string
+	getErr    error
+	deleteErr error
+	puts      []string
+	deletes   []string
 }
 
 func (m *mockKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) {
@@ -33,6 +37,14 @@ func (m *mockKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) {
 func (m *mockKV) Put(_ context.Context, _ string, value []byte) (uint64, error) {
 	m.puts = append(m.puts, string(value))
 	return uint64(len(m.puts)), nil
+}
+
+func (m *mockKV) Delete(_ context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	m.deletes = append(m.deletes, key)
+	return nil
 }
 
 type mockKVEntry struct {
@@ -83,7 +95,7 @@ func TestKVOffsetStore(t *testing.T) {
 		assert.Equal(t, []string{"o2"}, kv.puts)
 	})
 
-	t.Run("clearing the offset does not write an empty value", func(t *testing.T) {
+	t.Run("saving an empty offset does not write an empty value", func(t *testing.T) {
 		kv := &mockKV{}
 		store, err := NewKVOffsetStore(kv)
 		require.NoError(t, err)
@@ -91,5 +103,30 @@ func TestKVOffsetStore(t *testing.T) {
 		require.NoError(t, store.Save(ctx, ""))
 
 		assert.Empty(t, kv.puts, "an empty value would read back as a stored offset of nothing")
+	})
+
+	t.Run("clear deletes the key so the next start falls back to the window", func(t *testing.T) {
+		kv := &mockKV{value: "stale"}
+		store, err := NewKVOffsetStore(kv)
+		require.NoError(t, err)
+
+		require.NoError(t, store.Clear(ctx))
+
+		assert.Equal(t, []string{constants.KVKeyProvisioningCursor}, kv.deletes)
+		assert.Empty(t, kv.puts, "an expired offset cannot be retired by writing over it")
+	})
+
+	t.Run("clearing an absent key is not an error", func(t *testing.T) {
+		store, err := NewKVOffsetStore(&mockKV{deleteErr: jetstream.ErrKeyNotFound})
+		require.NoError(t, err)
+
+		assert.NoError(t, store.Clear(ctx), "nothing stored is the state clear is asking for")
+	})
+
+	t.Run("a failed clear is surfaced", func(t *testing.T) {
+		store, err := NewKVOffsetStore(&mockKV{deleteErr: errors.New("bucket unavailable")})
+		require.NoError(t, err)
+
+		assert.Error(t, store.Clear(ctx), "the caller must back off rather than reconnect onto the dead offset")
 	})
 }

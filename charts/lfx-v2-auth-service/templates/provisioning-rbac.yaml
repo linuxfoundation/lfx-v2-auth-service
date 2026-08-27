@@ -35,6 +35,6 @@ roleRef:
   name: {{ .Chart.Name }}-provisioning
 subjects:
 - kind: ServiceAccount
-  name: {{ .Values.serviceAccount.name | default .Chart.Name }}
+  name: {{ .Chart.Name }}
   namespace: {{ .Release.Namespace }}
 {{- end }}

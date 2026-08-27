@@ -120,13 +120,15 @@ func newTestOrchestrator(client *mockCDPClient, store *mockMetadataStore) Orches
 	return NewOrchestrator(WithCDPClient(client), WithMetadataStore(store))
 }
 
+func boolPtr(v bool) *bool { return &v }
+
 // verifiedRequest is an eligible user: verified, database-connection, no UUID.
 func verifiedRequest() Request {
 	return Request{
 		UserID:              "auth0|1",
 		Username:            "psmith",
 		Email:               "p@example.org",
-		EmailVerified:       true,
+		EmailVerified:       boolPtr(true),
 		HasDatabaseIdentity: true,
 		DisplayName:         "P. Smith",
 	}
@@ -145,7 +147,7 @@ func TestProvisionGate(t *testing.T) {
 	}{
 		{
 			name:   "unverified email is skipped without reading Auth0",
-			mutate: func(r *Request) { r.EmailVerified = false },
+			mutate: func(r *Request) { r.EmailVerified = boolPtr(false) },
 			reason: reasonEmailNotVerified,
 		},
 		{
@@ -173,6 +175,21 @@ func TestProvisionGate(t *testing.T) {
 			assert.Zero(t, store.calls)
 		})
 	}
+
+	t.Run("an absent email_verified asks Auth0 rather than skipping", func(t *testing.T) {
+		// The live payload shape is unconfirmed. Reading absence as false
+		// would skip every user permanently, and the skip would be
+		// indistinguishable from an ordinary unverified account.
+		request := verifiedRequest()
+		request.EmailVerified = nil
+
+		store := &mockMetadataStore{}
+		result, err := newTestOrchestrator(&mockCDPClient{}, store).Provision(ctx, request)
+
+		require.NoError(t, err)
+		assert.Positive(t, store.readCalls, "an unknown flag is not a no")
+		assert.NotEqual(t, reasonEmailNotVerified, result.Reason)
+	})
 
 	// A forged or stale payload claiming eligibility must not get past the
 	// authoritative read: the shared secret proves who sent the request, not

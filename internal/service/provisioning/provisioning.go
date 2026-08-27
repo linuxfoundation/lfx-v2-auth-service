@@ -24,8 +24,8 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
-// Request is one provisioning attempt, built by the webhook handler from an
-// Auth0 event payload.
+// Request is one provisioning attempt, built by the consumer from an Auth0
+// event payload.
 type Request struct {
 	// UserID is the Auth0 user id.
 	UserID string
@@ -37,9 +37,10 @@ type Request struct {
 	// Email is a secondary resolve identifier, used only when verified.
 	Email string
 
-	// EmailVerified gates the whole flow and is checked strictly against
-	// true, since the field has a real third state.
-	EmailVerified bool
+	// EmailVerified is the payload's verification flag, kept nullable because
+	// the field has a real third state and absence must not read as false.
+	// The authoritative value comes from Auth0, not from here.
+	EmailVerified *bool
 
 	// StoredCDPUUID is the `cdp_uuid` carried on the event payload. Its
 	// presence is the second half of the gate.
@@ -148,10 +149,16 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 	// Cheap pre-filter on the event payload. Most deliveries are ordinary user
 	// updates that fail this, and skipping them here keeps the authoritative
 	// read below off the common path.
-	if !req.EmailVerified || strings.TrimSpace(req.StoredCDPUUID) != "" {
-		if !req.EmailVerified {
-			return skip(reasonEmailNotVerified), nil
-		}
+	//
+	// Only an explicit false rules a delivery out. A missing email_verified is
+	// not a "no", and the live payload shape is still unconfirmed — collapsing
+	// absent to false here would skip every user permanently, and the skip
+	// would look like an ordinary unverified account rather than a bad field
+	// path.
+	if req.EmailVerified != nil && !*req.EmailVerified {
+		return skip(reasonEmailNotVerified), nil
+	}
+	if strings.TrimSpace(req.StoredCDPUUID) != "" {
 		return skip(reasonAlreadyProvisioned), nil
 	}
 

@@ -181,6 +181,10 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 	}
 }
 
+// provisioningAuth0Timeout bounds a single Auth0 Management API call made on
+// the consumer path. It matches httpclient.DefaultConfig.
+const provisioningAuth0Timeout = 30 * time.Second
+
 // newProvisioningOrchestrator wires the CDP provisioning flow.
 //
 // It returns nil when the CDP configuration is absent, which leaves the
@@ -214,7 +218,15 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 
 	slog.DebugContext(ctx, "CDP provisioning initialized", "cdp_base_url", cdpBaseURL)
 
-	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.Config{MaxRetries: 0}, auth0Config)
+	// Retries stay off because the shared client cannot replay a request body.
+	// The timeout is not optional though: the consumer processes one event at a
+	// time while holding the lease, so an Auth0 call that never returns stops
+	// the only reader of the stream, and the per-event attempt ceiling never
+	// fires because the attempt never ends.
+	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.Config{
+		Timeout:    provisioningAuth0Timeout,
+		MaxRetries: 0,
+	}, auth0Config)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to create the CDP metadata writer", "error", err)
 		return nil

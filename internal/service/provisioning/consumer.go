@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
@@ -142,10 +143,17 @@ func (c *Consumer) Run(ctx context.Context) {
 			slog.WarnContext(ctx, "stored events offset has expired, restarting from the replay window",
 				"replay_window", c.replayWindow,
 			)
-			if errSave := c.offsets.Save(ctx, ""); errSave != nil {
-				slog.ErrorContext(ctx, "could not clear the expired offset", "error", errSave)
+			c.forgetFailedEvent()
+			if errClear := c.offsets.Clear(ctx); errClear != nil {
+				// The dead offset is still stored, so reconnecting now would
+				// present it again and earn the same rejection.
+				slog.ErrorContext(ctx, "could not clear the expired events offset", "error", errClear)
+				if !sleep(ctx, backoff) {
+					return
+				}
+				backoff = nextBackoff(backoff)
+				continue
 			}
-			c.forgetStoredOffset()
 			backoff = minReconnectBackoff
 			continue
 		}
@@ -232,7 +240,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 		"event_id", event.ID,
 		"event_type", event.Type,
 		"user_id", redaction.Redact(request.UserID),
-		"email_verified", request.EmailVerified,
+		"email_verified", payloadFlag(request.EmailVerified),
 		"has_cdp_uuid", request.StoredCDPUUID != "",
 		"has_database_identity", request.HasDatabaseIdentity,
 	)
@@ -257,7 +265,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 				"attempts", maxEventAttempts,
 			)
 			c.count(ctx, event, request.UserID, "abandoned")
-			c.forgetStoredOffset()
+			c.forgetFailedEvent()
 			return c.offsets.Save(ctx, message.Offset)
 		}
 
@@ -271,7 +279,7 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 		return err
 	}
 
-	c.forgetStoredOffset()
+	c.forgetFailedEvent()
 
 	slog.InfoContext(ctx, "completed Auth0 event",
 		"event_id", event.ID,
@@ -296,7 +304,9 @@ func (c *Consumer) exhausted(offset string) bool {
 	return c.failedCount >= maxEventAttempts
 }
 
-func (c *Consumer) forgetStoredOffset() {
+// forgetFailedEvent resets the retry bookkeeping. It does not touch the stored
+// offset — clearing that is OffsetStore.Clear.
+func (c *Consumer) forgetFailedEvent() {
 	c.failedOffset = ""
 	c.failedCount = 0
 }
@@ -335,6 +345,16 @@ func topLevelKeys(body []byte) []string {
 	sort.Strings(keys)
 
 	return keys
+}
+
+// payloadFlag renders a nullable payload flag so an absent field reads as
+// absent rather than as false. Telling those two apart is what says whether
+// the assumed field path is the right one.
+func payloadFlag(value *bool) string {
+	if value == nil {
+		return "absent"
+	}
+	return strconv.FormatBool(*value)
 }
 
 func nextBackoff(current time.Duration) time.Duration {
