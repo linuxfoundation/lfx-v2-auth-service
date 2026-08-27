@@ -78,7 +78,26 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 		}
 	}
 
-	slog.ErrorContext(ctx, "request failed", "error", lastErr)
+	if lastErr != nil {
+		if re, ok := lastErr.(*RetryableError); ok {
+			if re.StatusCode < http.StatusInternalServerError {
+				slog.DebugContext(ctx, "HTTP request completed with client status",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			} else {
+				slog.ErrorContext(ctx, "HTTP request failed with server error",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			}
+		} else {
+			slog.ErrorContext(ctx, "HTTP request failed",
+				"error", lastErr,
+				"method", req.Method,
+			)
+		}
+	}
 
 	return nil, lastErr
 }

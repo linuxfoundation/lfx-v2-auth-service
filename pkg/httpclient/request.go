@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -135,29 +136,25 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	// Make the HTTP request
 	response, err := a.httpClient.Request(ctx, a.Method, a.URL, bodyReader, headers)
 	if err != nil {
+		if re, ok := err.(*RetryableError); ok {
+			if re.StatusCode < http.StatusInternalServerError {
+				slog.DebugContext(ctx, "API returned client status",
+					"status_code", re.StatusCode,
+					"method", a.Method,
+					"description", a.Description)
+			} else {
+				slog.ErrorContext(ctx, "API returned server error",
+					"status_code", re.StatusCode,
+					"method", a.Method,
+					"description", a.Description)
+			}
+			return re.StatusCode, err
+		}
 		slog.ErrorContext(ctx, "API request failed",
 			"error", err,
 			"method", a.Method,
 			"description", a.Description)
-		if re, ok := err.(*RetryableError); ok {
-			return re.StatusCode, err
-		}
 		return -1, errors.NewUnexpected("API request failed", err)
-	}
-
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if response.StatusCode < 500 {
-			slog.DebugContext(ctx, "API returned client error",
-				"status_code", response.StatusCode,
-				"method", a.Method,
-				"description", a.Description)
-		} else {
-			slog.ErrorContext(ctx, "API returned server error",
-				"status_code", response.StatusCode,
-				"method", a.Method,
-				"description", a.Description)
-		}
-		return response.StatusCode, errors.NewUnexpected("API returned error", fmt.Errorf("status code: %d", response.StatusCode))
 	}
 
 	// If caller doesn't need the body or there's no content, skip JSON decoding.
@@ -195,21 +192,65 @@ func NewAPIRequest(httpClient *Client, options ...RequestOption) Caller {
 	return req
 }
 
-// sanitizeURL redacts sensitive query parameters like email from outbound request URLs
+// sanitizeURL redacts sensitive path segments and query parameters from outbound request URLs
 func sanitizeURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
+		return "[REDACTED_URL]"
 	}
+
+	// Sanitize path segments (e.g. /api/v2/users/{user_id} or embedded emails)
+	if u.Path != "" {
+		segments := strings.Split(u.Path, "/")
+		for i, seg := range segments {
+			if seg == "" {
+				continue
+			}
+			if i > 0 && segments[i-1] == "users" && !strings.HasPrefix(seg, "by-") {
+				segments[i] = redaction.Redact(seg)
+			} else if strings.Contains(seg, "@") {
+				segments[i] = redaction.RedactEmail(seg)
+			}
+		}
+		u.Path = strings.Join(segments, "/")
+	}
+
+	// Sanitize query parameters
 	q := u.Query()
 	for k, vals := range q {
-		if strings.Contains(strings.ToLower(k), "email") {
-			for i, v := range vals {
+		lowerK := strings.ToLower(k)
+		for i, v := range vals {
+			switch {
+			case strings.Contains(lowerK, "email"):
 				vals[i] = redaction.RedactEmail(v)
+			case lowerK == "q":
+				vals[i] = sanitizeLuceneQuery(v)
+			case strings.Contains(lowerK, "user") || strings.Contains(lowerK, "sub") || lowerK == "id":
+				vals[i] = redaction.Redact(v)
 			}
-			q[k] = vals
 		}
+		q[k] = vals
 	}
 	u.RawQuery = q.Encode()
+
 	return u.String()
+}
+
+// sanitizeLuceneQuery redacts field values in search expressions (e.g. identities.user_id:123 or email:foo@example.com)
+func sanitizeLuceneQuery(query string) string {
+	parts := strings.Split(query, " ")
+	for i, part := range parts {
+		colonIdx := strings.Index(part, ":")
+		if colonIdx == -1 {
+			continue
+		}
+		field := part[:colonIdx]
+		val := strings.Trim(part[colonIdx+1:], `"`)
+		if strings.Contains(strings.ToLower(field), "email") {
+			parts[i] = field + ":" + redaction.RedactEmail(val)
+		} else {
+			parts[i] = field + ":" + redaction.Redact(val)
+		}
+	}
+	return strings.Join(parts, " ")
 }
