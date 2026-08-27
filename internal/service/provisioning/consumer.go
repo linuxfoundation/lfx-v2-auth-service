@@ -392,7 +392,13 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 		return err
 	}
 
-	c.forgetFailedEvent()
+	// Only the event that was failing clears the count. Delivery is
+	// at-least-once, so a reconnect replays events that already succeeded
+	// ahead of the one that did not; clearing on any of those would hold the
+	// poison event at attempt one forever and the ceiling would never arrive.
+	if message.Offset == c.failedOffset {
+		c.forgetFailedEvent()
+	}
 
 	slog.InfoContext(ctx, "completed Auth0 event",
 		"event_id", event.ID,

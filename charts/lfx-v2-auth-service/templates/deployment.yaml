@@ -49,13 +49,16 @@ spec:
               {{- toYaml $config.valueFrom | nindent 14 }}
             {{- end }}
           {{- end }}
-          # Derived rather than configured, so the reader can never be on while
-          # the Lease permissions it needs are off.
-          - name: PROVISIONING_CONSUMER_ENABLED
-            value: {{ .Values.provisioningConsumer.enabled | quote }}
           {{- with .Values.app.extraEnv }}
           {{- toYaml . | nindent 10 }}
           {{- end }}
+          # Derived rather than configured, so the reader can never be on while
+          # the Lease permissions it needs are off. Emitted after extraEnv
+          # because a duplicate name later in the list is the one the container
+          # gets, which would otherwise let extraEnv switch the consumer on
+          # with none of the RBAC, ServiceAccount or bucket it depends on.
+          - name: PROVISIONING_CONSUMER_ENABLED
+            value: {{ .Values.provisioningConsumer.enabled | quote }}
           {{- $otelServiceName := .Values.app.otel.serviceName | toString | trim }}
           {{- if ne $otelServiceName "" }}
           - name: OTEL_SERVICE_NAME

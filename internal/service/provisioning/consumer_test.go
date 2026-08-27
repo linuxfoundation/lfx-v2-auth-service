@@ -262,6 +262,29 @@ func TestConsumerHandle(t *testing.T) {
 		assert.Equal(t, maxEventAttempts, provisioner.calls)
 	})
 
+	t.Run("a replayed success does not reprieve the event that keeps failing", func(t *testing.T) {
+		// Delivery is at-least-once, so reconnecting replays events that
+		// already succeeded ahead of the one that did not. If those cleared
+		// the count, the poison event would sit at attempt one forever and
+		// never reach the ceiling that exists to move past it.
+		provisioner := &mockProvisioner{}
+		offsets := &mockOffsetStore{}
+		consumer := newTestConsumer(t, &mockEventsClient{}, provisioner, offsets)
+
+		var lastErr error
+		for i := 0; i < maxEventAttempts; i++ {
+			provisioner.err = errors.New("CDP unavailable")
+			lastErr = consumer.handle(ctx, userEvent("poison", "auth0|1"))
+
+			provisioner.err = nil
+			require.NoError(t, consumer.handle(ctx, userEvent("replayed-ok", "auth0|2")),
+				"the replayed event succeeds, as it did the first time")
+		}
+
+		require.NoError(t, lastErr, "the ceiling must have been reached and the event moved past")
+		assert.Contains(t, offsets.saves, "poison", "the poison event's offset must finally advance")
+	})
+
 	t.Run("a different event resets the failure count", func(t *testing.T) {
 		provisioner := &mockProvisioner{err: errors.New("CDP unavailable")}
 		offsets := &mockOffsetStore{}

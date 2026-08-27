@@ -162,11 +162,11 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 		return skip(reasonAlreadyProvisioned), nil
 	}
 
-	// Re-read from Auth0 before deciding anything. The payload arrives behind
-	// a shared static secret, which proves who sent the request but not that
-	// the fields are true — and these fields decide whether this service
-	// writes to CDP on a user's behalf. The stored record is also more
-	// current than a snapshot taken when the event was queued.
+	// Re-read from Auth0 before deciding anything. The payload is a snapshot
+	// taken when the event was produced, and replay can present it hours
+	// later — these fields decide whether this service writes to CDP on a
+	// user's behalf, so they are read from the record rather than from a
+	// snapshot that may since have gone stale or arrived malformed.
 	state, err := o.metadata.ReadProvisioningState(ctx, req.UserID)
 	if err != nil {
 		// A deleted user is a permanent answer. Surfacing it as a failure

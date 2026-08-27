@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -111,9 +112,13 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 		// a call that takes seconds to time out. Rejoining before it returns
 		// would put two of them on one pod, which is the thing the lease is
 		// here to prevent.
-		stopped := make(chan struct{})
+		var (
+			stopped = make(chan struct{})
+			led     atomic.Bool
+		)
 		attempt := electionConfig
 		attempt.Callbacks.OnStartedLeading = func(leaderCtx context.Context) {
+			led.Store(true)
 			defer close(stopped)
 			fn(leaderCtx)
 		}
@@ -125,14 +130,22 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 
 		elector.Run(ctx)
 
+		// Waited for on shutdown as well as before rejoining. ReleaseOnCancel
+		// hands the lease over as soon as ctx ends, so returning while fn is
+		// still unwinding would let the next holder start alongside it —
+		// the same overlap, just across pods instead of within one.
+		//
+		// led can still be false for the instant between client-go creating
+		// the callback goroutine and it running, but fn has not started in
+		// that window and the context it will get is already cancelled, so
+		// there is nothing to overlap with.
+		if led.Load() {
+			<-stopped
+		}
+
 		if ctx.Err() != nil {
 			break
 		}
-
-		// Run only gives up without leading when ctx ends, which the check
-		// above already caught. Getting here means the lease was held and
-		// lost, so the callback did start and will close this.
-		<-stopped
 
 		slog.InfoContext(ctx, "rejoining the lease election",
 			"lease", config.Name,
