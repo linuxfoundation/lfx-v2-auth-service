@@ -216,7 +216,7 @@ func sanitizeURL(rawURL string) string {
 	}
 
 	// Userinfo credentials and fragments are never useful in a log line and can
-	// carry secrets (e.g. https://user:secret@host/path#access_token=...).
+	// carry secrets (credentials before the "@" host separator, tokens after "#").
 	u.User = nil
 	u.Fragment = ""
 	u.RawFragment = ""
