@@ -3,7 +3,10 @@
 
 package errors
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Validation represents a validation error in the application.
 type Validation struct {
@@ -102,5 +105,37 @@ func NewConflict(message string, err ...error) Conflict {
 			message: message,
 			err:     errors.Join(err...),
 		},
+	}
+}
+
+// RateLimited reports that an upstream refused the call because a rate limit is
+// exhausted, carrying the server's Retry-After hint when it gave one.
+//
+// Return it BARE, never through NewUnexpected. The types here hold a wrapped
+// error for their message but implement no Unwrap, so a wrapped RateLimited is
+// invisible to errors.As and the caller falls back to its generic failure path
+// — which for the events consumer means spending one of an event's bounded
+// attempts on a wait that was never that event's fault.
+type RateLimited struct {
+	base
+	// RetryAfter is the server's hint, or zero when the header was absent,
+	// unparseable, or already in the past.
+	RetryAfter time.Duration
+}
+
+// Error returns the error message for RateLimited.
+func (r RateLimited) Error() string {
+	return r.error()
+}
+
+// NewRateLimited creates a new RateLimited error with the provided message and
+// the server's retry hint.
+func NewRateLimited(message string, retryAfter time.Duration, err ...error) RateLimited {
+	return RateLimited{
+		base: base{
+			message: message,
+			err:     errors.Join(err...),
+		},
+		RetryAfter: retryAfter,
 	}
 }

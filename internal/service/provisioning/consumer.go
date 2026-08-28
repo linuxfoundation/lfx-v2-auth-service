@@ -264,11 +264,12 @@ func (c *Consumer) Run(ctx context.Context) {
 		// factor — which is the only signal available when Auth0 ends an
 		// established stream in-band without documenting how to read why.
 		//
-		// Refusals are excluded. A 401 or 403 is answered before the offset is
-		// ever looked at, so counting them would throw away a perfectly good
-		// position over a missing grant and buy a needless replay once it is
-		// granted.
-		if !refused(err) && c.barren(opts.From, madeProgress) {
+		// Refusals and rate limits are excluded. A 401, 403 or 429 is answered
+		// before the offset is ever looked at, so counting them would throw
+		// away a perfectly good position over a missing grant or a busy
+		// minute, and buy a needless replay once it clears.
+		limited, isRateLimited := rateLimit(err)
+		if !refused(err) && !isRateLimited && c.barren(opts.From, madeProgress) {
 			slog.ErrorContext(ctx, "events offset has produced only failed connections, restarting from the replay window",
 				"error", err,
 				"attempts", maxBarrenReconnects,
@@ -281,10 +282,28 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 
 		wait := backoff
-		var rateLimited *auth0.RateLimitedError
 		switch {
-		case errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0:
-			wait = rateLimited.RetryAfter
+		case isRateLimited:
+			// Either end can rate limit: Auth0 refusing the stream connection,
+			// or CDP refusing a call while an event was being provisioned.
+			// Both mean wait rather than press on, and neither is the current
+			// event's fault, so handle counted no attempt against it.
+			if limited.RetryAfter > 0 {
+				wait = limited.RetryAfter
+			}
+			slog.WarnContext(ctx, "rate limited, pausing before reconnecting",
+				"error", err,
+				"retry_after", limited.RetryAfter,
+				"retry_in", wait,
+			)
+			if !sleep(ctx, wait) {
+				return
+			}
+			// With no Retry-After to honour the backoff still has to grow, or
+			// a limit that outlasts one wait is met at the same interval
+			// forever.
+			backoff = c.nextBackoff(backoff)
+			continue
 
 		case refused(err):
 			// Named rather than left to the generic line, because the two
@@ -402,6 +421,23 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 			return c.advance(ctx, message.Offset)
 		}
 
+		// A rate limit is the shared CDP budget being spent elsewhere, not a
+		// defect in this event, so it must not consume one of the event's
+		// bounded attempts — a window outlasting the ceiling would otherwise
+		// abandon every user in front of the reader for as long as it held.
+		// Returning ends the connection and hands the wait to Run, which
+		// honours Retry-After before resuming from this same offset.
+		var rateLimited errs.RateLimited
+		if errors.As(err, &rateLimited) {
+			slog.WarnContext(ctx, "provisioning is rate limited, this event will be retried after the wait",
+				"event_id", event.ID,
+				"user_id", redaction.Redact(request.UserID),
+				"retry_after", rateLimited.RetryAfter,
+			)
+			c.count(ctx, event, request.UserID, "rate_limited")
+			return err
+		}
+
 		if c.exhausted(message.Offset) {
 			slog.ErrorContext(ctx, "giving up on an event after repeated failures, moving past it",
 				"error", err,
@@ -483,6 +519,12 @@ func (c *Consumer) barren(from string, madeProgress bool) bool {
 func (c *Consumer) forgetBarrenOffset() {
 	c.barrenOffset = ""
 	c.barrenRuns = 0
+}
+
+// rateLimit returns the rate-limit error carried by err, if it carries one.
+func rateLimit(err error) (errs.RateLimited, bool) {
+	var limited errs.RateLimited
+	return limited, errors.As(err, &limited)
 }
 
 // refused reports whether Auth0 turned the subscription away before it read

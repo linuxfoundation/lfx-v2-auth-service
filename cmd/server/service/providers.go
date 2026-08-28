@@ -200,7 +200,11 @@ func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator 
 	cdpBaseURL := os.Getenv(constants.CDPBaseURLEnvKey)
 	cdpAudience := os.Getenv(constants.CDPAudienceEnvKey)
 	if cdpBaseURL == "" || cdpAudience == "" {
-		slog.WarnContext(ctx, "CDP provisioning is not configured, the events consumer will not start",
+		// Only reachable once the operator asked for the consumer, so this is
+		// a misconfiguration rather than the ordinary disabled state: the pod
+		// still goes Ready with provisioning silently off, and the log line is
+		// the only place that says so.
+		slog.ErrorContext(ctx, "the Auth0 events consumer is enabled but CDP is not configured, provisioning will not run",
 			"has_base_url", cdpBaseURL != "",
 			"has_audience", cdpAudience != "",
 		)

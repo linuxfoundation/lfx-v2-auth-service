@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 )
 
 // fakeTokenProvider returns a fixed token.
@@ -30,6 +33,7 @@ func (f fakeTokenProvider) GetToken(_ context.Context) (string, error) {
 type recordingTransport struct {
 	status   int
 	body     string
+	header   http.Header
 	requests []recordedRequest
 }
 
@@ -56,10 +60,14 @@ func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if body == "" {
 		body = "{}"
 	}
+	header := r.header
+	if header == nil {
+		header = make(http.Header)
+	}
 	return &http.Response{
 		StatusCode: r.status,
 		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
+		Header:     header,
 	}, nil
 }
 
@@ -311,4 +319,57 @@ func TestAttachIdentity(t *testing.T) {
 		require.Error(t, err)
 		assert.Empty(t, transport.requests)
 	})
+}
+
+func TestRateLimit(t *testing.T) {
+	// Every call below draws on one shared budget, so each has to report a 429
+	// as a wait. Reported as an ordinary failure it would instead cost the
+	// event one of its bounded attempts and, often enough, abandon the user.
+	operations := []struct {
+		name string
+		call func(Client) error
+	}{
+		{"resolve", func(c Client) error {
+			_, err := c.Resolve(context.Background(), "psmith", "")
+			return err
+		}},
+		{"list identities", func(c Client) error {
+			_, err := c.ListIdentities(context.Background(), "member-1")
+			return err
+		}},
+		{"create member", func(c Client) error {
+			_, err := c.CreateMember(context.Background(), "P Smith", Identity{Value: "psmith"})
+			return err
+		}},
+		{"attach identity", func(c Client) error {
+			_, err := c.AttachIdentity(context.Background(), "member-1", Identity{Value: "psmith"})
+			return err
+		}},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name+" reports a 429 with the server's Retry-After", func(t *testing.T) {
+			transport := &recordingTransport{
+				status: http.StatusTooManyRequests,
+				header: http.Header{"Retry-After": []string{"45"}},
+			}
+
+			err := operation.call(newTestClient(transport))
+
+			var rateLimited errors.RateLimited
+			require.ErrorAs(t, err, &rateLimited,
+				"a wrapped rate limit is invisible to the consumer, which is what makes it cost an attempt")
+			assert.Equal(t, 45*time.Second, rateLimited.RetryAfter)
+		})
+
+		t.Run(operation.name+" reports a 429 with no wait when the server named none", func(t *testing.T) {
+			transport := &recordingTransport{status: http.StatusTooManyRequests}
+
+			err := operation.call(newTestClient(transport))
+
+			var rateLimited errors.RateLimited
+			require.ErrorAs(t, err, &rateLimited)
+			assert.Zero(t, rateLimited.RetryAfter, "the caller falls back to its own backoff")
+		})
+	}
 }

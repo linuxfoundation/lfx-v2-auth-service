@@ -5,10 +5,10 @@
 //
 // Four operations are consumed: resolve an identity to a member, list a
 // member's identities, create a member, and attach an identity to an existing
-// member. The API is shared with
-// other services under a global rate limit, so callers are expected to pass a
-// bounded context and to treat a 429 as a reason to back off rather than to
-// retry immediately.
+// member. The API is shared with other services under a rate limit, so callers
+// are expected to pass a bounded context, and a 429 is reported as
+// errors.RateLimited carrying the server's Retry-After for the caller to wait
+// out rather than being retried here.
 package cdp
 
 import (
@@ -98,6 +98,22 @@ func sanitize(statusCode int, err error) error {
 	return fmt.Errorf("status code: %d", statusCode)
 }
 
+// rateLimited reports a 429 as the shared typed error, carrying the server's
+// Retry-After when it gave one.
+//
+// Returned BARE by every caller below. pkg/errors has no Unwrap, so a wrapped
+// one is invisible to the errors.As the events consumer uses to tell "the
+// shared budget is spent, wait" apart from "this event is broken, count an
+// attempt against it".
+func rateLimited(ctx context.Context, operation string, err error) errors.RateLimited {
+	wait := httpclient.RetryAfter(err)
+	slog.WarnContext(ctx, "CDP rate limited the request",
+		"operation", operation,
+		"retry_after", wait,
+	)
+	return errors.NewRateLimited("CDP "+operation+" was rate limited", wait)
+}
+
 // Resolve maps an LFID username (optionally widened by a verified email) to a
 // CDP member.
 //
@@ -146,6 +162,8 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 				"lfid", redaction.Redact(lfid),
 			)
 			return ResolveResult{Outcome: OutcomeConflict}, nil
+		case http.StatusTooManyRequests:
+			return ResolveResult{}, rateLimited(ctx, "resolve", errCall)
 		}
 		slog.ErrorContext(ctx, "CDP resolve failed",
 			"status_code", statusCode,
@@ -204,6 +222,9 @@ func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberI
 			)
 			return nil, ErrMemberNotFound
 		}
+		if statusCode == http.StatusTooManyRequests {
+			return nil, rateLimited(ctx, "member identities list", errCall)
+		}
 		slog.ErrorContext(ctx, "CDP member identities list failed",
 			"status_code", statusCode,
 			"member_id", redaction.Redact(memberID),
@@ -254,6 +275,9 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 				"identity_value", redaction.Redact(identity.Value),
 			)
 			return CreateResult{Outcome: OutcomeConflict}, nil
+		}
+		if statusCode == http.StatusTooManyRequests {
+			return CreateResult{}, rateLimited(ctx, "member create", errCall)
 		}
 		slog.ErrorContext(ctx, "CDP member create failed",
 			"status_code", statusCode,
@@ -314,6 +338,9 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 				"conflict_member_id_reported", conflictID != "",
 			)
 			return AttachResult{Outcome: OutcomeConflict, ConflictMemberID: conflictID}, nil
+		}
+		if statusCode == http.StatusTooManyRequests {
+			return AttachResult{}, rateLimited(ctx, "identity attach", errCall)
 		}
 		slog.ErrorContext(ctx, "CDP identity attach failed",
 			"status_code", statusCode,

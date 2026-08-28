@@ -190,10 +190,13 @@ func TestSubscribeStream(t *testing.T) {
 	})
 
 	t.Run("an offset-only marker is delivered so the caller can record it", func(t *testing.T) {
+		// The marker carries no `data:` at all — that is what makes it a
+		// position marker rather than an event. Giving the fixture a payload
+		// sends it down the ordinary event path, where it proves nothing.
 		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeSSE(w,
 				"event: user.created\nid: off-1\ndata: {\"offset\":\"off-1\"}\n\n",
-				"event: offset-only\nid: off-2\ndata: {\"offset\":\"off-2\"}\n\n",
+				"event: offset-only\nid: off-2\n\n",
 			)
 		})
 
@@ -202,7 +205,53 @@ func TestSubscribeStream(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 2)
 		assert.Equal(t, EventTypeOffsetOnly, messages[1].Type)
+		assert.Empty(t, messages[1].Data)
 		assert.Equal(t, "off-2", messages[1].Offset, "the offset advances even with no event payload")
+	})
+
+	t.Run("a frame that moves nothing is dropped", func(t *testing.T) {
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"\n",
+				"event: user.created\n\n",
+				": heartbeat\n\n",
+				"id: off-1\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, messages, 1, "only the frame carrying a new id dispatches")
+		assert.Equal(t, "off-1", messages[0].Offset)
+	})
+
+	t.Run("an empty id does not discard the position", func(t *testing.T) {
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"id: off-1\n\n",
+				"id:\n\n",
+				"event: user.created\nid: off-2\ndata: {\"offset\":\"off-2\"}\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, messages, 2, "the empty id moves nothing, so its frame is dropped")
+		assert.Equal(t, "off-1", messages[0].Offset)
+		assert.Equal(t, "off-2", messages[1].Offset)
+	})
+
+	t.Run("a terminal error frame with no payload is still terminal", func(t *testing.T) {
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w, "event: error\nid: off-1\n\n")
+		})
+
+		_, err := collect(t, server, SubscribeOptions{})
+
+		require.ErrorIs(t, err, ErrStreamTerminated,
+			"an error frame ends the stream whether or not it carried a body")
 	})
 
 	t.Run("comments and heartbeats are skipped without ending a frame", func(t *testing.T) {
@@ -389,7 +438,9 @@ func TestSubscribeStream(t *testing.T) {
 		assert.Equal(t, "message", messages[0].Type)
 	})
 
-	t.Run("a frame carrying no data is not an event", func(t *testing.T) {
+	t.Run("a frame carrying no data is a position marker, not an event", func(t *testing.T) {
+		// No `data:` means it is not a user event, but its `id:` still moves
+		// the position, and dropping the frame would strand it.
 		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeSSE(w,
 				"id: off-1\n\n",
@@ -400,8 +451,11 @@ func TestSubscribeStream(t *testing.T) {
 		messages, err := collect(t, server, SubscribeOptions{})
 
 		require.NoError(t, err)
-		require.Len(t, messages, 1)
-		assert.Equal(t, "off-2", messages[0].Offset)
+		require.Len(t, messages, 2)
+		assert.Equal(t, EventTypeOffsetOnly, messages[0].Type)
+		assert.Equal(t, "off-1", messages[0].Offset)
+		assert.Equal(t, "user.created", messages[1].Type)
+		assert.Equal(t, "off-2", messages[1].Offset)
 	})
 
 	t.Run("a terminal error event is delivered and then ends the stream", func(t *testing.T) {
@@ -643,7 +697,7 @@ func TestSubscribeStatusHandling(t *testing.T) {
 
 		_, err := collect(t, server, SubscribeOptions{})
 
-		var rateLimited *RateLimitedError
+		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 		assert.Equal(t, 30*time.Second, rateLimited.RetryAfter)
 	})
@@ -653,7 +707,7 @@ func TestSubscribeStatusHandling(t *testing.T) {
 
 		_, err := collect(t, server, SubscribeOptions{})
 
-		var rateLimited *RateLimitedError
+		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 		assert.Zero(t, rateLimited.RetryAfter)
 	})
@@ -664,7 +718,7 @@ func TestSubscribeStatusHandling(t *testing.T) {
 
 		_, err := collect(t, server, SubscribeOptions{})
 
-		var rateLimited *RateLimitedError
+		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 		assert.Positive(t, rateLimited.RetryAfter)
 	})

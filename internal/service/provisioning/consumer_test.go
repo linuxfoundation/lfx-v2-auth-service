@@ -297,6 +297,95 @@ func TestConsumerHandle(t *testing.T) {
 
 		assert.Empty(t, offsets.saves, "neither event has been abandoned yet")
 	})
+
+	t.Run("a rate limit never spends one of the event's attempts", func(t *testing.T) {
+		// The ceiling exists to move past a message that cannot be processed.
+		// A shared budget being spent elsewhere says nothing about this
+		// message, so counting it would abandon a healthy user — and then the
+		// next one, for as long as the limit held.
+		provisioner := &mockProvisioner{err: errs.NewRateLimited("CDP resolve was rate limited", 0)}
+		offsets := &mockOffsetStore{}
+		consumer := newTestConsumer(t, &mockEventsClient{}, provisioner, offsets)
+
+		for i := 0; i < maxEventAttempts*2; i++ {
+			require.Error(t, consumer.handle(ctx, userEvent("o9", "auth0|1")),
+				"the connection ends so Run can wait, but the event is not at fault")
+		}
+
+		assert.Empty(t, offsets.saves, "the event must still be there once the budget frees up")
+		assert.Zero(t, consumer.failedCount, "no attempt may be charged to the event")
+	})
+
+	t.Run("an ordinary failure after a rate limit still reaches the ceiling", func(t *testing.T) {
+		// The exemption is for the rate limit alone; it must not leave the
+		// event permanently un-abandonable.
+		provisioner := &mockProvisioner{err: errs.NewRateLimited("CDP resolve was rate limited", 0)}
+		offsets := &mockOffsetStore{}
+		consumer := newTestConsumer(t, &mockEventsClient{}, provisioner, offsets)
+
+		require.Error(t, consumer.handle(ctx, userEvent("o10", "auth0|1")))
+
+		provisioner.err = errors.New("CDP unavailable")
+		var lastErr error
+		for i := 0; i < maxEventAttempts; i++ {
+			lastErr = consumer.handle(ctx, userEvent("o10", "auth0|1"))
+		}
+
+		require.NoError(t, lastErr, "the ceiling still applies to genuine failures")
+		assert.Equal(t, []string{"o10"}, offsets.saves)
+	})
+}
+
+func TestConsumerRunRateLimit(t *testing.T) {
+	t.Run("the offset survives a rate limit and is resumed from", func(t *testing.T) {
+		// Whichever end refused, the position is still good: the consumer must
+		// wait and come back to it rather than treat the offset as suspect and
+		// replay the whole window.
+		events := &mockEventsClient{
+			errs: []error{errs.NewRateLimited("CDP resolve was rate limited", 5*time.Millisecond)},
+		}
+		offsets := &mockOffsetStore{offset: "o1"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < 2 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		calls := events.subscribeCalls()
+		require.GreaterOrEqual(t, len(calls), 2)
+		assert.Equal(t, "o1", calls[1].From, "the offset was never at fault")
+		assert.Zero(t, offsets.clears, "a rate limit is not a reason to discard the position")
+	})
+
+	t.Run("repeated rate limits do not exhaust the barren-offset guard", func(t *testing.T) {
+		// A 429 is answered before Auth0 ever looks at the offset, so a run of
+		// them delivers nothing and looks exactly like a poisoned cursor. They
+		// must not be counted, or a busy few minutes costs a 24h replay.
+		events := &mockEventsClient{
+			alwaysErr: errs.NewRateLimited("auth0 events stream is rate limited", 0),
+		}
+		offsets := &mockOffsetStore{offset: "o1"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			for len(events.subscribeCalls()) < maxBarrenReconnects+2 {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		assert.Zero(t, offsets.clears, "the offset is still good; only the budget was spent")
+		for i, call := range events.subscribeCalls() {
+			assert.Equal(t, "o1", call.From, "connection %d must resume from the stored offset", i)
+		}
+	})
 }
 
 func TestConsumerSubscribeOptions(t *testing.T) {

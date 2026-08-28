@@ -13,12 +13,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -135,19 +135,6 @@ type SubscribeOptions struct {
 // and live elsewhere — do not add them here.
 type EventsClient interface {
 	Subscribe(ctx context.Context, opts SubscribeOptions, handle func(context.Context, EventMessage) error) error
-}
-
-// RateLimitedError reports a 429 along with the server's Retry-After hint.
-// The caller owns reconnection, so the wait is reported rather than taken here.
-type RateLimitedError struct {
-	// RetryAfter is the server's hint, or zero when the header was absent,
-	// unparseable, or already in the past.
-	RetryAfter time.Duration
-}
-
-// Error returns the error message for RateLimitedError.
-func (e *RateLimitedError) Error() string {
-	return fmt.Sprintf("auth0 events stream is rate limited, retry after %s", e.RetryAfter)
 }
 
 // EventsConfig tunes the stream connection. It stands in for httpclient.Config,
@@ -409,29 +396,13 @@ func statusError(response *http.Response) error {
 	case http.StatusGone:
 		return ErrOffsetExpired
 	case http.StatusTooManyRequests:
-		return &RateLimitedError{RetryAfter: retryAfter(response.Header)}
+		// Bare, like the sentinels above: the consumer tells a rate limit
+		// apart from an ordinary failure with errors.As, which a wrapper
+		// would defeat.
+		return errs.NewRateLimited("auth0 events stream is rate limited",
+			httpclient.ParseRetryAfter(response.Header))
 	}
 	return errs.NewUnexpected(fmt.Sprintf("auth0 events stream failed with status code: %d", response.StatusCode))
-}
-
-// retryAfter reads Retry-After, which is either delta-seconds or an HTTP-date.
-func retryAfter(header http.Header) time.Duration {
-	raw := strings.TrimSpace(header.Get("Retry-After"))
-	if raw == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(raw); err == nil {
-		if seconds <= 0 {
-			return 0
-		}
-		return time.Duration(seconds) * time.Second
-	}
-	if deadline, err := http.ParseTime(raw); err == nil {
-		if wait := time.Until(deadline); wait > 0 {
-			return wait
-		}
-	}
-	return 0
 }
 
 // readStream parses SSE frames off the open connection until it ends.
@@ -442,6 +413,7 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 		eventType  string
 		data       []byte
 		hasData    bool
+		hasID      bool
 		lastOffset string
 		oversized  bool
 	)
@@ -507,7 +479,14 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 				data = append(data, value...)
 				hasData = true
 			case "id":
-				lastOffset = value
+				// An empty `id:` clears the last event ID under the SSE spec.
+				// Auth0 offsets are opaque and there is no way to ask for the
+				// position held before one, so honouring that would discard the
+				// position with no way back. It is ignored instead.
+				if value != "" {
+					lastOffset = value
+					hasID = true
+				}
 			case "retry":
 				// Reconnection is the caller's job, so the server's hint is
 				// recorded rather than acted on.
@@ -529,7 +508,7 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 				)
 				return ErrStreamTerminated
 			}
-			eventType, data, hasData, oversized = "", nil, false, false
+			eventType, data, hasData, hasID, oversized = "", nil, false, false, false
 
 			// Dropping the frame is only half the job: the position has to be
 			// persisted too. Nothing else here reaches the offset store, so if
@@ -542,10 +521,32 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 			continue
 		}
 
-		// A blank line ends the frame. One carrying no `data:` at all is not an
-		// event under the SSE spec, even when it moved the offset.
+		// A blank line ends the frame. One carrying no `data:` is not an event
+		// under the SSE spec, but two kinds of payload-less frame still matter:
+		// Auth0's bare position markers, which move the offset, and a terminal
+		// error, which is terminal whether or not it carried a body.
 		if !hasData {
-			eventType = ""
+			frameType, moved := eventType, hasID
+			eventType, hasID = "", false
+
+			if frameType == EventTypeError {
+				slog.ErrorContext(ctx, "auth0 ended the events stream with a terminal error event",
+					"offset", lastOffset,
+				)
+				return ErrStreamTerminated
+			}
+			if !moved {
+				continue
+			}
+
+			// The position advanced with no event on it. Dropping the frame
+			// here would strand the offset: nothing else in this loop reaches
+			// the offset store, so a quiet stream would replay its whole window
+			// on every reconnect and its recorded position would never age out
+			// of the stall signal.
+			if err := handle(ctx, EventMessage{Offset: lastOffset, Type: EventTypeOffsetOnly}); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -553,7 +554,7 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 		if message.Type == "" {
 			message.Type = eventTypeDefault
 		}
-		eventType, data, hasData = "", nil, false
+		eventType, data, hasData, hasID = "", nil, false, false
 
 		if err := handle(ctx, message); err != nil {
 			return err

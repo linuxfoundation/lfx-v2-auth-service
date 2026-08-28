@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +27,7 @@ type cdpMetadataTransport struct {
 	getBody     string
 	getStatus   int
 	patchStatus int
+	header      http.Header
 	requests    []cdpRecordedRequest
 }
 
@@ -54,10 +57,14 @@ func (c *cdpMetadataTransport) RoundTrip(req *http.Request) (*http.Response, err
 		body = "{}"
 	}
 
+	header := c.header
+	if header == nil {
+		header = make(http.Header)
+	}
 	return &http.Response{
 		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
+		Header:     header,
 	}, nil
 }
 
@@ -311,5 +318,47 @@ func TestReadProvisioningState(t *testing.T) {
 		_, err := newTestCDPWriter(transport).ReadProvisioningState(ctx, "auth0|missing")
 
 		require.Error(t, err)
+	})
+}
+
+func TestCDPMetadataRateLimit(t *testing.T) {
+	ctx := context.Background()
+	record := port.CDPMetadata{UUID: "member-1", Source: constants.CDPUUIDSourceProvisioning}
+
+	t.Run("a 429 on the read is reported as a rate limit", func(t *testing.T) {
+		transport := &cdpMetadataTransport{
+			getStatus: http.StatusTooManyRequests,
+			header:    http.Header{"Retry-After": []string{"20"}},
+		}
+
+		_, err := newTestCDPWriter(transport).ReadCDPMetadata(ctx, "auth0|1")
+
+		var rateLimited errors.RateLimited
+		require.ErrorAs(t, err, &rateLimited)
+		assert.Equal(t, 20*time.Second, rateLimited.RetryAfter)
+	})
+
+	t.Run("a 429 on the write is reported as a rate limit", func(t *testing.T) {
+		transport := &cdpMetadataTransport{
+			getBody:     `{"user_id":"auth0|1","app_metadata":{}}`,
+			patchStatus: http.StatusTooManyRequests,
+			header:      http.Header{"Retry-After": []string{"20"}},
+		}
+
+		err := newTestCDPWriter(transport).WriteCDPMetadata(ctx, "auth0|1", record)
+
+		var rateLimited errors.RateLimited
+		require.ErrorAs(t, err, &rateLimited)
+		assert.Equal(t, 20*time.Second, rateLimited.RetryAfter)
+	})
+
+	t.Run("a 429 with no Retry-After still reports a rate limit", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getStatus: http.StatusTooManyRequests}
+
+		_, err := newTestCDPWriter(transport).ReadCDPMetadata(ctx, "auth0|1")
+
+		var rateLimited errors.RateLimited
+		require.ErrorAs(t, err, &rateLimited)
+		assert.Zero(t, rateLimited.RetryAfter)
 	})
 }

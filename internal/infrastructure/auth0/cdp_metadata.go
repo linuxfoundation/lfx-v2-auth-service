@@ -19,6 +19,21 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
+// managementRateLimited reports a Management API 429 as the shared typed error,
+// carrying the server's Retry-After when it gave one.
+//
+// Returned BARE. pkg/errors has no Unwrap, so a wrapped one is invisible to the
+// errors.As the events consumer uses to tell a rate limit apart from a failure
+// worth counting against the event being provisioned.
+func managementRateLimited(ctx context.Context, operation string, err error) errors.RateLimited {
+	wait := httpclient.RetryAfter(err)
+	slog.WarnContext(ctx, "Auth0 Management API rate limited the request",
+		"operation", operation,
+		"retry_after", wait,
+	)
+	return errors.NewRateLimited("Auth0 "+operation+" was rate limited", wait)
+}
+
 // databaseUserIDPrefix is the Auth0 user-id prefix for a user whose primary
 // identity is the database connection.
 const databaseUserIDPrefix = "auth0|"
@@ -149,6 +164,9 @@ func (w *cdpMetadataWriter) getUser(ctx context.Context, userID, fields string) 
 		if statusCode == http.StatusNotFound {
 			return Auth0User{}, errors.NewNotFound("user not found")
 		}
+		if statusCode == http.StatusTooManyRequests {
+			return Auth0User{}, managementRateLimited(ctx, "user read", errCall)
+		}
 		slog.ErrorContext(ctx, "failed to read user for CDP provisioning",
 			"error", errCall,
 			"status_code", statusCode,
@@ -252,6 +270,9 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 	var patchResponse map[string]any
 	statusCode, errCall := request.Call(ctx, &patchResponse)
 	if errCall != nil {
+		if statusCode == http.StatusTooManyRequests {
+			return managementRateLimited(ctx, "app_metadata write", errCall)
+		}
 		slog.ErrorContext(ctx, "failed to write CDP app_metadata",
 			"error", errCall,
 			"status_code", statusCode,
