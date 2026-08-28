@@ -93,7 +93,7 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 			}
 		} else {
 			slog.ErrorContext(ctx, "HTTP request failed",
-				"error", lastErr,
+				"error", sanitizeError(lastErr),
 				"method", req.Method,
 			)
 		}

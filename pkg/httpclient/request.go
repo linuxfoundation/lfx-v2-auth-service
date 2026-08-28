@@ -151,7 +151,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 			return re.StatusCode, err
 		}
 		slog.ErrorContext(ctx, "API request failed",
-			"error", err,
+			"error", sanitizeError(err),
 			"method", a.Method,
 			"description", a.Description)
 		return -1, errors.NewUnexpected("API request failed", err)
@@ -167,7 +167,7 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 
 	if err := json.Unmarshal(response.Body, resp); err != nil {
-		slog.ErrorContext(ctx, "failed to parse API response", "error", err)
+		slog.ErrorContext(ctx, "failed to parse API response", "error", sanitizeError(err))
 		return -1, errors.NewUnexpected("failed to parse API response", err)
 	}
 
@@ -199,7 +199,7 @@ func sanitizeURL(rawURL string) string {
 		return "[REDACTED_URL]"
 	}
 
-	// Sanitize path segments (e.g. /api/v2/users/{user_id} or embedded emails)
+	// Sanitize path segments (e.g. /api/v2/users/{user_id}, /api/v2/users/{id}/identities/{provider}/{secondary_user_id}, or embedded emails)
 	if u.Path != "" {
 		segments := strings.Split(u.Path, "/")
 		for i, seg := range segments {
@@ -207,6 +207,8 @@ func sanitizeURL(rawURL string) string {
 				continue
 			}
 			if i > 0 && segments[i-1] == "users" && !strings.HasPrefix(seg, "by-") {
+				segments[i] = redaction.Redact(seg)
+			} else if i >= 2 && segments[i-2] == "identities" {
 				segments[i] = redaction.Redact(seg)
 			} else if strings.Contains(seg, "@") {
 				segments[i] = redaction.RedactEmail(seg)
@@ -216,32 +218,44 @@ func sanitizeURL(rawURL string) string {
 	}
 
 	// Sanitize query parameters
-	q := u.Query()
-	for k, vals := range q {
-		lowerK := strings.ToLower(k)
-		for i, v := range vals {
-			switch {
-			case strings.Contains(lowerK, "email"):
-				vals[i] = redaction.RedactEmail(v)
-			case lowerK == "q":
-				vals[i] = sanitizeLuceneQuery(v)
-			case strings.Contains(lowerK, "user") || strings.Contains(lowerK, "sub") || lowerK == "id":
-				vals[i] = redaction.Redact(v)
-			}
+	if u.RawQuery != "" {
+		q, err := url.ParseQuery(u.RawQuery)
+		if err != nil {
+			return "[REDACTED_URL]"
 		}
-		q[k] = vals
+		for k, vals := range q {
+			lowerK := strings.ToLower(k)
+			for i, v := range vals {
+				switch {
+				case strings.Contains(lowerK, "email"):
+					vals[i] = redaction.RedactEmail(v)
+				case lowerK == "q":
+					vals[i] = sanitizeLuceneQuery(v)
+				case strings.Contains(lowerK, "user") || strings.Contains(lowerK, "sub") || lowerK == "id":
+					vals[i] = redaction.Redact(v)
+				}
+			}
+			q[k] = vals
+		}
+		u.RawQuery = q.Encode()
 	}
-	u.RawQuery = q.Encode()
 
 	return u.String()
 }
 
 // sanitizeLuceneQuery redacts field values in search expressions (e.g. identities.user_id:123 or email:foo@example.com)
 func sanitizeLuceneQuery(query string) string {
+	if strings.ContainsAny(query, `()\"`) {
+		return "[REDACTED]"
+	}
+
 	parts := strings.Split(query, " ")
 	for i, part := range parts {
 		colonIdx := strings.Index(part, ":")
 		if colonIdx == -1 {
+			if strings.Contains(part, "@") {
+				parts[i] = redaction.RedactEmail(part)
+			}
 			continue
 		}
 		field := part[:colonIdx]
@@ -250,6 +264,40 @@ func sanitizeLuceneQuery(query string) string {
 			parts[i] = field + ":" + redaction.RedactEmail(val)
 		} else {
 			parts[i] = field + ":" + redaction.Redact(val)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// sanitizeError redacts raw URLs, email addresses, and sensitive tokens from error representations before logging
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := err.Error()
+
+	// Redact embedded URLs in error messages
+	for _, scheme := range []string{"http://", "https://"} {
+		if start := strings.Index(errStr, scheme); start != -1 {
+			// Find end of URL (delimiters: space, quote, backslash, colon, newline)
+			end := len(errStr)
+			for i := start; i < len(errStr); i++ {
+				if errStr[i] == '"' || errStr[i] == '\'' || errStr[i] == ' ' || errStr[i] == '\\' || errStr[i] == '\n' {
+					end = i
+					break
+				}
+			}
+			rawURL := errStr[start:end]
+			sanitized := sanitizeURL(rawURL)
+			errStr = errStr[:start] + sanitized + errStr[end:]
+		}
+	}
+
+	// Redact standalone email tokens in the error message
+	parts := strings.Split(errStr, " ")
+	for i, part := range parts {
+		if strings.Contains(part, "@") {
+			parts[i] = redaction.RedactEmail(part)
 		}
 	}
 	return strings.Join(parts, " ")

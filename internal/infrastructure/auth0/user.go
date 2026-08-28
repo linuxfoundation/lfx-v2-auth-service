@@ -574,6 +574,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("create email stub user"),
 		httpclient.WithBody(createPayload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var stubUser Auth0User
@@ -822,6 +823,7 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("set primary email"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var patchResponse map[string]any

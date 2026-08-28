@@ -208,24 +208,51 @@ func TestAccessLogMiddlewareLogsHealthProbesAtDebug(t *testing.T) {
 	}
 }
 
-// A failing probe is a readiness incident, so it must survive the default
-// LOG_LEVEL=info rather than being discarded with the healthy probe noise.
-func TestAccessLogMiddlewareKeepsFailedHealthProbesAtInfo(t *testing.T) {
-	for _, status := range []int{http.StatusServiceUnavailable, http.StatusInternalServerError} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
+// A 5xx failing probe is a server/readiness incident and is logged at ERROR.
+// A 4xx probe (e.g. 404/429) stays visible at INFO.
+func TestAccessLogMiddlewareLogsFailedHealthProbes(t *testing.T) {
+	tests := []struct {
+		status    int
+		wantLevel string
+	}{
+		{http.StatusServiceUnavailable, "ERROR"},
+		{http.StatusInternalServerError, "ERROR"},
+		{http.StatusNotFound, "INFO"},
+		{http.StatusTooManyRequests, "INFO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 
 			record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(status)
+				w.WriteHeader(tt.status)
 			}))
 
-			if record["level"] != "INFO" {
-				t.Errorf("got level %v, want INFO", record["level"])
+			if record["level"] != tt.wantLevel {
+				t.Errorf("got level %v, want %s", record["level"], tt.wantLevel)
 			}
-			if got, ok := record["status"].(float64); !ok || int(got) != status {
-				t.Errorf("got status %v, want %d", record["status"], status)
+			if got, ok := record["status"].(float64); !ok || int(got) != tt.status {
+				t.Errorf("got status %v, want %d", record["status"], tt.status)
 			}
 		})
+	}
+}
+
+func TestAccessLogMiddlewareFlushCommitsImplicitOK(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	req.Pattern = "GET /stream"
+
+	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Attempting WriteHeader after flush should not change the recorded 200 OK
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	if status, ok := record["status"].(float64); !ok || int(status) != http.StatusOK {
+		t.Errorf("got status %v, want %d", record["status"], http.StatusOK)
 	}
 }
 

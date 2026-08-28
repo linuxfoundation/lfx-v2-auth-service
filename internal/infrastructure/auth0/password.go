@@ -222,6 +222,7 @@ func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *mode
 		httpclient.WithURL(url),
 		httpclient.WithDescription("send reset password link"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	// Auth0 returns plain text (not JSON) for this endpoint; pass nil since we only need the status code.

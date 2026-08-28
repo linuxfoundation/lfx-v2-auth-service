@@ -53,6 +53,9 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 }
 
 func (r *statusRecorder) Flush() {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -129,11 +132,11 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 
 				level := slog.LevelInfo
 				switch {
-				case panicked:
+				case panicked || status >= http.StatusInternalServerError:
 					level = slog.LevelError
 				case healthPaths[r.URL.Path] && status < http.StatusBadRequest:
 					// Only successful probes are noise. A failing probe is a
-					// readiness incident and must stay visible at info.
+					// readiness incident and must stay visible at info (or error for 5xx).
 					level = slog.LevelDebug
 				}
 
