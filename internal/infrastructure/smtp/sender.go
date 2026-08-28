@@ -11,6 +11,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // Sender is the SMTP sender that implements port.EmailSender
@@ -58,7 +59,7 @@ func (s *Sender) SendEmail(ctx context.Context, message *model.EmailMessage) err
 	slog.DebugContext(ctx, "email sent successfully via SMTP",
 		"host", s.client.Host,
 		"port", s.client.Port,
-		"to", message.To,
+		"to", redaction.RedactEmail(message.To),
 		"subject", message.Subject,
 	)
 

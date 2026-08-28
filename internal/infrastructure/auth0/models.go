@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // Auth0User represents a user in Auth0
@@ -154,6 +156,10 @@ func (u *Auth0User) ToUser() *model.User {
 	}
 }
 
+// unknownAuth0Error is returned when the provider body carries no usable message,
+// so a raw response body is never surfaced as an error string.
+const unknownAuth0Error = "auth0 request failed"
+
 // ErrorResponse represents an error response from Auth0
 type ErrorResponse struct {
 	StatusCode int    `json:"statusCode"`
@@ -164,19 +170,51 @@ type ErrorResponse struct {
 	} `json:"attributes"`
 }
 
-// Message returns the error message from the attributes
-func (e *ErrorResponse) ErrorMessage(errorMessage string) string {
+// ErrorMessage extracts Auth0's human-readable message from a raw error response
+// body. The body is unsanitized and may echo submitted values, so it is never
+// returned or logged verbatim: anything unparseable yields a generic fallback.
+func (e *ErrorResponse) ErrorMessage(rawBody string) string {
 	var parsed ErrorResponse
-	// parse the error message from the attributes
-	err := json.Unmarshal([]byte(errorMessage), &parsed)
-	if err != nil {
-		slog.Error("failed to parse error message from attributes", "error", err)
-		return errorMessage
+	if err := json.Unmarshal([]byte(rawBody), &parsed); err != nil {
+		// Non-JSON bodies are normal for some Auth0 endpoints, not a fault.
+		slog.Debug("auth0 error body was not JSON; using generic message")
+		return unknownAuth0Error
 	}
 	if parsed.Message != "" {
-		return parsed.Message
+		return sanitizeProviderMessage(parsed.Message)
 	}
-	return errorMessage
+	if parsed.Error != "" {
+		return sanitizeProviderMessage(parsed.Error)
+	}
+	return unknownAuth0Error
+}
+
+// sanitizeProviderMessage redacts identifiers Auth0 echoes back from the request
+// (emails, provider-delimited user IDs). Valid JSON is not the same as safe
+// content: this text is returned inside a domain error that callers log.
+func sanitizeProviderMessage(message string) string {
+	fields := strings.Fields(message)
+	for i, field := range fields {
+		trimmed := strings.Trim(field, `"'.,;:()[]{}`)
+		if trimmed == "" {
+			continue
+		}
+		var replacement string
+		switch {
+		case strings.Contains(trimmed, "@"):
+			replacement = redaction.RedactEmail(trimmed)
+		default:
+			// Any "<provider>|<id>" identifier, not just a fixed set of providers:
+			// Auth0 also emits email|, google-oauth2|, windowslive|, and others.
+			provider, id, found := strings.Cut(trimmed, "|")
+			if !found || provider == "" || id == "" {
+				continue
+			}
+			replacement = provider + "|" + redaction.Redact(id)
+		}
+		fields[i] = strings.ReplaceAll(field, trimmed, replacement)
+	}
+	return strings.Join(fields, " ")
 }
 
 // NewErrorResponse creates a new ErrorResponse
