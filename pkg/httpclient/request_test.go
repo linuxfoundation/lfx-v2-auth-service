@@ -107,6 +107,12 @@ func TestSanitizeError(t *testing.T) {
 			omits:    []string{"secret_user_id_123"},
 			contains: []string{"connection refused"},
 		},
+		{
+			name:     "error with multiple same-scheme URLs",
+			input:    `redirected from "https://auth.example.com/api/v2/users/auth0|first_user_123" to "https://auth.example.com/api/v2/users/auth0|second_user_456"`,
+			omits:    []string{"first_user_123", "second_user_456"},
+			contains: []string{"auth0%7Cfir%2A%2A%2A%2A", "auth0%7Csec%2A%2A%2A%2A"},
+		},
 	}
 
 	for _, tt := range tests {

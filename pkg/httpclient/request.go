@@ -206,11 +206,12 @@ func sanitizeURL(rawURL string) string {
 			if seg == "" {
 				continue
 			}
-			if i > 0 && segments[i-1] == "users" && !strings.HasPrefix(seg, "by-") {
+			switch {
+			case i > 0 && segments[i-1] == "users" && !strings.HasPrefix(seg, "by-"):
 				segments[i] = redaction.Redact(seg)
-			} else if i >= 2 && segments[i-2] == "identities" {
+			case i >= 2 && segments[i-2] == "identities":
 				segments[i] = redaction.Redact(seg)
-			} else if strings.Contains(seg, "@") {
+			case strings.Contains(seg, "@"):
 				segments[i] = redaction.RedactEmail(seg)
 			}
 		}
@@ -278,7 +279,12 @@ func sanitizeError(err error) string {
 
 	// Redact embedded URLs in error messages
 	for _, scheme := range []string{"http://", "https://"} {
-		if start := strings.Index(errStr, scheme); start != -1 {
+		for searchStart := 0; ; {
+			offset := strings.Index(errStr[searchStart:], scheme)
+			if offset == -1 {
+				break
+			}
+			start := searchStart + offset
 			// Find end of URL (delimiters: space, quote, backslash, colon, newline)
 			end := len(errStr)
 			for i := start; i < len(errStr); i++ {
@@ -290,6 +296,7 @@ func sanitizeError(err error) string {
 			rawURL := errStr[start:end]
 			sanitized := sanitizeURL(rawURL)
 			errStr = errStr[:start] + sanitized + errStr[end:]
+			searchStart = start + len(sanitized)
 		}
 	}
 
