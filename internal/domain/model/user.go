@@ -206,11 +206,21 @@ func (um *UserMetadata) userMetadataSanitize() {
 			}
 			count++
 		}
-		rawItems := strings.Split(*um.Skills, ",")
-		cleaned := make([]string, 0, len(rawItems))
-		seen := make(map[string]struct{}, len(rawItems))
+		// Scan for commas manually instead of strings.Split, so a
+		// delimiter-heavy input stops at skillsMaxCount unique items
+		// without first building a slice of every segment.
+		cleaned := make([]string, 0, skillsMaxCount)
+		seen := make(map[string]struct{}, skillsMaxCount)
 		folder := cases.Fold()
-		for _, item := range rawItems {
+		raw := *um.Skills
+		for len(cleaned) < skillsMaxCount && raw != "" {
+			item := raw
+			if idx := strings.IndexByte(raw, ','); idx >= 0 {
+				item = raw[:idx]
+				raw = raw[idx+1:]
+			} else {
+				raw = ""
+			}
 			item = strings.TrimSpace(item)
 			if item == "" {
 				continue
@@ -223,13 +233,15 @@ func (um *UserMetadata) userMetadataSanitize() {
 			}
 			seen[key] = struct{}{}
 			cleaned = append(cleaned, item)
-			if len(cleaned) == skillsMaxCount {
-				break
-			}
 		}
 		joined := strings.Join(cleaned, ", ")
 		if runes := []rune(joined); len(runes) > skillsMaxLength {
-			joined = string(runes[:skillsMaxLength])
+			// Truncating by rune count can land mid-separator, leaving a
+			// dangling ", " at the end. Items themselves never contain a
+			// comma (it's the split delimiter) or trailing space (each is
+			// trimmed above), so any trailing ", "/"," left after the cut
+			// belongs to a partial separator and is safe to strip.
+			joined = strings.TrimRight(string(runes[:skillsMaxLength]), ", ")
 		}
 		*um.Skills = joined
 	}

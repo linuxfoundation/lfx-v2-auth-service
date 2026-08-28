@@ -213,4 +213,6 @@ nats request lfx.auth-service.user_metadata.update '{
 
 **Important Notes:**
 - The service works with Auth0, Authelia, and mock repositories based on configuration
+- `skills` accepts a comma-separated string and is normalized before storage: items are trimmed, empty items are dropped, and duplicates are removed via Unicode case folding (case-insensitive, so `"Go"` and `"go"` are treated as the same skill)
+- The raw `skills` input is capped at 4000 characters before parsing, the number of items is capped at 50, and the final normalized value (joined with `", "`) is capped at 2000 characters; excess input beyond any cap is silently dropped rather than rejected
 

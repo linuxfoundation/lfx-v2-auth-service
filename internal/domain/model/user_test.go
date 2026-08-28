@@ -574,6 +574,29 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: truncation landing on a separator boundary drops the dangling separator", func(t *testing.T) {
+		// Joined length is 1998 + len(", ") + len("Go") = 2002, so truncating
+		// to skillsMaxLength (2000) runes cuts exactly after the separator,
+		// which would otherwise leave a trailing ", " with "Go" dropped.
+		first := strings.Repeat("x", skillsMaxLength-2)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + "," + "Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		got := *metadata.Skills
+		if strings.HasSuffix(got, ", ") || strings.HasSuffix(got, ",") {
+			t.Errorf("Skills = %q, must not end with a dangling separator", got)
+		}
+		if got != first {
+			t.Errorf("Skills = %q, want %q", got, first)
+		}
+	})
+
 	t.Run("multibyte skills is truncated on a rune boundary", func(t *testing.T) {
 		metadata := &UserMetadata{
 			Skills: converters.StringPtr(strings.Repeat("é", skillsMaxLength+50)),
@@ -1316,6 +1339,9 @@ func TestUserMetadata_Patch(t *testing.T) {
 				}
 				if tt.original.Bio != nil {
 					originalCopy.Bio = converters.StringPtr(*tt.original.Bio)
+				}
+				if tt.original.Skills != nil {
+					originalCopy.Skills = converters.StringPtr(*tt.original.Skills)
 				}
 			}
 
