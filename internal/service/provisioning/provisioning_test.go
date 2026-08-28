@@ -23,9 +23,13 @@ type mockCDPClient struct {
 	createResult   cdp.CreateResult
 	createErr      error
 	attachErr      error
-	attachOutcome  cdp.Outcome
+	attachResult   cdp.AttachResult
 	identities     []cdp.MemberIdentity
 	identitiesErr  error
+
+	// identitiesByMember overrides identities per member id, for the paths
+	// that read a second member's identities as well as the resolved one's.
+	identitiesByMember map[string][]cdp.MemberIdentity
 
 	resolveCalls    int
 	createCalls     int
@@ -53,8 +57,15 @@ func (m *mockCDPClient) Resolve(_ context.Context, lfid string, _ string) (cdp.R
 	return m.resolveResults[index], nil
 }
 
-func (m *mockCDPClient) ListIdentities(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+func (m *mockCDPClient) ListIdentities(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
 	m.identitiesCalls++
+	if m.identitiesByMember != nil {
+		held, ok := m.identitiesByMember[memberID]
+		if !ok {
+			return nil, m.identitiesErr
+		}
+		return held, nil
+	}
 	return m.identities, m.identitiesErr
 }
 
@@ -64,16 +75,16 @@ func (m *mockCDPClient) CreateMember(_ context.Context, displayName string, _ cd
 	return m.createResult, m.createErr
 }
 
-func (m *mockCDPClient) AttachIdentity(_ context.Context, memberID string, _ cdp.Identity) (cdp.Outcome, error) {
+func (m *mockCDPClient) AttachIdentity(_ context.Context, memberID string, _ cdp.Identity) (cdp.AttachResult, error) {
 	m.attachCalls++
 	m.attachedTo = memberID
 	if m.attachErr != nil {
-		return "", m.attachErr
+		return cdp.AttachResult{}, m.attachErr
 	}
-	if m.attachOutcome != "" {
-		return m.attachOutcome, nil
+	if m.attachResult.Outcome != "" {
+		return m.attachResult, nil
 	}
-	return cdp.OutcomeFound, nil
+	return cdp.AttachResult{Outcome: cdp.OutcomeFound}, nil
 }
 
 // mockMetadataStore records the write it was asked to make and serves the
@@ -375,7 +386,7 @@ func TestProvisionFlow(t *testing.T) {
 		// permanent identifier the LFID was never attached to.
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
-			attachOutcome:  cdp.OutcomeConflict,
+			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict},
 		}
 		store := &mockMetadataStore{}
 
@@ -385,6 +396,93 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, OutcomeSkipped, result.Outcome)
 		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
 		assert.Zero(t, store.calls, "no uuid is written when the identity did not attach")
+	})
+
+	t.Run("the member named by an attach conflict is adopted once verified", func(t *testing.T) {
+		// The 409 body names the member that actually holds the LFID, read on
+		// the primary while the error was built. Verifying it turns a skip
+		// into a provision for a user who is not ambiguous at all — CDP simply
+		// pointed resolve at the wrong member.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
+			identitiesByMember: map[string][]cdp.MemberIdentity{
+				"MEM-1": {},
+				"MEM-2": {{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername}},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeProvisioned, result.Outcome)
+		assert.Equal(t, "MEM-2", result.MemberID, "the member that holds the LFID is the one stored")
+		assert.Equal(t, "mem-2", store.written.UUID, "stored lowercased, as every cdp_uuid write is")
+	})
+
+	t.Run("a conflict naming a member that does not hold the LFID is still a skip", func(t *testing.T) {
+		// CDP named it as the holder and it does not hold it. The two answers
+		// disagree, and a stored member id is permanent.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
+			identitiesByMember: map[string][]cdp.MemberIdentity{
+				"MEM-1": {},
+				"MEM-2": {},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a conflict naming a member holding somebody else's LFID is a skip", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
+			identitiesByMember: map[string][]cdp.MemberIdentity{
+				"MEM-1": {},
+				"MEM-2": {
+					{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+					{Value: "someoneelse", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+				},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome, "a member holding two LFIDs holds two people")
+		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a conflict whose member cannot be verified is a skip, not a guess", func(t *testing.T) {
+		// Verification is the entire basis for adopting it, so losing the
+		// lookup costs exactly what this path cost before it existed.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
+			identitiesByMember: map[string][]cdp.MemberIdentity{
+				"MEM-1": {},
+			},
+			identitiesErr: errs.NewUnexpected("cdp unavailable"),
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
+		assert.Zero(t, store.calls)
 	})
 
 	t.Run("the created member is named from Auth0, not from the payload", func(t *testing.T) {

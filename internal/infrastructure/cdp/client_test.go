@@ -238,10 +238,10 @@ func TestAttachIdentity(t *testing.T) {
 
 	t.Run("201 succeeds and escapes the member id in the path", func(t *testing.T) {
 		transport := &recordingTransport{status: http.StatusCreated}
-		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem/1", identity)
+		attached, err := newTestClient(transport).AttachIdentity(context.Background(), "mem/1", identity)
 
 		require.NoError(t, err)
-		assert.Equal(t, OutcomeFound, outcome)
+		assert.Equal(t, OutcomeFound, attached.Outcome)
 		assert.Equal(t, "https://cdp.example.org/v1/members/mem%2F1/identities", transport.requests[0].url)
 	})
 
@@ -249,10 +249,10 @@ func TestAttachIdentity(t *testing.T) {
 		// Delivery is at-least-once. The provider finds the exact identity on
 		// this member and answers 200, so a replay is not a conflict.
 		transport := &recordingTransport{status: http.StatusOK}
-		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+		attached, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
 
 		require.NoError(t, err)
-		assert.Equal(t, OutcomeFound, outcome)
+		assert.Equal(t, OutcomeFound, attached.Outcome)
 	})
 
 	t.Run("409 is a conflict, not a success", func(t *testing.T) {
@@ -260,10 +260,37 @@ func TestAttachIdentity(t *testing.T) {
 		// member. Reporting it as success would let the caller store a member
 		// id whose LFID was never attached.
 		transport := &recordingTransport{status: http.StatusConflict}
-		outcome, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+		attached, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
 
 		require.NoError(t, err)
-		assert.Equal(t, OutcomeConflict, outcome)
+		assert.Equal(t, OutcomeConflict, attached.Outcome)
+		assert.Empty(t, attached.ConflictMemberID, "a body naming nobody reports nobody")
+	})
+
+	t.Run("409 reports the member that holds the identity", func(t *testing.T) {
+		// The provider looks this up on the primary while building the error,
+		// so it is authoritative in a way a re-resolve against a read replica
+		// is not.
+		transport := &recordingTransport{
+			status: http.StatusConflict,
+			body: `{"error":{"code":"CONFLICT","message":"Identity already exists on another member",` +
+				`"context":{"memberId":"mem-1","platform":"lfid","value":"psmith","type":"username",` +
+				`"conflictMemberId":"mem-2"}}}`,
+		}
+		attached, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeConflict, attached.Outcome)
+		assert.Equal(t, "mem-2", attached.ConflictMemberID)
+	})
+
+	t.Run("a malformed 409 body degrades to no member rather than failing", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusConflict, body: `not json`}
+		attached, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeConflict, attached.Outcome)
+		assert.Empty(t, attached.ConflictMemberID)
 	})
 
 	t.Run("an error carries the status, not the provider body", func(t *testing.T) {

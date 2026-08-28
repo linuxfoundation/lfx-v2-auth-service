@@ -109,3 +109,27 @@ type CreateResult struct {
 	Outcome  Outcome
 	MemberID string
 }
+
+// AttachResult is the outcome of an attach call.
+//
+// On OutcomeConflict, ConflictMemberID names the member that already holds the
+// identity, when the provider reported it. Unlike the create-409 body, the
+// attach-409 body carries it: the handler looks it up on the primary
+// connection while building the error, so it is authoritative and free of the
+// replica lag a re-resolve would be subject to. It is still optional — an
+// older provider, or a conflict raised on a different constraint, may omit it.
+type AttachResult struct {
+	Outcome          Outcome
+	ConflictMemberID string
+}
+
+// attachConflictResponse is the 409 body for
+// POST /v1/members/{memberId}/identities.
+type attachConflictResponse struct {
+	Error struct {
+		Code    string `json:"code"`
+		Context struct {
+			ConflictMemberID string `json:"conflictMemberId"`
+		} `json:"context"`
+	} `json:"error"`
+}

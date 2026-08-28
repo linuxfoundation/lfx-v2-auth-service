@@ -13,6 +13,8 @@ package cdp
 
 import (
 	"context"
+	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,7 +64,7 @@ type Client interface {
 	Resolve(ctx context.Context, lfid string, verifiedEmail string) (ResolveResult, error)
 	ListIdentities(ctx context.Context, memberID string) ([]MemberIdentity, error)
 	CreateMember(ctx context.Context, displayName string, identity Identity) (CreateResult, error)
-	AttachIdentity(ctx context.Context, memberID string, identity Identity) (Outcome, error)
+	AttachIdentity(ctx context.Context, memberID string, identity Identity) (AttachResult, error)
 }
 
 // NewClient creates a CDP v1 API client.
@@ -283,20 +285,20 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 // identity is already verified on a *different* member — so it is reported as
 // a conflict rather than swallowed, or the caller would store a member id whose
 // LFID was never attached.
-func (c *client) AttachIdentity(ctx context.Context, memberID string, identity Identity) (Outcome, error) {
+func (c *client) AttachIdentity(ctx context.Context, memberID string, identity Identity) (AttachResult, error) {
 	if strings.TrimSpace(memberID) == "" {
-		return "", errors.NewValidation("member id is required to attach an identity")
+		return AttachResult{}, errors.NewValidation("member id is required to attach an identity")
 	}
 	if strings.TrimSpace(identity.Value) == "" {
-		return "", errors.NewValidation("identity value is required to attach an identity")
+		return AttachResult{}, errors.NewValidation("identity value is required to attach an identity")
 	}
 	if c.config.TokenManager == nil {
-		return "", errors.NewUnexpected("CDP token manager is not configured")
+		return AttachResult{}, errors.NewUnexpected("CDP token manager is not configured")
 	}
 
 	token, err := c.config.TokenManager.GetToken(ctx)
 	if err != nil {
-		return "", errors.NewUnexpected("failed to get CDP M2M token", err)
+		return AttachResult{}, errors.NewUnexpected("failed to get CDP M2M token", err)
 	}
 
 	request := httpclient.NewAPIRequest(
@@ -315,17 +317,39 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 	statusCode, errCall := request.Call(ctx, nil)
 	if errCall != nil {
 		if statusCode == http.StatusConflict {
+			conflictID := attachConflictMemberID(errCall)
 			slog.WarnContext(ctx, "CDP identity belongs to another member",
 				"member_id", redaction.Redact(memberID),
+				"conflict_member_id", redaction.Redact(conflictID),
+				"conflict_member_id_reported", conflictID != "",
 			)
-			return OutcomeConflict, nil
+			return AttachResult{Outcome: OutcomeConflict, ConflictMemberID: conflictID}, nil
 		}
 		slog.ErrorContext(ctx, "CDP identity attach failed",
 			"status_code", statusCode,
 			"member_id", redaction.Redact(memberID),
 		)
-		return "", errors.NewUnexpected("CDP identity attach failed", sanitize(statusCode, errCall))
+		return AttachResult{}, errors.NewUnexpected("CDP identity attach failed", sanitize(statusCode, errCall))
 	}
 
-	return OutcomeFound, nil
+	return AttachResult{Outcome: OutcomeFound}, nil
+}
+
+// attachConflictMemberID pulls the winning member out of an attach-409 body.
+//
+// The body is read off the error rather than the response because the shared
+// client returns no response on a non-2xx. It is parsed, never logged: the same
+// body echoes the submitted identity back, which is why the request is marked
+// sensitive.
+func attachConflictMemberID(err error) string {
+	var retryable *httpclient.RetryableError
+	if !stderrors.As(err, &retryable) || len(retryable.Body) == 0 {
+		return ""
+	}
+
+	var body attachConflictResponse
+	if jsonErr := json.Unmarshal(retryable.Body, &body); jsonErr != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Error.Context.ConflictMemberID)
 }

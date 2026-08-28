@@ -6,11 +6,17 @@ package k8s
 import (
 	"context"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 )
 
 func TestPodIdentity(t *testing.T) {
@@ -117,4 +123,120 @@ func TestWaitBeforeRejoin(t *testing.T) {
 		assert.Less(t, time.Since(start), rejoinDelay,
 			"a shutdown must not wait out the full rejoin delay")
 	})
+}
+
+// withNewClient swaps the clientset factory for the duration of a test.
+func withNewClient(t *testing.T, fn func(context.Context) (kubernetes.Interface, error)) {
+	t.Helper()
+	original := newClient
+	newClient = fn
+	t.Cleanup(func() { newClient = original })
+}
+
+func testLease() LeaseConfig {
+	return LeaseConfig{Name: "test-lease", Namespace: "lfx", Identity: "pod-1"}
+}
+
+func TestRunAsLeaderRunsFnUnderLeadership(t *testing.T) {
+	withNewClient(t, func(context.Context) (kubernetes.Interface, error) {
+		return fake.NewSimpleClientset(), nil
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	var (
+		mu      sync.Mutex
+		runs    int
+		running bool
+		overlap bool
+	)
+	led := make(chan struct{})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunAsLeader(ctx, testLease(), func(leaderCtx context.Context) {
+			mu.Lock()
+			runs++
+			if running {
+				overlap = true
+			}
+			running = true
+			first := runs == 1
+			mu.Unlock()
+
+			if first {
+				close(led)
+			}
+			<-leaderCtx.Done()
+
+			mu.Lock()
+			running = false
+			mu.Unlock()
+		})
+	}()
+
+	select {
+	case <-led:
+	case <-time.After(20 * time.Second):
+		t.Fatal("never acquired leadership against the fake clientset")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("RunAsLeader did not return after cancellation")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, overlap, "fn must never run twice concurrently on one pod")
+	assert.False(t, running, "RunAsLeader must wait for fn to unwind before returning")
+	assert.GreaterOrEqual(t, runs, 1)
+}
+
+func TestRunAsLeaderRetriesClientConstruction(t *testing.T) {
+	// The point of the refactor: a one-time failure building the clientset
+	// must not retire the pod from the election for the rest of its life.
+	var attempts atomic.Int32
+	withNewClient(t, func(context.Context) (kubernetes.Interface, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.NewUnexpected("transient: service account token not mounted yet")
+		}
+		return fake.NewSimpleClientset(), nil
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	led := make(chan struct{})
+	var once sync.Once
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunAsLeader(ctx, testLease(), func(leaderCtx context.Context) {
+			once.Do(func() { close(led) })
+			<-leaderCtx.Done()
+		})
+	}()
+
+	select {
+	case <-led:
+	case err := <-done:
+		t.Fatalf("returned instead of retrying the client build: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("never recovered from the first client-build failure")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("RunAsLeader did not return after cancellation")
+	}
+
+	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "the failed build must be retried, not returned")
 }

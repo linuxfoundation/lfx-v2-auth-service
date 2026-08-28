@@ -209,7 +209,10 @@ func PodNamespace() string {
 	return ""
 }
 
-func newClient(ctx context.Context) (kubernetes.Interface, error) {
+// newClient is a variable so tests can substitute a fake clientset and drive a
+// real election through the retry and rejoin branches, which are otherwise
+// unreachable without a cluster.
+var newClient = func(ctx context.Context) (kubernetes.Interface, error) {
 	config, err := restConfig(ctx)
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to find Kubernetes config", err)

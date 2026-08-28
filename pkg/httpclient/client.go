@@ -50,6 +50,11 @@ type Response struct {
 type RetryableError struct {
 	StatusCode int
 	Message    string
+
+	// Body is the raw response body, kept separate from Message so a caller
+	// can parse a structured error while Message stays redacted for logging.
+	// Never log this directly.
+	Body []byte
 }
 
 func (e *RetryableError) Error() string {
@@ -157,6 +162,7 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 		err := &RetryableError{
 			StatusCode: resp.StatusCode,
 			Message:    message,
+			Body:       body,
 		}
 		return response, err
 	}

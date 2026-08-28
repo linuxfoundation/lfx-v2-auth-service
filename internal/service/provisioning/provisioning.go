@@ -272,17 +272,19 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		if errAttach != nil {
 			return "", Result{}, errAttach
 		}
-		if attached == cdp.OutcomeConflict {
+		if attached.Outcome == cdp.OutcomeConflict {
 			// The LFID is verified on a different member than the one resolve
-			// returned, so CDP disagrees with itself. Storing this member id
-			// would record a permanent identifier the LFID was never attached
-			// to. The read-side guard above cannot see this: the foreign
-			// identity is on the other member, not this one.
-			slog.WarnContext(ctx, "CDP LFID belongs to another member, skipping provisioning",
-				"user_id", redaction.Redact(req.UserID),
-				"member_id", redaction.Redact(resolved.MemberID),
-			)
-			return "", skip(reasonLFIDOnAnotherMember), nil
+			// returned, so CDP disagrees with itself. The read-side guard above
+			// cannot see this: the foreign identity is on the other member, not
+			// this one.
+			//
+			// The 409 body names the winner, looked up on the primary while the
+			// error was built — so unlike a re-resolve it is neither subject to
+			// replica lag nor liable to come back as a multi-match. It is still
+			// verified before use rather than trusted: storing a member id is
+			// permanent, and the reason for skipping here in the first place is
+			// that CDP has contradicted itself.
+			return o.adoptConflictMember(ctx, req, resolved.MemberID, attached.ConflictMemberID, username)
 		}
 		return resolved.MemberID, Result{}, nil
 
@@ -351,6 +353,68 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 	}
 
 	return created.MemberID, Result{}, nil
+}
+
+// adoptConflictMember decides what to store after an attach-409.
+//
+// The member CDP named is only adopted once its identities confirm it: it must
+// actually hold this user's LFID and no one else's. Anything short of that is
+// a skip, which is what this path did unconditionally before — so a failure to
+// verify costs the same as it always did, while a clean verification saves a
+// user who would otherwise have waited for the login self-heal or the sweep.
+func (o *orchestrator) adoptConflictMember(
+	ctx context.Context,
+	req Request,
+	resolvedMemberID string,
+	conflictMemberID string,
+	username string,
+) (string, Result, error) {
+	if conflictMemberID == "" {
+		slog.WarnContext(ctx, "CDP LFID belongs to another member, skipping provisioning",
+			"user_id", redaction.Redact(req.UserID),
+			"member_id", redaction.Redact(resolvedMemberID),
+			"reason", "the conflict response named no member",
+		)
+		return "", skip(reasonLFIDOnAnotherMember), nil
+	}
+
+	held, err := o.cdpClient.ListIdentities(ctx, conflictMemberID)
+	if err != nil {
+		// Verification is the whole basis for adopting it, so a failed lookup
+		// falls back to the skip rather than storing on trust.
+		slog.WarnContext(ctx, "could not verify the conflicting CDP member, skipping provisioning",
+			"error", err,
+			"user_id", redaction.Redact(req.UserID),
+			"conflict_member_id", redaction.Redact(conflictMemberID),
+		)
+		return "", skip(reasonLFIDOnAnotherMember), nil
+	}
+
+	if other, occupied := foreignLFID(held, username); occupied {
+		slog.WarnContext(ctx, "the conflicting CDP member holds another LFID, skipping provisioning",
+			"user_id", redaction.Redact(req.UserID),
+			"conflict_member_id", redaction.Redact(conflictMemberID),
+			"existing_lfid", redaction.Redact(other),
+		)
+		return "", skip(reasonLFIDOnAnotherMember), nil
+	}
+
+	if !holdsLFID(held, username) {
+		// It was named as the holder of this LFID and does not hold it, so the
+		// two answers disagree and neither is worth making permanent.
+		slog.WarnContext(ctx, "the conflicting CDP member does not hold this LFID, skipping provisioning",
+			"user_id", redaction.Redact(req.UserID),
+			"conflict_member_id", redaction.Redact(conflictMemberID),
+		)
+		return "", skip(reasonLFIDOnAnotherMember), nil
+	}
+
+	slog.InfoContext(ctx, "adopting the CDP member that holds this LFID",
+		"user_id", redaction.Redact(req.UserID),
+		"resolved_member_id", redaction.Redact(resolvedMemberID),
+		"conflict_member_id", redaction.Redact(conflictMemberID),
+	)
+	return conflictMemberID, Result{}, nil
 }
 
 // foreignLFID reports the first LFID username on the member that is not this
