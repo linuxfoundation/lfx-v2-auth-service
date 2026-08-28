@@ -385,6 +385,11 @@ func newTraceProvider(ctx context.Context, cfg OTelConfig, res *resource.Resourc
 // Our paths embed an Auth0 sub or a CDP member id, so exporting them verbatim
 // ships personal identifiers to the trace backend — a separate sink from the
 // logs, with its own access model and retention.
+//
+// This keeps less than the log path, which retains the path and redacts only
+// the identifier segments. The difference is deliberate: span attributes are
+// set by instrumentation rather than by a reviewed call site, so there is no
+// place to audit what ends up here.
 var scrubbedURLAttrs = map[attribute.Key]bool{
 	"url.full":  true,
 	"http.url":  true,

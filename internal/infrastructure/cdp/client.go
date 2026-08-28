@@ -14,7 +14,6 @@ package cdp
 import (
 	"context"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -85,14 +84,13 @@ func NewClient(config Config) Client {
 	}
 }
 
-// sanitize strips a provider response body out of an error before it is logged
-// or wrapped.
+// sanitize replaces an upstream error with a status-only error.
 //
-// The shared client puts the raw body in RetryableError.Message, and CDP error
-// bodies echo the identity back — the create-409 body is {platform, value,
-// type}. Carrying that into an error chain would print the LFID in plain text
-// everywhere this flow otherwise redacts it. A transport failure has no body
-// and is worth keeping intact.
+// RetryableError already keeps the body out of Error(), and pkg/errors has no
+// Unwrap, so the body is unreachable today. This drops the RawBody carrier from
+// the chain anyway: adding Unwrap to pkg/errors would otherwise silently expose
+// CDP error bodies, which echo the submitted LFID back. A transport failure has
+// no body and is worth keeping intact.
 func sanitize(statusCode int, err error) error {
 	if statusCode <= 0 {
 		return err
@@ -131,8 +129,6 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/resolve"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("resolve CDP member"),
-		// CDP error bodies echo the submitted identity back.
-		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(payload),
 		// The body carries the LFID and a verified email, and the client logs
 		// request bodies verbatim at debug level.
@@ -197,8 +193,6 @@ func (c *client) ListIdentities(ctx context.Context, memberID string) ([]MemberI
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/"+url.PathEscape(memberID)+"/identities"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("list CDP member identities"),
-		// CDP error bodies echo the submitted identity back.
-		httpclient.WithSensitiveResponse(),
 	)
 
 	var response memberIdentitiesResponse
@@ -244,8 +238,6 @@ func (c *client) CreateMember(ctx context.Context, displayName string, identity 
 		httpclient.WithURL(c.config.BaseURL+"/v1/members"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("create CDP member"),
-		// CDP error bodies echo the submitted identity back.
-		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(createMemberRequest{
 			DisplayName: displayName,
 			Identities:  []Identity{identity},
@@ -307,8 +299,6 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 		httpclient.WithURL(c.config.BaseURL+"/v1/members/"+url.PathEscape(memberID)+"/identities"),
 		httpclient.WithToken(token),
 		httpclient.WithDescription("attach CDP member identity"),
-		// CDP error bodies echo the submitted identity back.
-		httpclient.WithSensitiveResponse(),
 		httpclient.WithBody(identity),
 		// Carries the LFID.
 		httpclient.WithSensitiveBody(),
@@ -339,16 +329,15 @@ func (c *client) AttachIdentity(ctx context.Context, memberID string, identity I
 //
 // The body is read off the error rather than the response because the shared
 // client returns no response on a non-2xx. It is parsed, never logged: the same
-// body echoes the submitted identity back, which is why the request is marked
-// sensitive.
+// body echoes the submitted identity back.
 func attachConflictMemberID(err error) string {
-	var retryable *httpclient.RetryableError
-	if !stderrors.As(err, &retryable) || len(retryable.Body) == 0 {
+	raw := httpclient.ResponseBody(err)
+	if raw == "" {
 		return ""
 	}
 
 	var body attachConflictResponse
-	if jsonErr := json.Unmarshal(retryable.Body, &body); jsonErr != nil {
+	if jsonErr := json.Unmarshal([]byte(raw), &body); jsonErr != nil {
 		return ""
 	}
 	return strings.TrimSpace(body.Error.Context.ConflictMemberID)

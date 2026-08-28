@@ -15,6 +15,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -245,7 +246,7 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 	}
 
 	slog.InfoContext(ctx, "verification code stored successfully",
-		"email", email,
+		"email", redaction.RedactEmail(email),
 	)
 
 	return nil
@@ -269,7 +270,7 @@ func (n *natsUserStorage) GetVerificationCode(ctx context.Context, email string)
 	otp := string(entry.Value())
 
 	slog.InfoContext(ctx, "verification code retrieved successfully",
-		"email", email,
+		"email", redaction.RedactEmail(email),
 	)
 
 	return otp, nil

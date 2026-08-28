@@ -294,8 +294,9 @@ func TestAttachIdentity(t *testing.T) {
 	})
 
 	t.Run("an error carries the status, not the provider body", func(t *testing.T) {
-		// CDP error bodies echo the identity back, and the shared client puts
-		// the raw body in the error message.
+		// CDP error bodies echo the identity back. The shared client keeps the
+		// body out of Error() and sanitize() drops the carrier too; this pins
+		// that neither path puts it back.
 		transport := &recordingTransport{status: http.StatusInternalServerError, body: `{"platform":"lfid","value":"psmith","type":"username"}`}
 		_, err := newTestClient(transport).AttachIdentity(context.Background(), "mem-1", identity)
 

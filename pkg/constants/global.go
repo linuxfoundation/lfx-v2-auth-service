@@ -8,6 +8,9 @@ const (
 	// ServiceName is the name of the auth service
 	ServiceName = "lfx-v2-auth-service"
 
+	// RequestIDHeader is the HTTP header key for request tracking
+	RequestIDHeader = "X-Request-Id"
+
 	// UserRepositoryTypeEnvKey is the environment variable key for the user repository type
 	UserRepositoryTypeEnvKey = "USER_REPOSITORY_TYPE"
 

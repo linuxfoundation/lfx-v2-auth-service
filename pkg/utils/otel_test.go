@@ -562,9 +562,9 @@ func TestNewSampler_ParentHonored(t *testing.T) {
 	}
 }
 
-// TestURLScrubberDropsIdentifiers pins the second PII sink. Logs were fixed by
-// scrubbing url.Error, but otelhttp records the full URL as a span attribute,
-// which exports to the trace backend instead.
+// TestURLScrubberDropsIdentifiers pins the second PII sink. Logs are sanitized
+// at the log boundary by SanitizeError, but otelhttp records the full URL as a
+// span attribute, which exports to the trace backend instead.
 func TestURLScrubberDropsIdentifiers(t *testing.T) {
 	const sub = "auth0|68b0SECRETSUB"
 

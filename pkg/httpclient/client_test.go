@@ -128,54 +128,6 @@ func TestClient_Get_NotFound(t *testing.T) {
 	// This is acceptable behavior for the HTTP client
 }
 
-func TestClient_SensitiveResponse(t *testing.T) {
-	// Some providers echo the submitted identity back in their error bodies.
-	// The body lands in RetryableError.Message, which Do() error-logs, so
-	// keeping it out of the error is the only place this can be stopped.
-	const secret = "psmith"
-
-	newServer := func() *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"platform":"lfid","value":"` + secret + `","type":"username"}`))
-		}))
-	}
-
-	t.Run("the body is withheld when the response is marked sensitive", func(t *testing.T) {
-		server := newServer()
-		defer server.Close()
-
-		client := NewClient(Config{MaxRetries: 0})
-		_, err := client.Do(context.Background(), Request{
-			Method:            "POST",
-			URL:               server.URL,
-			SensitiveResponse: true,
-		})
-
-		if err == nil {
-			t.Fatal("expected an error for a 409")
-		}
-		if strings.Contains(err.Error(), secret) {
-			t.Errorf("error carries the provider body: %v", err)
-		}
-	})
-
-	t.Run("the body is kept by default", func(t *testing.T) {
-		server := newServer()
-		defer server.Close()
-
-		client := NewClient(Config{MaxRetries: 0})
-		_, err := client.Do(context.Background(), Request{Method: "POST", URL: server.URL})
-
-		if err == nil {
-			t.Fatal("expected an error for a 409")
-		}
-		if !strings.Contains(err.Error(), secret) {
-			t.Errorf("existing callers should still see the body, got: %v", err)
-		}
-	})
-}
-
 func TestClient_Retry_ServerError(t *testing.T) {
 	callCount := 0
 
@@ -280,9 +232,10 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-// TestTransportErrorDoesNotLeakURL pins the privacy fix. The debug line that
-// used to print the URL is gone, but url.Error renders the whole URL too, and
-// that one surfaces at ERROR on any transport failure.
+// TestTransportErrorDoesNotLeakURL pins the privacy fix at the sanitization
+// boundary. A transport failure renders the whole URL through url.Error, and
+// our paths carry an Auth0 sub, so SanitizeError is the boundary every log site
+// has to go through.
 func TestTransportErrorDoesNotLeakURL(t *testing.T) {
 	const sub = "auth0|68b0SECRETSUB"
 
@@ -300,14 +253,16 @@ func TestTransportErrorDoesNotLeakURL(t *testing.T) {
 		t.Fatal("expected a transport error")
 	}
 
-	for _, leak := range []string{sub, url.PathEscape(sub), "/api/v2/users"} {
-		if strings.Contains(err.Error(), leak) {
-			t.Errorf("error text leaks %q: %s", leak, err.Error())
+	sanitized := SanitizeError(err)
+	for _, leak := range []string{sub, url.PathEscape(sub)} {
+		if strings.Contains(sanitized, leak) {
+			t.Errorf("sanitized error leaks %q: %s", leak, sanitized)
 		}
 	}
 
-	// Scheme and host stay, so the failing provider is still identifiable.
-	if !strings.Contains(err.Error(), "127.0.0.1:1") {
-		t.Errorf("error text dropped the host, which is needed to triage: %s", err.Error())
+	// Only the identifier segment is redacted: the host stays so the failing
+	// provider is still identifiable.
+	if !strings.Contains(sanitized, "127.0.0.1:1") {
+		t.Errorf("sanitized error dropped the host, which is needed to triage: %s", sanitized)
 	}
 }

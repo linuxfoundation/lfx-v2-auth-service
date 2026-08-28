@@ -5,6 +5,8 @@ package auth0
 
 import (
 	"context"
+	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -40,6 +42,27 @@ type resetPasswordRequest struct {
 	ClientID   string `json:"client_id"`
 	Email      string `json:"email"`
 	Connection string `json:"connection"`
+}
+
+// mfaRequiredErrorCode is the Auth0 error code returned with HTTP 403 when the
+// credentials were accepted but a second factor is still outstanding.
+const mfaRequiredErrorCode = "mfa_required"
+
+// auth0ErrorCode extracts the machine-readable "error" code from an Auth0 error
+// response body. The body itself is never returned or logged — only the code.
+func auth0ErrorCode(err error) string {
+	var retryable *httpclient.RetryableError
+	if !stderrors.As(err, &retryable) {
+		return ""
+	}
+
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(retryable.RawBody), &body) != nil {
+		return ""
+	}
+	return body.Error
 }
 
 // ChangePassword validates the user's current password and sets a new one.
@@ -152,16 +175,29 @@ func (u *userReaderWriter) validateCurrentPassword(ctx context.Context, username
 	var tokenResponse map[string]any
 	statusCode, errCall := apiRequest.Call(ctx, &tokenResponse)
 	if errCall != nil {
-		slog.ErrorContext(ctx, "current password validation failed",
+		if statusCode == http.StatusForbidden || statusCode == http.StatusUnauthorized {
+			// Auth0 reuses 403 for "MFA is required to complete this grant", which is
+			// not a wrong-password outcome and must not be reported as one.
+			if auth0ErrorCode(errCall) == mfaRequiredErrorCode {
+				slog.WarnContext(ctx, "current password validation requires multi-factor authentication",
+					"status_code", statusCode,
+					"username", redaction.Redact(username),
+				)
+				return errors.NewForbidden("multi-factor authentication is required to change this password")
+			}
+
+			slog.WarnContext(ctx, "current password validation failed",
+				"status_code", statusCode,
+				"username", redaction.Redact(username),
+			)
+			return errors.NewUnauthorized("current password is incorrect")
+		}
+
+		slog.ErrorContext(ctx, "failed to validate current password",
 			"error", errCall,
 			"status_code", statusCode,
 			"username", redaction.Redact(username),
 		)
-
-		if statusCode == http.StatusForbidden || statusCode == http.StatusUnauthorized {
-			return errors.NewUnauthorized("current password is incorrect")
-		}
-
 		return errors.NewUnexpected("failed to validate current password", errCall)
 	}
 
@@ -219,6 +255,7 @@ func (u *userReaderWriter) SendResetPasswordLink(ctx context.Context, user *mode
 		httpclient.WithURL(url),
 		httpclient.WithDescription("send reset password link"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	// Auth0 returns plain text (not JSON) for this endpoint; pass nil since we only need the status code.
