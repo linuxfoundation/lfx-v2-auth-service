@@ -125,6 +125,11 @@ func RunAsLeader(ctx context.Context, config LeaseConfig, fn func(context.Contex
 					fn(leaderCtx)
 				},
 				OnStoppedLeading: func() {
+					// client-go calls this whenever the elector exits, including
+					// on a standby replica that never led.
+					if !led.Load() {
+						return
+					}
 					slog.WarnContext(ctx, "lost leadership", "lease", config.Name, "identity", config.Identity)
 				},
 				OnNewLeader: func(identity string) {

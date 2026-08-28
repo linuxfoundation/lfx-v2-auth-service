@@ -464,9 +464,9 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls)
 	})
 
-	t.Run("a conflict whose member cannot be verified is a skip, not a guess", func(t *testing.T) {
-		// Verification is the entire basis for adopting it, so losing the
-		// lookup costs exactly what this path cost before it existed.
+	t.Run("a conflict whose member cannot be verified is retried, not guessed", func(t *testing.T) {
+		// Nothing is stored yet, so a transient CDP failure should cost a
+		// replay rather than this user's trigger.
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
@@ -477,11 +477,9 @@ func TestProvisionFlow(t *testing.T) {
 		}
 		store := &mockMetadataStore{}
 
-		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
 
-		require.NoError(t, err)
-		assert.Equal(t, OutcomeSkipped, result.Outcome)
-		assert.Equal(t, reasonLFIDOnAnotherMember, result.Reason)
+		require.Error(t, err, "the event must be retried, not completed")
 		assert.Zero(t, store.calls)
 	})
 
@@ -601,11 +599,49 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls)
 	})
 
-	t.Run("a create conflict that still cannot resolve is skipped, not looped", func(t *testing.T) {
+	t.Run("a create conflict whose LFID does not resolve yet is retried", func(t *testing.T) {
+		// The 409 says the LFID is claimed, so a no-match is replica lag
+		// rather than an answer.
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{
 				{Outcome: cdp.OutcomeNoMatch},
 				{Outcome: cdp.OutcomeNoMatch},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err, "replica lag must be retried, not read as a final answer")
+		assert.Equal(t, 1, client.createCalls, "the create must not be retried within one attempt")
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a create conflict whose re-resolve returns an unknown outcome is retried", func(t *testing.T) {
+		// Anything this code cannot classify must not be read as "found" and
+		// stored: the id becomes a permanent Segment user_id.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.Outcome("something-cdp-added-later"), MemberID: "MEM-9"},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err)
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a create conflict whose re-resolve matches several members is skipped", func(t *testing.T) {
+		// Only CDP can merge them, so replaying asks the same question.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeConflict},
 			},
 			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
 		}
@@ -616,7 +652,7 @@ func TestProvisionFlow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, OutcomeSkipped, result.Outcome)
 		assert.Equal(t, reasonConflict, result.Reason)
-		assert.Equal(t, 1, client.createCalls, "the create must not be retried into a loop")
+		assert.Equal(t, 1, client.createCalls)
 		assert.Zero(t, store.calls)
 	})
 

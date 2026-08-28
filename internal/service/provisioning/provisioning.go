@@ -311,12 +311,27 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		if errResolve != nil {
 			return "", Result{}, errResolve
 		}
-		if reResolved.Outcome != cdp.OutcomeFound {
-			slog.WarnContext(ctx, "CDP create conflicted but re-resolve found no single member",
+		switch reResolved.Outcome {
+		case cdp.OutcomeFound:
+			// Verified below before any id is stored.
+		case cdp.OutcomeConflict:
+			// Several members matched. Only CDP can merge them, so a replay
+			// asks the same question and gets the same answer.
+			slog.WarnContext(ctx, "CDP create conflicted and re-resolve matched several members, skipping provisioning",
+				"user_id", redaction.Redact(req.UserID),
+			)
+			return "", skip(reasonConflict), nil
+		default:
+			// The 409 proves the LFID is claimed, so a no-match is the read
+			// replica trailing the primary rather than an answer. Replaying
+			// the event asks again; the attempt ceiling bounds it. An outcome
+			// this code does not know is retried for the same reason: nothing
+			// is stored, so asking again is cheaper than assuming.
+			slog.WarnContext(ctx, "CDP create conflicted but the claimed LFID does not resolve yet, retrying",
 				"user_id", redaction.Redact(req.UserID),
 				"resolve_outcome", string(reResolved.Outcome),
 			)
-			return "", skip(reasonConflict), nil
+			return "", Result{}, errs.NewUnexpected("CDP create conflicted but the claimed LFID does not resolve yet")
 		}
 		// Nothing is attached on this path — the 409 means the identity is
 		// already attached — so this read is also what proves the member still
@@ -358,10 +373,10 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 // adoptConflictMember decides what to store after an attach-409.
 //
 // The member CDP named is only adopted once its identities confirm it: it must
-// actually hold this user's LFID and no one else's. Anything short of that is
-// a skip, which is what this path did unconditionally before — so a failure to
-// verify costs the same as it always did, while a clean verification saves a
-// user who would otherwise have waited for the login self-heal or the sweep.
+// actually hold this user's LFID and no one else's. A contradictory answer is
+// a skip, since only CDP can resolve it. A failed lookup is returned instead,
+// so the event is retried: nothing has been stored yet, and the answer may
+// differ on the next attempt.
 func (o *orchestrator) adoptConflictMember(
 	ctx context.Context,
 	req Request,
@@ -380,14 +395,10 @@ func (o *orchestrator) adoptConflictMember(
 
 	held, err := o.cdpClient.ListIdentities(ctx, conflictMemberID)
 	if err != nil {
-		// Verification is the whole basis for adopting it, so a failed lookup
-		// falls back to the skip rather than storing on trust.
-		slog.WarnContext(ctx, "could not verify the conflicting CDP member, skipping provisioning",
-			"error", err,
-			"user_id", redaction.Redact(req.UserID),
-			"conflict_member_id", redaction.Redact(conflictMemberID),
-		)
-		return "", skip(reasonLFIDOnAnotherMember), nil
+		// Nothing is stored yet, so a replay is free and a transient CDP
+		// failure should not cost this user their trigger. The re-resolve
+		// path above propagates the identical error for the same reason.
+		return "", Result{}, err
 	}
 
 	if other, occupied := foreignLFID(held, username); occupied {
