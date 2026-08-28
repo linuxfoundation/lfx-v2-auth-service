@@ -174,7 +174,9 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 				"user_id", redaction.Redact(user.UserID),
 			)
 		}
-		msg := u.errorResponse.ErrorMessage(errCall.Error())
+		// Parse the provider payload for its human-readable message. Read the raw
+		// body rather than errCall.Error(), which is deliberately status-only.
+		msg := u.errorResponse.ErrorMessage(httpclient.ResponseBody(errCall))
 		return nil, httpclient.ErrorFromStatusCode(statusCode, msg)
 	}
 

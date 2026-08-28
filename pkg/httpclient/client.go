@@ -5,6 +5,7 @@ package httpclient
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -47,6 +48,18 @@ type RetryableError struct {
 
 func (e *RetryableError) Error() string {
 	return fmt.Sprintf("upstream returned status %d", e.StatusCode)
+}
+
+// ResponseBody returns the unsanitized upstream response body carried by err, or
+// "" if err is not a *RetryableError. It exists so callers can PARSE a provider
+// error payload (e.g. Auth0's "message"/"error" fields); the result is
+// unsanitized and must never be logged or returned to a caller verbatim.
+func ResponseBody(err error) string {
+	var retryable *RetryableError
+	if !stderrors.As(err, &retryable) {
+		return ""
+	}
+	return retryable.RawBody
 }
 
 // Do executes an HTTP request with retry logic

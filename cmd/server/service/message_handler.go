@@ -74,6 +74,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 	}
 
 	errRespond := msg.Respond(response)
+	durationMs = float64(time.Since(start).Microseconds()) / 1000.0
 	if errRespond != nil {
 		slog.ErrorContext(ctx, "error responding to NATS message", "error", errRespond, "duration_ms", durationMs)
 		return

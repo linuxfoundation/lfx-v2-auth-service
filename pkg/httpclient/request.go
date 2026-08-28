@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -262,6 +261,8 @@ func sanitizeURL(rawURL string) string {
 			lowerK := strings.ToLower(k)
 			for i, v := range vals {
 				switch {
+				case isSensitiveQueryKey(lowerK):
+					vals[i] = "[REDACTED]"
 				case strings.Contains(lowerK, "email"):
 					vals[i] = redaction.RedactEmail(v)
 				case lowerK == "q":
@@ -276,6 +277,22 @@ func sanitizeURL(rawURL string) string {
 	}
 
 	return u.String()
+}
+
+// sensitiveQueryKeySubstrings are credential-bearing query parameter names whose
+// values are replaced wholesale, since no partial form of a secret is safe to log.
+var sensitiveQueryKeySubstrings = []string{
+	"token", "secret", "password", "passwd", "credential", "assertion", "code_verifier", "signature", "api_key", "apikey", "auth",
+}
+
+// isSensitiveQueryKey reports whether a lowercased query key names a credential.
+func isSensitiveQueryKey(lowerKey string) bool {
+	for _, needle := range sensitiveQueryKeySubstrings {
+		if strings.Contains(lowerKey, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizeLuceneQuery redacts field values in search expressions (e.g. identities.user_id:123 or email:foo@example.com)
@@ -313,6 +330,10 @@ func SanitizeError(err error) string {
 	}
 	errStr := err.Error()
 
+	// Strip JWTs first: a bearer token in the message would otherwise survive the
+	// URL and email passes, neither of which recognizes token shapes.
+	errStr = redaction.RedactJWTs(errStr)
+
 	// Redact embedded URLs in error messages
 	for _, scheme := range []string{"http://", "https://"} {
 		for searchStart := 0; ; {
@@ -346,11 +367,22 @@ func SanitizeError(err error) string {
 	return strings.Join(parts, " ")
 }
 
-// SanitizedError returns a new error carrying only the sanitized representation of err,
+// sanitizedError carries only the sanitized text in Error(), while still
+// unwrapping to the original cause so errors.Is/As can identify it (e.g.
+// context.Canceled) without any caller being able to log the raw message.
+type sanitizedError struct {
+	sanitized string
+	cause     error
+}
+
+func (e *sanitizedError) Error() string { return e.sanitized }
+func (e *sanitizedError) Unwrap() error { return e.cause }
+
+// SanitizedError returns an error carrying only the sanitized representation of err,
 // so wrapping it cannot re-expose the raw content to callers that log the wrapper.
 func SanitizedError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return stderrors.New(SanitizeError(err))
+	return &sanitizedError{sanitized: SanitizeError(err), cause: err}
 }

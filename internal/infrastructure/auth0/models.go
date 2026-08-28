@@ -152,6 +152,10 @@ func (u *Auth0User) ToUser() *model.User {
 	}
 }
 
+// unknownAuth0Error is returned when the provider body carries no usable message,
+// so a raw response body is never surfaced as an error string.
+const unknownAuth0Error = "auth0 request failed"
+
 // ErrorResponse represents an error response from Auth0
 type ErrorResponse struct {
 	StatusCode int    `json:"statusCode"`
@@ -162,19 +166,23 @@ type ErrorResponse struct {
 	} `json:"attributes"`
 }
 
-// Message returns the error message from the attributes
-func (e *ErrorResponse) ErrorMessage(errorMessage string) string {
+// ErrorMessage extracts Auth0's human-readable message from a raw error response
+// body. The body is unsanitized and may echo submitted values, so it is never
+// returned or logged verbatim: anything unparseable yields a generic fallback.
+func (e *ErrorResponse) ErrorMessage(rawBody string) string {
 	var parsed ErrorResponse
-	// parse the error message from the attributes
-	err := json.Unmarshal([]byte(errorMessage), &parsed)
-	if err != nil {
-		slog.Error("failed to parse error message from attributes", "error", err)
-		return errorMessage
+	if err := json.Unmarshal([]byte(rawBody), &parsed); err != nil {
+		// Non-JSON bodies are normal for some Auth0 endpoints, not a fault.
+		slog.Debug("auth0 error body was not JSON; using generic message")
+		return unknownAuth0Error
 	}
 	if parsed.Message != "" {
 		return parsed.Message
 	}
-	return errorMessage
+	if parsed.Error != "" {
+		return parsed.Error
+	}
+	return unknownAuth0Error
 }
 
 // NewErrorResponse creates a new ErrorResponse

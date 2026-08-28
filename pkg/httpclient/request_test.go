@@ -280,3 +280,29 @@ func TestRetryableError_ExcludesRawBody(t *testing.T) {
 		t.Errorf("SanitizeError should retain the status code, got %q", SanitizeError(err))
 	}
 }
+
+func TestSanitizeURL_SensitiveQueryKeys(t *testing.T) {
+	for _, key := range []string{"access_token", "id_token", "refresh_token", "client_secret", "password", "api_key"} {
+		t.Run(key, func(t *testing.T) {
+			got := sanitizeURL("https://auth.example.com/oauth/token?" + key + "=super-secret-value")
+			if strings.Contains(got, "super-secret-value") {
+				t.Errorf("sanitizeURL leaked %s value: %q", key, got)
+			}
+		})
+	}
+}
+
+func TestSanitizeError_RedactsJWT(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	got := SanitizeError(errors.New("Get failed: Authorization Bearer " + jwt))
+	if strings.Contains(got, jwt) {
+		t.Errorf("SanitizeError leaked a JWT: %q", got)
+	}
+}
+
+func TestSanitizedError_PreservesCause(t *testing.T) {
+	wrapped := SanitizedError(fmt.Errorf("request failed: %w", context.Canceled))
+	if !errors.Is(wrapped, context.Canceled) {
+		t.Errorf("SanitizedError dropped the cancellation cause: %v", wrapped)
+	}
+}
