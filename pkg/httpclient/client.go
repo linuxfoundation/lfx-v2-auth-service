@@ -5,6 +5,7 @@ package httpclient
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,11 +40,26 @@ type Response struct {
 // RetryableError represents an error that can be retried
 type RetryableError struct {
 	StatusCode int
-	Message    string
+	// RawBody is the unsanitized upstream response body. It can echo submitted
+	// field values or identifiers, so it is deliberately kept out of Error() and
+	// must never be logged directly — parse it, or log StatusCode instead.
+	RawBody string
 }
 
 func (e *RetryableError) Error() string {
-	return e.Message
+	return fmt.Sprintf("upstream returned status %d", e.StatusCode)
+}
+
+// ResponseBody returns the unsanitized upstream response body carried by err, or
+// "" if err is not a *RetryableError. It exists so callers can PARSE a provider
+// error payload (e.g. Auth0's "message"/"error" fields); the result is
+// unsanitized and must never be logged or returned to a caller verbatim.
+func ResponseBody(err error) string {
+	var retryable *RetryableError
+	if !stderrors.As(err, &retryable) {
+		return ""
+	}
+	return retryable.RawBody
 }
 
 // Do executes an HTTP request with retry logic
@@ -78,7 +94,26 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 		}
 	}
 
-	slog.ErrorContext(ctx, "request failed", "error", lastErr)
+	if lastErr != nil {
+		if re, ok := lastErr.(*RetryableError); ok {
+			if re.StatusCode < http.StatusInternalServerError {
+				slog.DebugContext(ctx, "HTTP request completed with client status",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			} else {
+				slog.ErrorContext(ctx, "HTTP request failed with server error",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			}
+		} else {
+			slog.ErrorContext(ctx, "HTTP request failed",
+				"error", SanitizeError(lastErr),
+				"method", req.Method,
+			)
+		}
+	}
 
 	return nil, lastErr
 }
@@ -119,7 +154,7 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 	if resp.StatusCode >= http.StatusBadRequest {
 		err := &RetryableError{
 			StatusCode: resp.StatusCode,
-			Message:    string(body),
+			RawBody:    string(body),
 		}
 		return response, err
 	}

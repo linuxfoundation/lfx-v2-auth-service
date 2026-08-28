@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -116,7 +117,7 @@ func ParseUnverified(ctx context.Context, tokenString string, opts *ParseOptions
 	}
 
 	slog.DebugContext(ctx, "JWT parsed successfully",
-		"sub", claims.Subject,
+		"sub", redaction.Redact(claims.Subject),
 		"expires_at", claims.ExpiresAt,
 		"scope", claims.Scope)
 
@@ -191,7 +192,7 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 	}
 
 	slog.DebugContext(ctx, "JWT parsed and verified successfully",
-		"sub", claims.Subject,
+		"sub", redaction.Redact(claims.Subject),
 		"issuer", claims.Issuer,
 		"audience", claims.Audience,
 		"expires_at", claims.ExpiresAt,
@@ -270,7 +271,7 @@ func ExtractSubject(ctx context.Context, tokenString string) (string, error) {
 		return "", errors.NewValidation("missing or invalid 'sub' claim in token")
 	}
 
-	slog.DebugContext(ctx, "extracted subject from JWT", "sub", claims.Subject)
+	slog.DebugContext(ctx, "extracted subject from JWT", "sub", redaction.Redact(claims.Subject))
 	return claims.Subject, nil
 }
 
@@ -291,7 +292,7 @@ func ExtractEmail(ctx context.Context, tokenString string) (string, error) {
 		return "", errors.NewValidation("missing or invalid 'email' claim in token")
 	}
 
-	slog.DebugContext(ctx, "extracted email from JWT", "email", claims.Email)
+	slog.DebugContext(ctx, "extracted email from JWT", "email", redaction.RedactEmail(claims.Email))
 	return claims.Email, nil
 }
 

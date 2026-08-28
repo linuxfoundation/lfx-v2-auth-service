@@ -61,12 +61,12 @@ func (e *emailLinkingFlow) StartPasswordlessFlow(ctx context.Context, email stri
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to send passwordless email",
 			"error", err,
-			"email", redaction.Redact(email))
+			"email", redaction.RedactEmail(email))
 		return errors.NewUnexpected("failed to start passwordless flow", err)
 	}
 
 	slog.DebugContext(ctx, "passwordless flow started successfully",
-		"email", redaction.Redact(response.Email),
+		"email", redaction.RedactEmail(response.Email),
 		"passwordless_flow_id", response.ID,
 		"email_verified", response.EmailVerified)
 
@@ -94,7 +94,7 @@ func (e *emailLinkingFlow) ExchangeOTPForToken(ctx context.Context, email, otp s
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to exchange OTP for token",
 			"error", err,
-			"email", redaction.Redact(email))
+			"email", redaction.RedactEmail(email))
 		return nil, errors.NewUnexpected("failed to exchange OTP for token", err)
 	}
 
