@@ -245,6 +245,16 @@ func TestSanitizeProviderMessage(t *testing.T) {
 			leaks: []string{"secret_user_123"},
 		},
 		{
+			name:  "google-oauth2 id echoed in provider message",
+			body:  `{"message":"user google-oauth2|108secretsubject was rejected"}`,
+			leaks: []string{"108secretsubject"},
+		},
+		{
+			name:  "email connection id echoed in provider message",
+			body:  `{"message":"identity email|stub_secret_123 already linked"}`,
+			leaks: []string{"stub_secret_123"},
+		},
+		{
 			name:   "message without identifiers is preserved",
 			body:   `{"message":"The user does not exist."}`,
 			expect: "The user does not exist.",

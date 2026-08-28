@@ -188,8 +188,8 @@ func (e *ErrorResponse) ErrorMessage(rawBody string) string {
 }
 
 // sanitizeProviderMessage redacts identifiers Auth0 echoes back from the request
-// (emails, auth0| user IDs). Valid JSON is not the same as safe content: this text
-// is returned inside a domain error that callers log.
+// (emails, provider-delimited user IDs). Valid JSON is not the same as safe
+// content: this text is returned inside a domain error that callers log.
 func sanitizeProviderMessage(message string) string {
 	fields := strings.Fields(message)
 	for i, field := range fields {
@@ -197,12 +197,20 @@ func sanitizeProviderMessage(message string) string {
 		if trimmed == "" {
 			continue
 		}
+		var replacement string
 		switch {
 		case strings.Contains(trimmed, "@"):
-			fields[i] = strings.ReplaceAll(field, trimmed, redaction.RedactEmail(trimmed))
-		case strings.HasPrefix(trimmed, "auth0|"), strings.HasPrefix(trimmed, "samlp|"), strings.HasPrefix(trimmed, "waad|"):
-			fields[i] = strings.ReplaceAll(field, trimmed, redaction.Redact(trimmed))
+			replacement = redaction.RedactEmail(trimmed)
+		default:
+			// Any "<provider>|<id>" identifier, not just a fixed set of providers:
+			// Auth0 also emits email|, google-oauth2|, windowslive|, and others.
+			provider, id, found := strings.Cut(trimmed, "|")
+			if !found || provider == "" || id == "" {
+				continue
+			}
+			replacement = provider + "|" + redaction.Redact(id)
 		}
+		fields[i] = strings.ReplaceAll(field, trimmed, replacement)
 	}
 	return strings.Join(fields, " ")
 }
