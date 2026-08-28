@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -311,5 +312,62 @@ func TestSanitizeURL_OpaqueURL(t *testing.T) {
 	got := sanitizeURL("https:victim@example.com")
 	if strings.Contains(got, "victim@example.com") {
 		t.Errorf("sanitizeURL leaked an opaque URL payload: %q", got)
+	}
+}
+
+// TestSanitizeError_URLError pins that a wrapped *url.Error is sanitized through
+// its URL field. The generic string passes only match an "http(s)://" prefix or
+// an "@", so a malformed URL carrying a provider-delimited user ID survives them.
+func TestSanitizeError_URLError(t *testing.T) {
+	malformed, errMalformed := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"://bad/api/v2/users/auth0|secret_user_123", nil)
+	if malformed != nil || errMalformed == nil {
+		t.Fatalf("expected a parse failure, got req=%v err=%v", malformed, errMalformed)
+	}
+
+	tests := []struct {
+		name     string
+		err      error
+		omits    []string
+		contains []string
+	}{
+		{
+			name:     "malformed url from NewRequestWithContext",
+			err:      fmt.Errorf("failed to create request: %w", errMalformed),
+			omits:    []string{"secret_user_123", "auth0|"},
+			contains: []string{"[REDACTED_URL]", "missing protocol scheme"},
+		},
+		{
+			name: "valid url with path user id",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://auth.example.com/api/v2/users/auth0|secret_user_123",
+				Err: errors.New("dial tcp: connection refused"),
+			},
+			omits:    []string{"secret_user_123"},
+			contains: []string{"auth0%7Csec%2A%2A%2A%2A", "connection refused"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// SanitizedError must redact too: Call wraps errors through it before
+			// returning them to callers that log the wrapper.
+			for label, got := range map[string]string{
+				"SanitizeError":  SanitizeError(tt.err),
+				"SanitizedError": SanitizedError(tt.err).Error(),
+			} {
+				for _, omit := range tt.omits {
+					if strings.Contains(got, omit) {
+						t.Errorf("%s leaked %q in %q", label, omit, got)
+					}
+				}
+				for _, contain := range tt.contains {
+					if !strings.Contains(got, contain) {
+						t.Errorf("%s missing expected token %q in %q", label, contain, got)
+					}
+				}
+			}
+		})
 	}
 }

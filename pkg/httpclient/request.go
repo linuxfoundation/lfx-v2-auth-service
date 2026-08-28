@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -339,6 +340,14 @@ func SanitizeError(err error) string {
 	// Strip JWTs first: a bearer token in the message would otherwise survive the
 	// URL and email passes, neither of which recognizes token shapes.
 	errStr = redaction.RedactJWTs(errStr)
+
+	// Sanitize a wrapped *url.Error through its URL field. The passes below key off
+	// an "http(s)://" prefix or an "@", so a malformed URL such as
+	// "://bad/api/v2/users/auth0|123" would otherwise survive with its identifier intact.
+	var urlErr *url.Error
+	if stderrors.As(err, &urlErr) && urlErr.URL != "" {
+		errStr = strings.ReplaceAll(errStr, urlErr.URL, sanitizeURL(urlErr.URL))
+	}
 
 	// Redact embedded URLs in error messages
 	for _, scheme := range []string{"http://", "https://"} {
