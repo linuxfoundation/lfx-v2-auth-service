@@ -4,9 +4,14 @@
 package auth0
 
 import (
+	"context"
 	stderrors "errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
@@ -115,5 +120,148 @@ func TestResponseBody_RoundTrip(t *testing.T) {
 	}
 	if msg := NewErrorResponse().ErrorMessage(httpclient.ResponseBody(err)); msg != "The user does not exist." {
 		t.Errorf("provider message lost through the accessor: %q", msg)
+	}
+}
+
+// stubTransport routes every request to a canned response, so
+// validateCurrentPassword can be driven end to end without a real Auth0 tenant.
+type stubTransport struct {
+	statusCode int
+	body       string
+}
+
+func (s *stubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: s.statusCode,
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Request:    req,
+	}, nil
+}
+
+// TestValidateCurrentPassword_ErrorClassification drives the real code path, so a
+// future reorder that drops the mfa_required branch fails here rather than only
+// in the auth0ErrorCode unit test.
+func TestValidateCurrentPassword_ErrorClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		assert     func(t *testing.T, err error)
+	}{
+		{
+			name:       "403 mfa_required is forbidden, not wrong password",
+			statusCode: http.StatusForbidden,
+			body:       `{"error":"mfa_required","mfa_token":"tok"}`,
+			assert: func(t *testing.T, err error) {
+				var forbidden errors.Forbidden
+				if !stderrors.As(err, &forbidden) {
+					t.Fatalf("expected Forbidden for mfa_required, got %T: %v", err, err)
+				}
+				var unauthorized errors.Unauthorized
+				if stderrors.As(err, &unauthorized) {
+					t.Error("mfa_required must not be reported as a wrong password")
+				}
+			},
+		},
+		{
+			name:       "403 invalid_grant is a wrong password",
+			statusCode: http.StatusForbidden,
+			body:       `{"error":"invalid_grant","error_description":"Wrong email or password."}`,
+			assert: func(t *testing.T, err error) {
+				var unauthorized errors.Unauthorized
+				if !stderrors.As(err, &unauthorized) {
+					t.Fatalf("expected Unauthorized, got %T: %v", err, err)
+				}
+			},
+		},
+		{
+			name:       "401 is a wrong password",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":"invalid_grant"}`,
+			assert: func(t *testing.T, err error) {
+				var unauthorized errors.Unauthorized
+				if !stderrors.As(err, &unauthorized) {
+					t.Fatalf("expected Unauthorized, got %T: %v", err, err)
+				}
+			},
+		},
+		{
+			name:       "500 is a service fault",
+			statusCode: http.StatusInternalServerError,
+			body:       `{"error":"server_error"}`,
+			assert: func(t *testing.T, err error) {
+				var unexpected errors.Unexpected
+				if !stderrors.As(err, &unexpected) {
+					t.Fatalf("expected Unexpected, got %T: %v", err, err)
+				}
+			},
+		},
+		{
+			name:       "200 validates successfully",
+			statusCode: http.StatusOK,
+			body:       `{"access_token":"tok"}`,
+			assert: func(t *testing.T, err error) {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := &userReaderWriter{
+				config: Config{
+					Domain:                 "auth.example.com",
+					LFXProfileClientID:     "client-id",
+					LFXProfileClientSecret: "client-secret",
+				},
+				httpClient: httpclient.NewClient(httpclient.Config{
+					Transport: &stubTransport{statusCode: tt.statusCode, body: tt.body},
+				}),
+			}
+
+			tt.assert(t, u.validateCurrentPassword(context.Background(), "john.doe", "hunter2"))
+		})
+	}
+}
+
+func TestSanitizeProviderMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		leaks  []string
+		expect string
+	}{
+		{
+			name:  "email echoed in provider message",
+			body:  `{"message":"victim@example.com was not found"}`,
+			leaks: []string{"victim@example.com"},
+		},
+		{
+			name:  "user id echoed in provider message",
+			body:  `{"message":"user auth0|secret_user_123 does not exist"}`,
+			leaks: []string{"secret_user_123"},
+		},
+		{
+			name:   "message without identifiers is preserved",
+			body:   `{"message":"The user does not exist."}`,
+			expect: "The user does not exist.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NewErrorResponse().ErrorMessage(tt.body)
+			for _, leak := range tt.leaks {
+				if strings.Contains(got, leak) {
+					t.Errorf("ErrorMessage leaked %q in %q", leak, got)
+				}
+			}
+			if tt.expect != "" && got != tt.expect {
+				t.Errorf("ErrorMessage() = %q, want %q", got, tt.expect)
+			}
+		})
 	}
 }

@@ -214,6 +214,12 @@ func sanitizeURL(rawURL string) string {
 		return "[REDACTED_URL]"
 	}
 
+	// Opaque URLs (e.g. "https:victim@example.com") carry their payload outside
+	// Path/Query/User, so none of the passes below would touch it.
+	if u.Opaque != "" {
+		return "[REDACTED_URL]"
+	}
+
 	// Userinfo credentials and fragments are never useful in a log line and can
 	// carry secrets (credentials before the "@" host separator, tokens after "#").
 	u.User = nil

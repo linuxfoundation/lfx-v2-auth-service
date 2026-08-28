@@ -117,8 +117,10 @@ func TestAccessLogMiddlewareReportsUnmatchedRoute(t *testing.T) {
 	if record["pattern"] != unmatchedRoute {
 		t.Errorf("got pattern %v, want %q", record["pattern"], unmatchedRoute)
 	}
-	if record["path"] != "/definitely/not/a/route" {
-		t.Errorf("got path %v, want the concrete path", record["path"])
+	// The path of an unmatched request is entirely caller-controlled, so it is
+	// reported as the marker rather than persisted verbatim.
+	if record["path"] != unmatchedRoute {
+		t.Errorf("got path %v, want %q", record["path"], unmatchedRoute)
 	}
 	if record["level"] != "INFO" {
 		t.Errorf("got level %v, want INFO", record["level"])
@@ -150,6 +152,7 @@ func TestAccessLogMiddlewareIncludesRequestID(t *testing.T) {
 
 func TestAccessLogMiddlewareRedactsEmailInPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/users/johndoe@example.com", nil)
+	req.Pattern = "GET /users/{email}"
 
 	record, _ := runAccessLog(t, req, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -310,5 +313,29 @@ func TestAccessLogMiddlewareLogsPanicAsServerError(t *testing.T) {
 				t.Errorf("got level %v, want ERROR", record["level"])
 			}
 		})
+	}
+}
+
+// TestAccessLog_UnmatchedPathIsNotLoggedVerbatim pins that an unmatched request,
+// whose path is entirely caller-controlled, is reported as the fixed marker.
+func TestAccessLog_UnmatchedPathIsNotLoggedVerbatim(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	handler := AccessLogMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/reset/super-secret-token", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, "super-secret-token") {
+		t.Errorf("unmatched path logged verbatim: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, unmatchedRoute) {
+		t.Errorf("expected %q marker in output: %s", unmatchedRoute, logOutput)
 	}
 }

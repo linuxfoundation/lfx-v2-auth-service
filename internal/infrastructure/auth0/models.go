@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
 // Auth0User represents a user in Auth0
@@ -177,12 +179,32 @@ func (e *ErrorResponse) ErrorMessage(rawBody string) string {
 		return unknownAuth0Error
 	}
 	if parsed.Message != "" {
-		return parsed.Message
+		return sanitizeProviderMessage(parsed.Message)
 	}
 	if parsed.Error != "" {
-		return parsed.Error
+		return sanitizeProviderMessage(parsed.Error)
 	}
 	return unknownAuth0Error
+}
+
+// sanitizeProviderMessage redacts identifiers Auth0 echoes back from the request
+// (emails, auth0| user IDs). Valid JSON is not the same as safe content: this text
+// is returned inside a domain error that callers log.
+func sanitizeProviderMessage(message string) string {
+	fields := strings.Fields(message)
+	for i, field := range fields {
+		trimmed := strings.Trim(field, `"'.,;:()[]{}`)
+		if trimmed == "" {
+			continue
+		}
+		switch {
+		case strings.Contains(trimmed, "@"):
+			fields[i] = strings.ReplaceAll(field, trimmed, redaction.RedactEmail(trimmed))
+		case strings.HasPrefix(trimmed, "auth0|"), strings.HasPrefix(trimmed, "samlp|"), strings.HasPrefix(trimmed, "waad|"):
+			fields[i] = strings.ReplaceAll(field, trimmed, redaction.Redact(trimmed))
+		}
+	}
+	return strings.Join(fields, " ")
 }
 
 // NewErrorResponse creates a new ErrorResponse

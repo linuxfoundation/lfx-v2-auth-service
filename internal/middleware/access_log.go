@@ -87,6 +87,17 @@ func redactPath(escapedPath string) string {
 	return strings.Join(segments, "/")
 }
 
+// loggedPath returns the path to record. An unmatched request is entirely
+// attacker-controlled (this service routes only /livez and /readyz), so its path
+// is reported as the fixed marker rather than persisted verbatim; redaction alone
+// would only catch the email-shaped subset.
+func loggedPath(r *http.Request) string {
+	if r.Pattern == "" {
+		return unmatchedRoute
+	}
+	return redactPath(r.URL.EscapedPath())
+}
+
 // unmatchedRoute is reported instead of the concrete path when no route
 // matched, so scanning for arbitrary URLs cannot inflate route cardinality.
 const unmatchedRoute = "<unmatched>"
@@ -149,7 +160,7 @@ func AccessLogMiddleware() func(http.Handler) http.Handler {
 				attrs := []any{
 					"verb", r.Method,
 					"pattern", routePattern(r),
-					"path", redactPath(r.URL.EscapedPath()),
+					"path", loggedPath(r),
 					"status", status,
 					"duration_ms", float64(time.Since(start).Microseconds()) / 1000.0,
 					"user_agent", r.UserAgent(),

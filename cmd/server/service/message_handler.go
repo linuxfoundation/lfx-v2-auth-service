@@ -65,7 +65,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 	if errHandler != nil {
 		// Classify once here: the domain already logged this outcome at its proper
 		// level, so an unconditional error record would re-promote expected traffic.
-		slog.Log(ctx, log.LevelForError(errHandler), "error handling message",
+		slog.Log(ctx, log.LevelForError(errHandler), "message handling failed",
 			"error", errHandler,
 			"duration_ms", durationMs,
 		)

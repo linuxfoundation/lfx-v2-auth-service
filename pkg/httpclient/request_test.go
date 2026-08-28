@@ -306,3 +306,10 @@ func TestSanitizedError_PreservesCause(t *testing.T) {
 		t.Errorf("SanitizedError dropped the cancellation cause: %v", wrapped)
 	}
 }
+
+func TestSanitizeURL_OpaqueURL(t *testing.T) {
+	got := sanitizeURL("https:victim@example.com")
+	if strings.Contains(got, "victim@example.com") {
+		t.Errorf("sanitizeURL leaked an opaque URL payload: %q", got)
+	}
+}
