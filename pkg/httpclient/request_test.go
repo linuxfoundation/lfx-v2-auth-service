@@ -70,6 +70,16 @@ func TestSanitizeURL(t *testing.T) {
 			input:    "://bad-url?email=victim@example.com",
 			expected: "[REDACTED_URL]",
 		},
+		{
+			name:     "url with userinfo and fragment",
+			input:    "https://user:secret@auth.example.com/api/v2/health#access_token=tok123",
+			expected: "https://auth.example.com/api/v2/health",
+		},
+		{
+			name:     "url with encoded path separator in user id",
+			input:    "https://auth.example.com/api/v2/users/secret%2Fuser",
+			expected: "https://auth.example.com/api/v2/users/sec%2A%2A%2A%2A",
+		},
 	}
 
 	for _, tt := range tests {
@@ -118,15 +128,15 @@ func TestSanitizeError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := errors.New(tt.input)
-			sanitized := sanitizeError(err)
+			sanitized := SanitizeError(err)
 			for _, omit := range tt.omits {
 				if strings.Contains(sanitized, omit) {
-					t.Errorf("sanitizeError leaked %q in %q", omit, sanitized)
+					t.Errorf("SanitizeError leaked %q in %q", omit, sanitized)
 				}
 			}
 			for _, contain := range tt.contains {
 				if !strings.Contains(sanitized, contain) {
-					t.Errorf("sanitizeError missing expected token %q in %q", contain, sanitized)
+					t.Errorf("SanitizeError missing expected token %q in %q", contain, sanitized)
 				}
 			}
 		})
@@ -219,5 +229,51 @@ func TestAPIRequest_Call_ClientErrorLogLevel(t *testing.T) {
 	// Raw body with PII should not be leaked in ERROR logs
 	if strings.Contains(logOutput, "auth0|12345") {
 		t.Errorf("URL user ID leaked in log output: %s", logOutput)
+	}
+}
+
+// TestAPIRequest_Call_NonSuccessStatus pins the non-2xx contract: doRequest only
+// converts >=400 into errors, so a final 3xx must still be reported as a failure
+// rather than an empty successful call.
+func TestAPIRequest_Call_NonSuccessStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 302 without a Location header: net/http stops here rather than redirecting.
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{MaxRetries: 0})
+	req := NewAPIRequest(
+		client,
+		WithMethod(http.MethodGet),
+		WithURL(server.URL+"/api/v2/users"),
+		WithDescription("redirecting call"),
+	)
+
+	status, err := req.Call(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected 302 to be reported as an error, got nil")
+	}
+	if status != http.StatusFound {
+		t.Errorf("got status %d, want %d", status, http.StatusFound)
+	}
+}
+
+// TestRetryableError_ExcludesRawBody pins that the upstream response body is kept
+// out of Error(), so every caller that logs or wraps the error cannot leak it.
+func TestRetryableError_ExcludesRawBody(t *testing.T) {
+	err := &RetryableError{
+		StatusCode: http.StatusBadRequest,
+		RawBody:    `{"error":"invalid_request","description":"victim@example.com is taken"}`,
+	}
+
+	if strings.Contains(err.Error(), "victim@example.com") {
+		t.Errorf("RetryableError.Error() leaked the raw body: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("RetryableError.Error() should retain the status code, got %q", err.Error())
+	}
+	if !strings.Contains(SanitizeError(err), "400") {
+		t.Errorf("SanitizeError should retain the status code, got %q", SanitizeError(err))
 	}
 }

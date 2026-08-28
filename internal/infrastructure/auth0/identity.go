@@ -61,6 +61,7 @@ func (ilf *identityLinkingFlow) LinkIdentityToUser(ctx context.Context, userID, 
 		httpclient.WithToken(userToken),
 		httpclient.WithDescription("link identity to user"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	// The response is an array of linked identities

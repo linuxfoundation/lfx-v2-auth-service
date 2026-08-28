@@ -459,3 +459,36 @@ func TestInitStructureLogConfigDropsContextBaggage(t *testing.T) {
 		}
 	}
 }
+
+// TestAppendCtxSiblingIsolation guards the make+copy in AppendCtx: two children
+// forked from one parent must not share a backing array and overwrite each
+// other's final attribute. The parent is built by chaining three attributes so
+// an append-in-place implementation leaves spare capacity for siblings to
+// collide in — a shallower parent would pass either way.
+func TestAppendCtxSiblingIsolation(t *testing.T) {
+	base := AppendCtx(context.Background(), slog.String("a", "1"))
+	base = AppendCtx(base, slog.String("b", "2"))
+	base = AppendCtx(base, slog.String("c", "3"))
+
+	first := AppendCtx(base, slog.String("branch", "first"))
+	second := AppendCtx(base, slog.String("branch", "second"))
+
+	lastAttr := func(ctx context.Context) string {
+		t.Helper()
+		attrs, ok := ctx.Value(slogFields).([]slog.Attr)
+		if !ok || len(attrs) == 0 {
+			t.Fatal("expected context to carry slog attributes")
+		}
+		return attrs[len(attrs)-1].Value.String()
+	}
+
+	if got := lastAttr(first); got != "first" {
+		t.Errorf("first child last attr = %q, want %q (sibling clobbered it)", got, "first")
+	}
+	if got := lastAttr(second); got != "second" {
+		t.Errorf("second child last attr = %q, want %q", got, "second")
+	}
+	if attrs, _ := base.Value(slogFields).([]slog.Attr); len(attrs) != 3 {
+		t.Errorf("parent context mutated: len = %d, want 3", len(attrs))
+	}
+}

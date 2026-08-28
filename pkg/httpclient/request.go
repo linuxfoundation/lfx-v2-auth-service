@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -103,14 +104,18 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 		}
 	}
 
-	loggedBody := redaction.RedactJWTs(string(requestBody))
-	if a.sensitiveBody {
-		loggedBody = "[REDACTED]"
+	// Gated: sanitizeURL and RedactJWTs both parse/rewrite their input, and slog
+	// evaluates arguments eagerly, so this would run on every call with Debug off.
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		loggedBody := redaction.RedactJWTs(string(requestBody))
+		if a.sensitiveBody {
+			loggedBody = "[REDACTED]"
+		}
+		slog.DebugContext(ctx, "calling API",
+			"method", a.Method,
+			"url", sanitizeURL(a.URL),
+			"request_body", loggedBody)
 	}
-	slog.DebugContext(ctx, "calling API",
-		"method", a.Method,
-		"url", sanitizeURL(a.URL),
-		"request_body", loggedBody)
 
 	// Prepare headers; only add Authorization when a token is provided
 	headers := map[string]string{
@@ -151,10 +156,21 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 			return re.StatusCode, err
 		}
 		slog.ErrorContext(ctx, "API request failed",
-			"error", sanitizeError(err),
+			"error", SanitizeError(err),
 			"method", a.Method,
 			"description", a.Description)
-		return -1, errors.NewUnexpected("API request failed", err)
+		return -1, errors.NewUnexpected("API request failed", SanitizedError(err))
+	}
+
+	// doRequest only converts statuses >= 400 into errors, so a 1xx/3xx response
+	// would otherwise be reported as a successful call.
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		slog.ErrorContext(ctx, "API returned unexpected status",
+			"status_code", response.StatusCode,
+			"method", a.Method,
+			"description", a.Description)
+		return response.StatusCode, errors.NewUnexpected("API returned unexpected status",
+			fmt.Errorf("status code: %d", response.StatusCode))
 	}
 
 	// If caller doesn't need the body or there's no content, skip JSON decoding.
@@ -167,8 +183,8 @@ func (a *apiRequest) Call(ctx context.Context, resp any) (int, error) {
 	}
 
 	if err := json.Unmarshal(response.Body, resp); err != nil {
-		slog.ErrorContext(ctx, "failed to parse API response", "error", sanitizeError(err))
-		return -1, errors.NewUnexpected("failed to parse API response", err)
+		slog.ErrorContext(ctx, "failed to parse API response", "error", SanitizeError(err))
+		return -1, errors.NewUnexpected("failed to parse API response", SanitizedError(err))
 	}
 
 	slog.DebugContext(ctx, "API call successful",
@@ -199,9 +215,25 @@ func sanitizeURL(rawURL string) string {
 		return "[REDACTED_URL]"
 	}
 
+	// Userinfo credentials and fragments are never useful in a log line and can
+	// carry secrets (e.g. https://user:secret@host/path#access_token=...).
+	u.User = nil
+	u.Fragment = ""
+	u.RawFragment = ""
+
 	// Sanitize path segments (e.g. /api/v2/users/{user_id}, /api/v2/users/{id}/identities/{provider}/{secondary_user_id}, or embedded emails)
-	if u.Path != "" {
-		segments := strings.Split(u.Path, "/")
+	// Split on the escaped path so an encoded separator (%2F) stays inside its
+	// own logical segment and is redacted as one identifier.
+	if escapedPath := u.EscapedPath(); escapedPath != "" {
+		escaped := strings.Split(escapedPath, "/")
+		segments := make([]string, len(escaped))
+		for i, seg := range escaped {
+			decoded, errUnescape := url.PathUnescape(seg)
+			if errUnescape != nil {
+				decoded = seg
+			}
+			segments[i] = decoded
+		}
 		for i, seg := range segments {
 			if seg == "" {
 				continue
@@ -215,6 +247,8 @@ func sanitizeURL(rawURL string) string {
 				segments[i] = redaction.RedactEmail(seg)
 			}
 		}
+		// Clear RawPath so String() re-escapes the redacted path from scratch.
+		u.RawPath = ""
 		u.Path = strings.Join(segments, "/")
 	}
 
@@ -270,8 +304,10 @@ func sanitizeLuceneQuery(query string) string {
 	return strings.Join(parts, " ")
 }
 
-// sanitizeError redacts raw URLs, email addresses, and sensitive tokens from error representations before logging
-func sanitizeError(err error) string {
+// SanitizeError redacts raw URLs, email addresses, and sensitive tokens from error
+// representations before logging. Use it on any upstream error before logging it or
+// wrapping it into an error that callers may log.
+func SanitizeError(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -285,7 +321,7 @@ func sanitizeError(err error) string {
 				break
 			}
 			start := searchStart + offset
-			// Find end of URL (delimiters: space, quote, backslash, colon, newline)
+			// Find end of URL (delimiters: space, quote, backslash, newline)
 			end := len(errStr)
 			for i := start; i < len(errStr); i++ {
 				if errStr[i] == '"' || errStr[i] == '\'' || errStr[i] == ' ' || errStr[i] == '\\' || errStr[i] == '\n' {
@@ -308,4 +344,13 @@ func sanitizeError(err error) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// SanitizedError returns a new error carrying only the sanitized representation of err,
+// so wrapping it cannot re-expose the raw content to callers that log the wrapper.
+func SanitizedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return stderrors.New(SanitizeError(err))
 }

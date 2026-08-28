@@ -285,6 +285,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("update user metadata"),
 		httpclient.WithBody(updateRequest),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var auth0Response struct {
@@ -622,6 +623,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("link email stub to primary user"),
 		httpclient.WithBody(linkPayload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var linkedIdentities []any

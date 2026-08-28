@@ -16,6 +16,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/log"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
@@ -252,19 +253,10 @@ func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg por
 
 	user, err := m.resolveUserFromAuthInput(ctx, input)
 	if err != nil {
-		var validationErr errs.Validation
-		var notFoundErr errs.NotFound
-		if errors.As(err, &validationErr) || errors.As(err, &notFoundErr) {
-			slog.DebugContext(ctx, "user not found or validation failed for input",
-				"error", err,
-				"input", redaction.Redact(input),
-			)
-		} else {
-			slog.ErrorContext(ctx, "error getting user metadata",
-				"error", err,
-				"input", redaction.Redact(input),
-			)
-		}
+		slog.Log(ctx, log.LevelForError(err), "could not resolve user metadata for input",
+			"error", err,
+			"input", redaction.Redact(input),
+		)
 		return nil, err
 	}
 

@@ -39,11 +39,14 @@ type Response struct {
 // RetryableError represents an error that can be retried
 type RetryableError struct {
 	StatusCode int
-	Message    string
+	// RawBody is the unsanitized upstream response body. It can echo submitted
+	// field values or identifiers, so it is deliberately kept out of Error() and
+	// must never be logged directly — parse it, or log StatusCode instead.
+	RawBody string
 }
 
 func (e *RetryableError) Error() string {
-	return e.Message
+	return fmt.Sprintf("upstream returned status %d", e.StatusCode)
 }
 
 // Do executes an HTTP request with retry logic
@@ -93,7 +96,7 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 			}
 		} else {
 			slog.ErrorContext(ctx, "HTTP request failed",
-				"error", sanitizeError(lastErr),
+				"error", SanitizeError(lastErr),
 				"method", req.Method,
 			)
 		}
@@ -138,7 +141,7 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 	if resp.StatusCode >= http.StatusBadRequest {
 		err := &RetryableError{
 			StatusCode: resp.StatusCode,
-			Message:    string(body),
+			RawBody:    string(body),
 		}
 		return response, err
 	}

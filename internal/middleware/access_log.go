@@ -105,8 +105,9 @@ func routePattern(r *http.Request) string {
 }
 
 // AccessLogMiddleware logs one structured record per completed HTTP
-// transaction to stdout at info level, so Datadog gets access metrics without
-// treating normal traffic as errors.
+// transaction to stdout — info by default, debug for successful health probes,
+// error for 5xx and panics — so Datadog gets access metrics without treating
+// normal traffic as errors.
 //
 // Register it on the Goa muxer with Use rather than wrapping the muxer, so
 // r.Pattern is populated by the time it runs.

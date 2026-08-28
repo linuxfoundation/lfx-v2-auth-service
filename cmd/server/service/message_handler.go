@@ -55,7 +55,7 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 
 	handler, ok := handlers[subject]
 	if !ok {
-		slog.WarnContext(ctx, "unknown subject", "subject", subject)
+		slog.WarnContext(ctx, "unknown subject")
 		mhs.respondWithError(ctx, msg, "unknown subject")
 		return
 	}
@@ -63,9 +63,10 @@ func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.Tr
 	response, errHandler := handler(ctx, msg)
 	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
 	if errHandler != nil {
-		slog.ErrorContext(ctx, "error handling message",
+		// Classify once here: the domain already logged this outcome at its proper
+		// level, so an unconditional error record would re-promote expected traffic.
+		slog.Log(ctx, log.LevelForError(errHandler), "error handling message",
 			"error", errHandler,
-			"subject", subject,
 			"duration_ms", durationMs,
 		)
 		mhs.respondWithError(ctx, msg, errHandler.Error())
