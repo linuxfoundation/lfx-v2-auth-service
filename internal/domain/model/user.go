@@ -237,10 +237,11 @@ func (um *UserMetadata) userMetadataSanitize() {
 		joined := strings.Join(cleaned, ", ")
 		if runes := []rune(joined); len(runes) > skillsMaxLength {
 			// Truncating by rune count can land mid-separator, leaving a
-			// dangling ", " at the end. Items themselves never contain a
-			// comma (it's the split delimiter) or trailing space (each is
-			// trimmed above), so any trailing ", "/"," left after the cut
-			// belongs to a partial separator and is safe to strip.
+			// dangling "," or ", " at the end. Items themselves never
+			// contain a comma (it's the split delimiter) or trailing space
+			// (each is trimmed above), so any trailing comma/space run left
+			// after the cut belongs to a partial separator and is safe to
+			// strip.
 			joined = strings.TrimRight(string(runes[:skillsMaxLength]), ", ")
 		}
 		*um.Skills = joined
