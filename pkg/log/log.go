@@ -86,11 +86,18 @@ func InitStructureLogConfig() {
 	log.SetFlags(log.Llongfile)
 
 	// Wrap with slog-otel handler to add trace_id and span_id from context.
+	//
 	// NoBaggage is required: the OTEL_PROPAGATORS default includes baggage, so
 	// otelhttp extracts client-supplied baggage into the request context, and
 	// this handler would otherwise copy every member into each record —
 	// letting a caller inject PII or shadow trusted fields such as status.
-	otelHandler := slogotel.OtelHandler{Next: h, NoBaggage: true}
+	//
+	// NoTraceEvents is on: the handler otherwise copies every record and all
+	// its attributes onto the active span, which exports log content to the
+	// trace backend as well. That is a second sink with its own access model
+	// and retention, and it silently doubles the blast radius of anything
+	// sensitive that reaches a log line.
+	otelHandler := slogotel.OtelHandler{Next: h, NoBaggage: true, NoTraceEvents: true}
 
 	// Wrap with contextHandler to support context-based attributes
 	logger := contextHandler{otelHandler}

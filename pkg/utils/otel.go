@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/propagators/jaeger"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -371,11 +373,63 @@ func newTraceProvider(ctx context.Context, cfg OTelConfig, res *resource.Resourc
 	traceProvider := trace.NewTracerProvider(
 		trace.WithResource(res),
 		trace.WithSampler(newSampler(cfg)),
+		trace.WithSpanProcessor(urlScrubber{}),
 		trace.WithBatcher(exporter,
 			trace.WithBatchTimeout(time.Second),
 		),
 	)
 	return traceProvider, nil
+}
+
+// scrubbedURLAttrs are the span attributes that carry a full request URL.
+// Our paths embed an Auth0 sub or a CDP member id, so exporting them verbatim
+// ships personal identifiers to the trace backend — a separate sink from the
+// logs, with its own access model and retention.
+//
+// This keeps less than the log path, which retains the path and redacts only
+// the identifier segments. The difference is deliberate: span attributes are
+// set by instrumentation rather than by a reviewed call site, so there is no
+// place to audit what ends up here.
+var scrubbedURLAttrs = map[attribute.Key]bool{
+	"url.full":  true,
+	"http.url":  true,
+	"url.path":  true,
+	"url.query": true,
+}
+
+// urlScrubber rewrites URL attributes to scheme and host before a span is
+// exported. It runs at OnStart, after the instrumentation has set its creation
+// attributes, so the override is what the exporter sees.
+type urlScrubber struct{}
+
+func (urlScrubber) OnStart(_ context.Context, s trace.ReadWriteSpan) {
+	var replacements []attribute.KeyValue
+	for _, attr := range s.Attributes() {
+		if !scrubbedURLAttrs[attr.Key] {
+			continue
+		}
+		replacements = append(replacements, attribute.String(string(attr.Key), scrubURLValue(attr.Value.AsString())))
+	}
+	if len(replacements) > 0 {
+		s.SetAttributes(replacements...)
+	}
+}
+
+func (urlScrubber) OnEnd(trace.ReadOnlySpan)         {}
+func (urlScrubber) Shutdown(context.Context) error   { return nil }
+func (urlScrubber) ForceFlush(context.Context) error { return nil }
+
+// scrubURLValue keeps enough to identify the provider and nothing that
+// identifies a person.
+func scrubURLValue(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "[REDACTED]"
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 // newMetricsProvider creates a MeterProvider with an OTLP exporter configured based on the protocol setting.
