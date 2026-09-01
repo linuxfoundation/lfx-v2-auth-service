@@ -60,15 +60,110 @@ service:
 provisioningConsumer:
   enabled: false
 
+# outOfBandJobs holds what EVERY out-of-band CDP job shares.
+#
+# These settings are shared rather than per-job for a reason: CDP enforces its
+# 200 req/min limit per M2M client, and every one of these jobs authenticates
+# as the auth-service. They cannot starve the login Action, which is a
+# different client — but they can starve each other and the provisioning
+# consumer, which is why there is ONE rate allocation here and why the job
+# schedules below are disjoint.
+outOfBandJobs:
+  # image is the backfill binary, published separately from the server.
+  #
+  # A deploy to staging or prod therefore pins TWO image tags — this one and
+  # image.tag above — alongside the chart version. Bumping only one leaves the
+  # jobs on the previous build with nothing else to show for it.
+  image:
+    repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/backfill
+    # tag is the container image tag (overrides appVersion from Chart.yaml)
+    tag: ""
+    # pullPolicy is the image pull policy
+    pullPolicy: IfNotPresent
+
+  # cdpRatePerMinute is the ONE CDP allocation every out-of-band job uses.
+  #
+  # Well under the 200 req/min ceiling because that ceiling is shared with the
+  # provisioning consumer on the same client. Do NOT size this to the 800
+  # req/min the production load test absorbed: CDP's limiter is in-memory
+  # across two pods, so that headroom was two half-buckets rather than budget.
+  # Raise it only against an agreed operating rate.
+  cdpRatePerMinute: 50
+
+  # suspend pauses EVERY out-of-band job.
+  #
+  # The Release Gate's parity half needs out-of-band writes quiesced for one
+  # warehouse sync (~6h) before it runs, or its unsynced tail never reaches
+  # zero. Set this true, upgrade, wait one sync, run the gate, set it back.
+  # Suspending leaves the sweep's cursor untouched, so resuming carries on
+  # rather than restarting.
+  suspend: false
+
+  # dryRun makes every job select and report without calling CDP or writing.
+  dryRun: false
+
+  # ttlSecondsAfterFinished cleans up finished Job objects. A day is long
+  # enough to still read the logs of an overnight run.
+  ttlSecondsAfterFinished: 86400
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 # populationSweep pre-fills CDP UUIDs for the target cohort ahead of
 # enablement, so most logins are cache hits rather than live resolves.
 #
 # Opt-in, and off by default: it walks the cohort against live CDP, so an
-# environment that has not agreed a rate allocation should not start one. The
-# CronJob itself is added by T017; this flag also gates the cursor bucket below,
-# so enabling the job and creating its cursor cannot drift apart.
+# environment that has not agreed a rate allocation should not start one. This
+# flag gates both the CronJob and the cursor bucket below, so enabling the job
+# and creating the cursor it opens cannot drift apart.
 populationSweep:
   enabled: false
+
+  # schedule runs the sweep every two hours, on the hour, UTC.
+  #
+  # ** The out-of-band jobs MUST NOT overlap. ** They share one CDP allocation
+  # (outOfBandJobs.cdpRatePerMinute), and `concurrencyPolicy: Forbid` does not
+  # help — it stops a job overlapping ITSELF and nothing more. Keeping them
+  # apart is what these schedules are for:
+  #
+  #   sweep             0 */2 * * *   starts HH:00, runs up to 90m, ends HH+1:30
+  #   no-match re-check               RESERVED: 30 3 * * *, 25m -> 03:30-03:55,
+  #                                   which lands inside the 03:30-04:00 gap.
+  #                                   The job itself arrives with T016b.
+  #
+  # Changing either schedule or maxDurationMinutes means re-checking that the
+  # windows still do not touch.
+  schedule: "0 */2 * * *"
+
+  # maxDurationMinutes stops a run in-process, keeping the position it reached.
+  # Must stay inside the gap the schedule above leaves.
+  maxDurationMinutes: 90
+
+  # limit caps users processed per run; 0 means a run is bounded by
+  # maxDurationMinutes and the rate allocation instead. At 50 req/min a 90
+  # minute window reaches roughly 4,500 users.
+  #
+  # Cadence sizing is provisional: the cohort figures behind it predate US2 and
+  # US3 running in production, and both shrink this job's population daily.
+  # Re-measure how many active users still carry no cdp_uuid_source before
+  # treating these numbers as settled.
+  limit: 0
+
+  # pageSize is the Auth0 search page size.
+  pageSize: 20
+
+  # startOffset is how far back a COLD cursor begins, and it is what scopes the
+  # sweep: the cohort query carries no upper bound and no rolling window, so
+  # "active in the last 30 days" is expressed here and nowhere else. Once the
+  # cursor has advanced, the sweep only ever looks forward.
+  startOffset: 720h  # 30 days
 
 # resources is the configuration for resource requests and limits
 resources:
@@ -238,6 +333,9 @@ app:
     ## Required when provisioningConsumer.enabled is true. Without both of
     ## these the consumer does not start, rather than reading a stream it
     ## cannot act on.
+    ##
+    ## The out-of-band jobs need the same two, since they resolve against the
+    ## same CDP API.
     CDP_BASE_URL:
       value: null
     CDP_AUDIENCE:
