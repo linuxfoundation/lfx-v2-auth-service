@@ -50,6 +50,16 @@ service:
   # port is the service port
   port: 8080
 
+# provisioningConsumer reads the Auth0 events stream and provisions CDP members
+# for newly verified users. Opt-in, and it adds no inbound surface: the service
+# opens the connection to Auth0.
+#
+# The stream fans out rather than load balancing, so only the replica holding
+# the Lease reads it. The others stand by, and the RBAC below is what lets them
+# compete for it.
+provisioningConsumer:
+  enabled: false
+
 # resources is the configuration for resource requests and limits
 resources:
   limits:
@@ -110,6 +120,30 @@ nats:
     # ttl is the time-to-live for entries in the bucket (5 minutes for OTPs)
     ttl: 5m
 
+  # provisioning_cursor_kv_bucket holds the Auth0 events stream position.
+  # Created only when provisioningConsumer.enabled is true.
+  provisioning_cursor_kv_bucket:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing the stream position.
+    # Rendered into PROVISIONING_CURSOR_BUCKET, so the bucket created here and
+    # the one the consumer opens cannot drift apart.
+    name: cdp-provisioning-cursor
+    # history is the number of history entries to keep for the KV bucket
+    history: 1
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 4096  # 4KB (one opaque offset string)
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 1048576  # 1MB (a single key, with room for history)
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: false
+
 # serviceAccount is the configuration for the Kubernetes service account
 ## This will be used only if the USER_REPOSITORY_TYPE is authelia
 serviceAccount:
@@ -165,6 +199,35 @@ app:
     ## Required for sending password reset links
     AUTH0_LFX_ONE_CLIENT_ID:
       value: null
+
+    # CDP provisioning configuration
+    ## Required when provisioningConsumer.enabled is true. Without both of
+    ## these the consumer does not start, rather than reading a stream it
+    ## cannot act on.
+    CDP_BASE_URL:
+      value: null
+    CDP_AUDIENCE:
+      value: null
+    # How far back the consumer restarts when it has no usable position: a
+    # cold start, or a position Auth0 has aged out. Auth0 does not publish its
+    # retention, so this is generous on purpose — re-reading is cheap because
+    # the gate skips anyone already provisioned. Defaults to 24h when unset.
+    PROVISIONING_REPLAY_WINDOW:
+      value: null
+    # Overrides the host the events stream is read from. Unset means
+    # AUTH0_DOMAIN, which in production is the tenant's custom domain.
+    AUTH0_EVENTS_HOST:
+      value: null
+    # The Lease identity has to be unique per pod, and the Lease itself is
+    # namespaced.
+    POD_NAME:
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    POD_NAMESPACE:
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
 
     # Authelia configuration
     ## Required when using authelia repository type

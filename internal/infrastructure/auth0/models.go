@@ -19,6 +19,7 @@ type Auth0User struct {
 	UserID         string             `json:"user_id"`
 	Username       string             `json:"username"`
 	Email          string             `json:"email"`
+	Name           string             `json:"name"`
 	EmailVerified  bool               `json:"email_verified"`
 	FamilyName     string             `json:"family_name"`
 	GivenName      string             `json:"given_name"`
@@ -35,6 +36,18 @@ type Auth0AppMetadata struct {
 	// of the user (e.g. a system-managed alias such as `@linux.com`) and must
 	// not be unlinked through the normal user-initiated unlink flow.
 	SystemManaged bool `json:"system_managed,omitempty"`
+
+	// CDPUUID is the user's resolved CDP member id. Once set it is permanent:
+	// absent to present is the only legal transition.
+	CDPUUID string `json:"cdp_uuid,omitempty"`
+
+	// CDPUUIDSource records which path produced the record — one of
+	// `backfill`, `login-resolve`, or `provisioning`. It is present even when
+	// no member was found, which is what marks a user as already checked.
+	CDPUUIDSource string `json:"cdp_uuid_source,omitempty"`
+
+	// CDPUUIDCheckedAt is the RFC3339 timestamp of the last CDP check.
+	CDPUUIDCheckedAt string `json:"cdp_uuid_checked_at,omitempty"`
 }
 
 // systemManagedUserPayload is the body for POST /api/v2/users when creating a
