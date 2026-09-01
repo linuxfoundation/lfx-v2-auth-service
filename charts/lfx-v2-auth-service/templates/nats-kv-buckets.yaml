@@ -63,3 +63,30 @@ spec:
   maxBytes: {{ .Values.nats.provisioning_cursor_kv_bucket.maxBytes }}
   compression: {{ .Values.nats.provisioning_cursor_kv_bucket.compression }}
 {{- end }}
+---
+# Holds the population sweep's single cursor: how far it has walked the cohort
+# by Auth0 `updated_at`. There is exactly one cursor in this feature and it
+# belongs to the sweep — the no-match re-check re-derives its population from
+# marker presence every run and stores nothing.
+#
+# Losing it costs a re-scan from the configured start, not lost users: the
+# cohort query excludes anyone already carrying `cdp_uuid_source`, so a replayed
+# range resolves to no CDP calls for users already processed.
+{{- if and .Values.nats.sweep_cursor_kv_bucket.creation .Values.populationSweep.enabled }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.sweep_cursor_kv_bucket.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.nats.sweep_cursor_kv_bucket.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.sweep_cursor_kv_bucket.name }}
+  history: {{ .Values.nats.sweep_cursor_kv_bucket.history }}
+  storage: {{ .Values.nats.sweep_cursor_kv_bucket.storage }}
+  maxValueSize: {{ .Values.nats.sweep_cursor_kv_bucket.maxValueSize }}
+  maxBytes: {{ .Values.nats.sweep_cursor_kv_bucket.maxBytes }}
+  compression: {{ .Values.nats.sweep_cursor_kv_bucket.compression }}
+{{- end }}
