@@ -83,12 +83,18 @@ outOfBandJobs:
 
   # cdpRatePerMinute is the ONE CDP allocation every out-of-band job uses.
   #
-  # Well under the 200 req/min ceiling because that ceiling is shared with the
-  # provisioning consumer on the same client. Do NOT size this to the 800
-  # req/min the production load test absorbed: CDP's limiter is in-memory
-  # across two pods, so that headroom was two half-buckets rather than budget.
-  # Raise it only against an agreed operating rate.
-  cdpRatePerMinute: 50
+  # CDP allows 200 req/min per M2M client. These jobs share that budget with the
+  # provisioning consumer, not with the login Action, which authenticates as a
+  # different client. Measured 2026-09-01: provisioning's busiest day wrote
+  # 4,792 users at ~3.3/min, and at two to three CDP calls each that is ~10
+  # req/min sustained, perhaps 20-30 at burst. 150 leaves that room and still
+  # stops short of 200.
+  #
+  # Do NOT size this to the 800 req/min the production load test absorbed:
+  # CDP's limiter is in-memory across two pods, so that headroom was two
+  # half-sized buckets rather than budget, and traffic landing unevenly on one
+  # pod would trip the real limit.
+  cdpRatePerMinute: 150
 
   # suspend pauses EVERY out-of-band job.
   #
@@ -134,9 +140,16 @@ populationSweep:
   # apart is what these schedules are for:
   #
   #   sweep             0 */2 * * *   starts HH:00, runs up to 90m, ends HH+1:30
-  #   no-match re-check               RESERVED: 30 3 * * *, 25m -> 03:30-03:55,
-  #                                   which lands inside the 03:30-04:00 gap.
-  #                                   The job itself arrives with T016b.
+  #   no-match re-check               RESERVED: 30 3 * * *, inside the
+  #                                   03:30-04:00 gap. The job arrives with
+  #                                   T016b.
+  #
+  # ** That reservation is currently too small, and the gap has to be reshaped
+  # before T016b lands. ** The re-check keeps no cursor and re-derives its
+  # population every run, so a run cut short always covers the same prefix and
+  # the tail is never reached -- which reopens the dormant-user gap with no
+  # symptom. Measured 2026-09-01 its population is 16,202, which at 150 req/min
+  # is ~108 minutes of calls. A 30-minute slot cannot hold a full pass.
   #
   # Changing either schedule or maxDurationMinutes means re-checking that the
   # windows still do not touch.
@@ -147,13 +160,14 @@ populationSweep:
   maxDurationMinutes: 90
 
   # limit caps users processed per run; 0 means a run is bounded by
-  # maxDurationMinutes and the rate allocation instead. At 50 req/min a 90
-  # minute window reaches roughly 4,500 users.
+  # maxDurationMinutes and the rate allocation instead. At 150 req/min a 90
+  # minute window reaches roughly 13,500 users.
   #
-  # Cadence sizing is provisional: the cohort figures behind it predate US2 and
-  # US3 running in production, and both shrink this job's population daily.
-  # Re-measure how many active users still carry no cdp_uuid_source before
-  # treating these numbers as settled.
+  # Sized on the 2026-09-01 re-measure: 38,416 active verified
+  # database-connection users still carry no cdp_uuid_source, out of a cohort
+  # of 89,308 -- the login path and provisioning have already marked 50,892.
+  # Three runs clear that backlog, so an overnight start finishes by morning,
+  # after which the sweep only picks up newly active users.
   limit: 0
 
   # pageSize is the Auth0 search page size.

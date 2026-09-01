@@ -14,14 +14,18 @@ import (
 // DefaultRatePerMinute is the CDP call rate an out-of-band job uses when none
 // is configured.
 //
-// Deliberately far below CDP's 200 req/min per-client ceiling, for two reasons.
-// The ceiling is shared with US3 provisioning on the same M2M client, so a job
-// that claimed all of it would starve the consumer it runs alongside. And the
-// production load test's apparent headroom at 800 req/min is an artifact: CDP's
-// limiter is in-memory across two pods, so the burst that looked clean was
-// really two half-sized buckets, not spare budget. Raise this only against an
-// agreed operating rate (T032).
-const DefaultRatePerMinute = 50
+// CDP allows 200 req/min per M2M client. These jobs authenticate as the
+// auth-service, so they cannot starve the login Action — that is a different
+// client — but they do share this budget with US3 provisioning. Measured
+// 2026-09-01: provisioning's busiest day wrote 4,792 users at ~3.3/min, which
+// at two to three CDP calls each is ~10 req/min and roughly 20 at burst. 150
+// leaves that room and still stops well short of 200.
+//
+// Do NOT raise this toward the 800 req/min the production load test absorbed.
+// CDP's limiter is in-memory across two pods, so that apparent headroom was two
+// half-sized buckets rather than budget, and traffic landing unevenly on one
+// pod would trip the real limit.
+const DefaultRatePerMinute = 150
 
 // NewRatePacer paces CDP calls at a fixed rate per minute.
 //
