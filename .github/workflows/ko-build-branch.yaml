@@ -34,7 +34,7 @@ jobs:
         run: |
           container_tag=$(echo "$HEAD_REF" | sed 's/[^_0-9a-zA-Z]/-/g' | cut -c -127)
           echo tag="$container_tag" >> "$GITHUB_OUTPUT"
-      - name: Build auth-service for PR
+      - name: Build auth-service images for PR
         env:
           VERSION: ${{ steps.container_tag.outputs.tag }}
           GIT_COMMIT: ${{ github.sha }}
@@ -44,6 +44,17 @@ jobs:
           GIT_COMMIT=${GIT_COMMIT:0:7}
           export GIT_COMMIT
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t ${{ steps.container_tag.outputs.tag }} \
+            --sbom spdx
+
+          # The out-of-band CDP jobs ship as a second image. `ko build` takes an
+          # explicit package path, so the `backfill` stanza in .ko.yaml sets its
+          # ldflags but does NOT cause it to be published — this line does. The
+          # chart's CronJobs pull it, so without this they ImagePullBackOff.
+          ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/backfill \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.sha }} \

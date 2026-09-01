@@ -53,7 +53,7 @@ jobs:
         with:
           version: v0.17.1
 
-      - name: Build and publish auth-service image
+      - name: Build and publish auth-service images
         env:
           VERSION: ${{ steps.prepare.outputs.app_version }}
           GIT_COMMIT: ${{ github.sha }}
@@ -63,6 +63,18 @@ jobs:
           GIT_COMMIT=${GIT_COMMIT:0:7}
           export GIT_COMMIT
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.ref_name }} \
+            -t ${{ steps.prepare.outputs.app_version }} \
+            -t latest \
+            --sbom spdx
+
+          # The out-of-band CDP jobs ship as a second image. `ko build` takes an
+          # explicit package path, so the `backfill` stanza in .ko.yaml sets its
+          # ldflags but does NOT cause it to be published — this line does. The
+          # chart's CronJobs pull it, so without this they ImagePullBackOff.
+          ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/backfill \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.ref_name }} \
