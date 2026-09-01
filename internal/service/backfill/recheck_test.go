@@ -355,22 +355,73 @@ func TestRecheckPromotesAUserWhoNowResolves(t *testing.T) {
 	assert.Equal(t, constants.CDPUUIDSourceBackfill, tenant.users["a"].Source)
 }
 
-func TestRecheckRefreshesCheckedAtOnAStillNoMatch(t *testing.T) {
-	// Keeps the login path's 24h TTL honest for somebody CDP was just asked
-	// about, and cdp_uuid stays absent.
+func TestRecheckWritesNothingOnAStillNoMatch(t *testing.T) {
+	// The user IS called; nothing is written, not even a refreshed
+	// checked_at. A write bumps Auth0 updated_at, which emits user.updated,
+	// which US3 provisioning reads — and it creates a CDP member for any
+	// verified user with no uuid. Measured in dev 2026-09-01: a four-user run
+	// caused three unintended creations that way.
 	tenant := newFakeTenant([]port.CohortUser{
 		markedUser("a", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)),
 	})
-	before := tenant.users["a"].CheckedAt
+	beforeChecked := tenant.users["a"].CheckedAt
+	beforeUpdated := tenant.users["a"].UpdatedAt
 	resolver := &scriptedResolver{fallive: cdp.OutcomeNoMatch}
 	rc := newTestRecheck(t, tenant, resolver, Options{})
 
 	stats, err := rc.Run(context.Background())
 	require.NoError(t, err)
 
+	assert.Len(t, resolver.calls, 1, "the user is still re-resolved")
 	assert.Equal(t, 1, stats.StillNoMatch)
 	assert.Empty(t, tenant.users["a"].UUID, "cdp_uuid must stay absent")
-	assert.NotEqual(t, before, tenant.users["a"].CheckedAt, "checked_at must be refreshed")
+	assert.Equal(t, beforeChecked, tenant.users["a"].CheckedAt,
+		"checked_at must NOT be refreshed - that write is what triggers provisioning")
+	assert.True(t, tenant.users["a"].UpdatedAt.Equal(beforeUpdated),
+		"no write means no updated_at bump means no user.updated event")
+}
+
+func TestRecheckWritesNothingForAnAllNoMatchPopulation(t *testing.T) {
+	// The production shape at small scale: every user still has no match. In
+	// production that is 15,943 users, all of whom pass the provisioning gate,
+	// so the only safe number of writes is zero.
+	tenant := newFakeTenant(markedPopulation(200))
+	before := make(map[string]time.Time, len(tenant.users))
+	for id, u := range tenant.users {
+		before[id] = u.UpdatedAt
+	}
+	resolver := &scriptedResolver{fallive: cdp.OutcomeNoMatch}
+	rc := newTestRecheck(t, tenant, resolver, Options{})
+
+	stats, err := rc.Run(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 200, stats.Scanned)
+	assert.Equal(t, 200, stats.StillNoMatch)
+	assert.True(t, stats.CompletedFullPass)
+	for id, u := range tenant.users {
+		assert.True(t, u.UpdatedAt.Equal(before[id]),
+			"user %s was written; each write would trigger a provisioning create", id)
+	}
+}
+
+func TestRecheckStillWritesOnAPromotion(t *testing.T) {
+	// The one case that must write: the answer actually changed. Guards
+	// against "writes nothing" being over-applied.
+	tenant := newFakeTenant([]port.CohortUser{
+		markedUser("a", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	resolver := &scriptedResolver{byLFID: map[string]cdp.ResolveResult{
+		"lfid-a": {Outcome: cdp.OutcomeFound, MemberID: "uuid-promoted"},
+	}}
+	rc := newTestRecheck(t, tenant, resolver, Options{})
+
+	stats, err := rc.Run(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, stats.Promoted)
+	assert.Equal(t, "uuid-promoted", tenant.users["a"].UUID)
+	assert.Equal(t, constants.CDPUUIDSourceBackfill, tenant.users["a"].Source)
 }
 
 func TestRecheckCallsAConflictedUserAndWritesNothing(t *testing.T) {

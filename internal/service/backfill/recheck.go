@@ -46,10 +46,11 @@ const (
 	// maxRecheckEmptyStreak bounds how many consecutive already-seen pages the
 	// walk tolerates while its bound IS advancing.
 	//
-	// That is the tail of users this same run already re-wrote: writing bumps
-	// `updated_at`, so they collect at the top of the ascending order and the
-	// walk meets them again on its way out. Seeing a few in a row means the
-	// population is done.
+	// Only promotions write now, and a promoted user leaves the population
+	// outright, so the set is effectively static for the length of a run. What
+	// this still guards is Auth0's lagging search index, which can keep
+	// serving a user for a while after they were written. A few already-seen
+	// pages in a row means the population is done.
 	maxRecheckEmptyStreak = 3
 )
 
@@ -69,8 +70,8 @@ type RecheckStats struct {
 	// Promoted is users whose marker was replaced by a real UUID.
 	Promoted int `json:"promoted"`
 
-	// StillNoMatch is users CDP still has no member for. Their marker
-	// timestamp is refreshed so the login path's TTL stays honest.
+	// StillNoMatch is users CDP still has no member for. Nothing is written
+	// for them — see the OutcomeNoMatch branch for why that matters.
 	StillNoMatch int `json:"still_no_match"`
 
 	// Conflicted is this run's own tally of live 409s — the FR-010b figure.
@@ -334,14 +335,30 @@ func (r *Recheck) processUser(ctx context.Context, user port.CohortUser, stats *
 		})
 
 	case cdp.OutcomeNoMatch:
-		// Still no member. The marker is rewritten to refresh `checked_at`,
-		// which keeps the login path's 24h TTL honest for somebody CDP was
-		// just asked about. `cdp_uuid` stays absent.
+		// Still no member, and NOTHING is written — not even a refreshed
+		// `checked_at`.
+		//
+		// A refresh looks free and is not. Every `app_metadata` write bumps
+		// Auth0 `updated_at`, which emits `user.updated`, which the US3
+		// provisioning consumer reads — and a verified user holding no
+		// `cdp_uuid` is precisely what its gate admits, so it CREATES a CDP
+		// member for them. Measured in dev 2026-09-01: a four-user run
+		// reported one promotion and silently caused three creations. In
+		// production this population is 15,943 and every one of them passes
+		// that gate.
+		//
+		// Those users are not abandoned. They logged in recently, so
+		// provisioning reaches them on their next login, driven by their own
+		// activity — which is what US3 is for. This job's contract is to match
+		// an LFID to a CDP UUID; it must not manufacture the trigger for
+		// creating one.
+		//
+		// What not writing costs: the login path's 24h TTL is no longer
+		// suppressed, so an active user may be re-resolved there. That is one
+		// call on login's OWN per-client budget, against 15,943 irreversible
+		// member creations on ours.
 		stats.StillNoMatch++
-		return r.write(ctx, user.UserID, port.CDPMetadata{
-			Source:    constants.CDPUUIDSourceBackfill,
-			CheckedAt: r.now().UTC().Format(time.RFC3339),
-		})
+		return nil
 
 	case cdp.OutcomeConflict:
 		// Two or more members match. NOTHING is written — never guess which
