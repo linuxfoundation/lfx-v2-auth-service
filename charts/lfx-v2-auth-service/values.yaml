@@ -132,28 +132,24 @@ outOfBandJobs:
 populationSweep:
   enabled: false
 
-  # schedule runs the sweep every two hours, on the hour, UTC.
+  # schedule runs the sweep every two hours, UTC, skipping 02:00 and 04:00 so
+  # the no-match re-check has the 02:00-06:00 block to itself.
   #
   # ** The out-of-band jobs MUST NOT overlap. ** They share one CDP allocation
   # (outOfBandJobs.cdpRatePerMinute), and `concurrencyPolicy: Forbid` does not
   # help — it stops a job overlapping ITSELF and nothing more. Keeping them
-  # apart is what these schedules are for:
+  # apart is what these two schedules are for, and the arithmetic is:
   #
-  #   sweep             0 */2 * * *   starts HH:00, runs up to 90m, ends HH+1:30
-  #   no-match re-check               RESERVED: 30 3 * * *, inside the
-  #                                   03:30-04:00 gap. The job arrives with
-  #                                   T016b.
+  #   sweep      00,06,08,...,22   up to  90m   00:00-01:30, 06:00-07:30, ...
+  #   re-check   03:00             up to 120m   03:00-05:00
   #
-  # ** That reservation is currently too small, and the gap has to be reshaped
-  # before T016b lands. ** The re-check keeps no cursor and re-derives its
-  # population every run, so a run cut short always covers the same prefix and
-  # the tail is never reached -- which reopens the dormant-user gap with no
-  # symptom. Measured 2026-09-01 its population is 16,202, which at 150 req/min
-  # is ~108 minutes of calls. A 30-minute slot cannot hold a full pass.
+  #   sweep ends 01:30 (k8s backstop 01:35) -> 85m clear before the re-check
+  #   re-check ends 05:00 (backstop 05:05)  -> 55m clear before the 06:00 sweep
   #
-  # Changing either schedule or maxDurationMinutes means re-checking that the
-  # windows still do not touch.
-  schedule: "0 */2 * * *"
+  # Changing either schedule, or either maxDurationMinutes, means redoing that
+  # arithmetic. Both jobs pin timeZone Etc/UTC so the gaps survive daylight
+  # saving.
+  schedule: "0 0,6,8,10,12,14,16,18,20,22 * * *"
 
   # maxDurationMinutes stops a run in-process, keeping the position it reached.
   # Must stay inside the gap the schedule above leaves.
@@ -178,6 +174,45 @@ populationSweep:
   # "active in the last 30 days" is expressed here and nowhere else. Once the
   # cursor has advanced, the sweep only ever looks forward.
   startOffset: 720h  # 30 days
+
+# noMatchRecheck re-resolves users carrying a no-match marker, so somebody who
+# gains a CDP member after their last login is picked up without having to log
+# in again. It is the only recurring mechanism watching dormant users.
+#
+# Opt-in and off by default, like the sweep.
+noMatchRecheck:
+  enabled: false
+
+  # schedule places the run inside the 02:00-06:00 block the sweep skips.
+  # See populationSweep.schedule for the full gap arithmetic.
+  schedule: "0 3 * * *"
+
+  # maxDurationMinutes must be large enough for a FULL pass, and that is a
+  # correctness requirement rather than a tuning preference.
+  #
+  # This job keeps no cursor: it re-derives its population from marker presence
+  # every run and always walks it from the beginning. A run cut short therefore
+  # covers the same prefix every time, and the tail is never re-checked — the
+  # dormant-user gap reopens with no symptom beyond `completed_full_pass:false`
+  # in the run log, which is why that field exists and why T026b alarms on it.
+  #
+  # Measured 2026-09-01: the population is 16,202. At 150 req/min a full pass
+  # is ~108 minutes, so 120 leaves ~10% headroom. If the population grows, this
+  # window and the block around it have to grow with it.
+  maxDurationMinutes: 120
+
+  # limit caps users processed per run; 0 means the run is bounded by
+  # maxDurationMinutes and the rate allocation. Prefer 0 — a limit guarantees a
+  # partial pass, with the coverage consequence described above.
+  limit: 0
+
+  # pageSize is the Auth0 search page size.
+  #
+  # The walk always requests page 0 and moves an `updated_at` lower bound, so
+  # this is the batch size rather than an offset step. It cannot approach
+  # Auth0's offset cap of 1000; only the bounded same-timestamp cluster probe
+  # steps the offset at all, and that reaches at most page 5.
+  pageSize: 20
 
 # resources is the configuration for resource requests and limits
 resources:

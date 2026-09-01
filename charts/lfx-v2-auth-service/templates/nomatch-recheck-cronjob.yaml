@@ -1,0 +1,115 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+# The dormant no-match re-check. Re-resolves users carrying a no-match marker
+# against live CDP, so somebody who gains a CDP member after their last login is
+# picked up without having to log in again. It is the only recurring mechanism
+# watching dormant users, and the only one that notices when CDP merges a
+# conflicted user's duplicates.
+#
+# Run one by hand with the same command the schedule uses:
+#
+#   kubectl -n <ns> create job --from=cronjob/lfx-v2-auth-service-nomatch-recheck recheck-manual
+#
+# To rehearse without writing anything, set outOfBandJobs.dryRun=true and
+# upgrade, or copy the Job and add --dry-run to its args.
+#
+# To PAUSE it — which the Release Gate's parity half requires — set
+# outOfBandJobs.suspend=true and upgrade. That one flag pauses every out-of-band
+# job, which is what the gate actually needs.
+#
+# ** No cursor bucket, deliberately. ** This job re-derives its population from
+# marker presence on every run. That is what makes a user whose CDP duplicates
+# were merged reappear on the very next run, with nothing having to remember
+# them and no warehouse sync in between.
+{{- if .Values.noMatchRecheck.enabled }}
+{{- $maxMinutes := int .Values.noMatchRecheck.maxDurationMinutes }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Chart.Name }}-nomatch-recheck
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: out-of-band-cdp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schedule: {{ .Values.noMatchRecheck.schedule | quote }}
+  # UTC regardless of the cluster's opinion, so this run and the sweep's stay
+  # disjoint across daylight-saving changes. They share one CDP allocation.
+  timeZone: "Etc/UTC"
+  suspend: {{ .Values.outOfBandJobs.suspend }}
+  # Forbid keeps a slow run from overlapping ITSELF. It does nothing about the
+  # sweep — that is what the disjoint schedules in values.yaml are for.
+  concurrencyPolicy: Forbid
+  # A missed run is not worth catching up: the population is re-derived, so the
+  # next run covers exactly the same ground.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: {{ .Values.outOfBandJobs.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.outOfBandJobs.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/component: out-of-band-cdp
+        tags.datadoghq.com/service: {{ .Chart.Name }}
+    spec:
+      ttlSecondsAfterFinished: {{ .Values.outOfBandJobs.ttlSecondsAfterFinished }}
+      # No retry. A retry would start the walk again from the beginning of the
+      # population, re-spending the budget on users the failed run already
+      # handled, and would race the sweep's window. The next scheduled run
+      # covers the same ground anyway.
+      backoffLimit: 0
+      # The backstop for a run that ignores its own deadline. Longer than
+      # --max-duration so the in-process stop happens first and gets to report
+      # whether the pass completed; this only fires if that failed.
+      activeDeadlineSeconds: {{ add (mul $maxMinutes 60) 300 }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            app.kubernetes.io/component: out-of-band-cdp
+            tags.datadoghq.com/service: {{ .Chart.Name }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backfill
+              image: "{{ .Values.outOfBandJobs.image.repository }}:{{ .Values.outOfBandJobs.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.outOfBandJobs.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+              args:
+                - "--job"
+                - "recheck"
+                - "--rate"
+                - {{ .Values.outOfBandJobs.cdpRatePerMinute | quote }}
+                - "--limit"
+                - {{ .Values.noMatchRecheck.limit | quote }}
+                - "--page-size"
+                - {{ .Values.noMatchRecheck.pageSize | quote }}
+                - "--max-duration"
+                - "{{ $maxMinutes }}m"
+                {{- if .Values.outOfBandJobs.dryRun }}
+                - "--dry-run"
+                {{- end }}
+              env:
+              # The same block the Deployment renders, so this job's Auth0 and
+              # CDP configuration cannot drift from the service's. The keys it
+              # does not use are inert.
+              {{- range $name, $config := .Values.app.environment }}
+              - name: {{ $name }}
+                {{- if $config.value }}
+                value: {{ $config.value | quote }}
+                {{- else if $config.valueFrom }}
+                valueFrom:
+                  {{- toYaml $config.valueFrom | nindent 18 }}
+                {{- end }}
+              {{- end }}
+              # This job never reads the events stream; a stray true in
+              # app.environment must not start one inside a batch pod.
+              - name: PROVISIONING_CONSUMER_ENABLED
+                value: "false"
+              resources:
+                {{- toYaml .Values.outOfBandJobs.resources | nindent 16 }}
+{{- end }}
