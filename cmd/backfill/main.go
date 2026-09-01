@@ -103,6 +103,14 @@ func init() {
 }
 
 func main() {
+	// The body is a separate function so its deferred cleanup — unregistering
+	// the signal handler, cancelling the context — actually runs. os.Exit skips
+	// defers, so calling it from inside the body would leak both.
+	os.Exit(run())
+}
+
+// run executes one out-of-band job and returns the process exit code.
+func run() int {
 	job := flag.String("job", "", fmt.Sprintf("which out-of-band job to run (one of: %s)",
 		strings.Join(knownJobs, ", ")))
 	dryRun := flag.Bool("dry-run", false, "select and report without calling CDP or writing anything")
@@ -120,7 +128,7 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("backfill %s (built %s, commit %s)\n", Version, BuildTime, GitCommit)
-		return
+		return 0
 	}
 
 	if *job != jobSweep && *job != jobRecheck {
@@ -131,13 +139,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: unknown job %q (one of: %s)\n", *job, known)
 		}
 		flag.Usage()
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 
 	pacer, err := backfill.NewRatePacer(*ratePerMinute)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid --rate %d: %v\n", *ratePerMinute, err)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 
 	// SIGTERM is how Kubernetes ends a run that has outstayed its window, so it
@@ -175,8 +183,9 @@ func main() {
 	}
 	if runErr != nil {
 		slog.ErrorContext(ctx, "the out-of-band CDP job failed", "job", *job, "error", runErr)
-		os.Exit(exitFailed)
+		return exitFailed
 	}
+	return 0
 }
 
 // runRecheck wires and runs the dormant no-match re-check.
