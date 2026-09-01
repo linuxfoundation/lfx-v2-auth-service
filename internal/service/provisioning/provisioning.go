@@ -95,6 +95,11 @@ const (
 	// refused because this LFID is verified on a different member. Kept
 	// separate from the read-side reason so the two are countable apart.
 	reasonLFIDOnAnotherMember = "cdp-lfid-on-another-member"
+
+	// reasonOutOfBandNoMatch marks a user an out-of-band job has already
+	// resolved to no CDP member. Counted separately from the other skips
+	// because its rate is how a sweep pass becomes visible from here.
+	reasonOutOfBandNoMatch = "out-of-band-no-match"
 )
 
 // Orchestrator provisions a CDP identity for a verified user.
@@ -188,6 +193,27 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 	}
 	if strings.TrimSpace(state.UUID) != "" {
 		return skip(reasonAlreadyProvisioned), nil
+	}
+
+	// The uuid is absent by here, so a `backfill` source means an out-of-band
+	// job already asked CDP for this user and CDP had no member.
+	//
+	// Acting on that would create one. The marker write bumps Auth0
+	// `updated_at`, which emits `user.updated`, which arrives here describing a
+	// verified user holding no uuid — exactly what the gate above admits. The
+	// trigger would then be an administrative pass rather than anything the
+	// user did: a full sweep of the 30-day cohort would create a CDP member for
+	// roughly 12,200 people who never logged in, and those records are
+	// permanent once the feature is enabled.
+	//
+	// Keyed on the source rather than on marker presence. The login path writes
+	// the same marker for the same answer, and those users stay eligible: they
+	// are here because they logged in, which is the activity this flow exists
+	// to serve. Nobody is dropped either way — a swept user who later logs in
+	// gets a live re-resolve once the Action's 24h TTL lapses, and its write
+	// moves the source to `login-resolve`, which reopens this gate.
+	if strings.TrimSpace(state.Source) == constants.CDPUUIDSourceBackfill {
+		return skip(reasonOutOfBandNoMatch), nil
 	}
 
 	// Only database-connection users hold an LFID, and resolve requires one.

@@ -246,6 +246,35 @@ func TestProvisionGate(t *testing.T) {
 			},
 			reason: reasonNoLFIDUsername,
 		},
+		{
+			name: "an out-of-band job already resolved this user to no member",
+			// The sweep's marker write emits a user.updated of its own, and
+			// this user is otherwise eligible. Provisioning it would create a
+			// CDP member because a batch job wrote metadata, not because the
+			// user did anything.
+			state: port.UserProvisioningState{
+				CDPMetadata:         port.CDPMetadata{Source: constants.CDPUUIDSourceBackfill},
+				EmailVerified:       true,
+				Username:            "psmith",
+				HasDatabaseIdentity: true,
+			},
+			reason: reasonOutOfBandNoMatch,
+		},
+		{
+			name: "an out-of-band marker carrying a uuid reads as already provisioned",
+			// The uuid check runs first, so a successful sweep is reported as
+			// the ordinary skip rather than as a no-match.
+			state: port.UserProvisioningState{
+				CDPMetadata: port.CDPMetadata{
+					UUID:   "uuid-1",
+					Source: constants.CDPUUIDSourceBackfill,
+				},
+				EmailVerified:       true,
+				Username:            "psmith",
+				HasDatabaseIdentity: true,
+			},
+			reason: reasonAlreadyProvisioned,
+		},
 	}
 
 	for _, tt := range stateTests {
@@ -260,6 +289,42 @@ func TestProvisionGate(t *testing.T) {
 			assert.Equal(t, tt.reason, result.Reason)
 			assert.Zero(t, client.resolveCalls, "a gated-out user must not spend CDP budget")
 			assert.Zero(t, store.calls)
+		})
+	}
+
+	// The out-of-band skip is keyed on the source, so it must not widen into
+	// "any marker". Both users below carry no uuid and are eligible.
+	proceedTests := []struct {
+		name   string
+		source string
+	}{
+		{
+			// These are the 15,943 users provisioning already serves in
+			// production; the login write is evidence the user is active.
+			name:   "a login-resolve no-match marker still provisions",
+			source: constants.CDPUUIDSourceLoginResolve,
+		},
+		{
+			name:   "an unmarked user still provisions",
+			source: "",
+		},
+	}
+
+	for _, tt := range proceedTests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}}}
+			store := &mockMetadataStore{state: &port.UserProvisioningState{
+				CDPMetadata:         port.CDPMetadata{Source: tt.source},
+				EmailVerified:       true,
+				Username:            "psmith",
+				HasDatabaseIdentity: true,
+			}}
+
+			result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+			require.NoError(t, err)
+			assert.Equal(t, OutcomeProvisioned, result.Outcome)
+			assert.Positive(t, client.resolveCalls, "an eligible user must still reach CDP")
 		})
 	}
 
