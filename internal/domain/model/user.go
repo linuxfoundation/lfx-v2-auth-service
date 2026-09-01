@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 
@@ -194,57 +195,7 @@ func (um *UserMetadata) userMetadataSanitize() {
 		}
 	}
 	if um.Skills != nil {
-		// Bound the raw input before splitting so a delimiter-heavy payload
-		// can't force an oversized allocation ahead of the item-count cap.
-		// Walk runes directly rather than via []rune, which would itself
-		// allocate proportional to the full input and defeat the guard.
-		count := 0
-		for i := range *um.Skills {
-			if count == skillsMaxRawLength {
-				*um.Skills = (*um.Skills)[:i]
-				break
-			}
-			count++
-		}
-		// Scan for commas manually instead of strings.Split, so a
-		// delimiter-heavy input stops at skillsMaxCount unique items
-		// without first building a slice of every segment.
-		cleaned := make([]string, 0, skillsMaxCount)
-		seen := make(map[string]struct{}, skillsMaxCount)
-		folder := cases.Fold()
-		raw := *um.Skills
-		for len(cleaned) < skillsMaxCount && raw != "" {
-			item := raw
-			if idx := strings.IndexByte(raw, ','); idx >= 0 {
-				item = raw[:idx]
-				raw = raw[idx+1:]
-			} else {
-				raw = ""
-			}
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-			// Use Unicode case folding (not strings.ToLower) so that case
-			// variants like "Σ" and "ς" are recognized as duplicates.
-			key := folder.String(item)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			cleaned = append(cleaned, item)
-		}
-		joined := strings.Join(cleaned, ", ")
-		if runes := []rune(joined); len(runes) > skillsMaxLength {
-			// Truncating by rune count can land mid-separator, leaving a
-			// dangling "," or ", " at the end. Items themselves never
-			// contain a comma (it's the split delimiter) or trailing space
-			// (each is trimmed above), so any trailing comma/space run left
-			// after the cut belongs to a partial separator and is safe to
-			// strip.
-			joined = strings.TrimRight(string(runes[:skillsMaxLength]), ", ")
-		}
-		*um.Skills = joined
+		*um.Skills = sanitizeSkills(*um.Skills)
 	}
 	if um.Picture != nil {
 		*um.Picture = strings.TrimSpace(*um.Picture)
@@ -252,6 +203,96 @@ func (um *UserMetadata) userMetadataSanitize() {
 	if um.Zoneinfo != nil {
 		*um.Zoneinfo = strings.TrimSpace(*um.Zoneinfo)
 	}
+}
+
+// sanitizeSkills normalizes a comma-separated Skills value: it trims and
+// bounds the raw input, splits on commas, trims and dedupes items via
+// Unicode case folding, and rejoins the survivors with ", ". Both length
+// guards below operate on whole items only, never mid-item, so an item that
+// doesn't fit is dropped entirely rather than stored as a partial fragment.
+func sanitizeSkills(raw string) string {
+	// Trim before bounding raw length, matching the Bio field's
+	// trim-then-cap order, so leading/trailing whitespace doesn't eat into
+	// the raw-length budget ahead of real content.
+	raw = strings.TrimSpace(raw)
+
+	// Bound the raw input before splitting so a delimiter-heavy payload
+	// can't force an oversized allocation ahead of the item-count cap.
+	// Walk runes directly rather than via []rune, which would itself
+	// allocate proportional to the full input and defeat the guard.
+	count := 0
+	truncated := false
+	for i := range raw {
+		if count == skillsMaxRawLength {
+			raw = raw[:i]
+			truncated = true
+			break
+		}
+		count++
+	}
+	if truncated {
+		// The cut above can land mid-item; back off to the last complete
+		// item so a truncated fragment is never parsed as a real skill.
+		if j := strings.LastIndexByte(raw, ','); j >= 0 {
+			raw = raw[:j]
+		}
+	}
+
+	// Scan for commas manually instead of strings.Split, so a
+	// delimiter-heavy input stops at skillsMaxCount unique items without
+	// first building a slice of every segment.
+	cleaned := make([]string, 0, skillsMaxCount)
+	seen := make(map[string]struct{}, skillsMaxCount)
+	folder := cases.Fold()
+	for len(cleaned) < skillsMaxCount && raw != "" {
+		item := raw
+		if idx := strings.IndexByte(raw, ','); idx >= 0 {
+			item = raw[:idx]
+			raw = raw[idx+1:]
+		} else {
+			raw = ""
+		}
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		// Use Unicode case folding (not strings.ToLower) so that case
+		// variants like "Σ" and "ς" are recognized as duplicates.
+		key := folder.String(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, item)
+	}
+
+	// Build the joined value one whole item at a time so the length cap
+	// can never land inside an item: an item that would land mid-item or
+	// spill past the cap is dropped entirely rather than stored truncated.
+	// The only exception is a single item that alone exceeds the cap,
+	// which is hard-truncated since there would otherwise be nothing to
+	// keep.
+	var b strings.Builder
+	used := 0
+	for i, item := range cleaned {
+		n := utf8.RuneCountInString(item)
+		sep := 0
+		if i > 0 {
+			sep = 2 // len(", ") in runes
+		}
+		if used+sep+n > skillsMaxLength {
+			if i == 0 {
+				b.WriteString(string([]rune(item)[:skillsMaxLength]))
+			}
+			break
+		}
+		if sep > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(item)
+		used += sep + n
+	}
+	return b.String()
 }
 
 // Patch updates the UserMetadata with the update values only if the update values are not nil

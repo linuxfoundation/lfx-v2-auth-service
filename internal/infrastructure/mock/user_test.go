@@ -739,8 +739,12 @@ func TestUserWriter_UpdateUser_Skills(t *testing.T) {
 		t.Errorf("UpdateUser() should preserve Name when not specified in input, got %v", updated.UserMetadata.Name)
 	}
 
-	stored := writer.users["auth0|u1"]
-	if stored.UserMetadata.Skills == nil || *stored.UserMetadata.Skills != "Rust, Kubernetes" {
-		t.Errorf("stored user Skills = %v, want %q", stored.UserMetadata.Skills, "Rust, Kubernetes")
+	// Assert the store write-back by identity rather than by re-reading the
+	// Skills field: updatedUser (mock/user.go) is a shallow copy that
+	// aliases the existing UserMetadata pointer, so the stored and returned
+	// objects already share the same struct and a field comparison here
+	// can't fail independently of the assertion above.
+	if stored := writer.users["auth0|u1"]; stored != updated {
+		t.Error("UpdateUser() did not write the updated user back to the store")
 	}
 }

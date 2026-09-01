@@ -476,6 +476,21 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: all-empty input sanitizes to an empty value", func(t *testing.T) {
+		// Every parsed item sanitizes away here, exercising the branch that
+		// clears a user's stored skills to "" (the pointer stays non-nil,
+		// so this PATCHes the field to empty rather than leaving it alone).
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(" , ,, "),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "" {
+			t.Errorf("Skills = %v, want empty string", metadata.Skills)
+		}
+	})
+
 	t.Run("skills: dedupes case-insensitively keeping first casing", func(t *testing.T) {
 		metadata := &UserMetadata{
 			Skills: converters.StringPtr("Go, python, GO, PYTHON, Rust"),
@@ -539,6 +554,27 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: raw-length guard preserves content exactly at the boundary", func(t *testing.T) {
+		// The two prior raw-length tests use all-duplicate content, so they
+		// can't distinguish a correct 4000-rune cut from one that trims a
+		// rune early: both an at-cap and an off-by-one-early cut dedupe to
+		// the same "dup" result. "dup," is 4 runes; 999 repeats use exactly
+		// 3996 runes, leaving exactly 4 runes of budget for "ENDS" so the
+		// raw input lands at precisely skillsMaxRawLength runes with
+		// nothing to spare.
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "ENDS"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup, ENDS" {
+			t.Errorf("Skills = %v, want %q (content exactly at the raw-length boundary must survive untouched)", metadata.Skills, "dup, ENDS")
+		}
+	})
+
 	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
 		items := make([]string, skillsMaxCount+10)
 		for i := range items {
@@ -553,9 +589,15 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		if metadata.Skills == nil {
 			t.Fatal("Skills = nil, want capped value")
 		}
-		got := strings.Split(*metadata.Skills, ", ")
-		if len(got) != skillsMaxCount {
-			t.Errorf("Skills item count = %d, want %d", len(got), skillsMaxCount)
+		// Pin which items survive, not just how many: the scanner's
+		// first-50-unique-wins contract (user.go, len(cleaned) <
+		// skillsMaxCount) is only enforced by this loop condition, so an
+		// unrelated refactor (buffered split, map-backed set) could keep a
+		// different 50 items, or reorder them, and still pass a count-only
+		// check.
+		want := strings.Join(items[:skillsMaxCount], ", ")
+		if got := *metadata.Skills; got != want {
+			t.Errorf("Skills = %q, want %q", got, want)
 		}
 	})
 
@@ -591,6 +633,30 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		got := *metadata.Skills
 		if strings.HasSuffix(got, ", ") || strings.HasSuffix(got, ",") {
 			t.Errorf("Skills = %q, must not end with a dangling separator", got)
+		}
+		if got != first {
+			t.Errorf("Skills = %q, want %q", got, first)
+		}
+	})
+
+	t.Run("skills: truncation landing inside an item drops the whole item, not a fragment", func(t *testing.T) {
+		// Joined length is 1990 + len(", ") + len("Kubernetes") = 2002, so
+		// truncating to skillsMaxLength (2000) runes would land 8 runes
+		// into "Kubernetes" ("Kubernet"). That fragment must never be
+		// stored as a fabricated skill the user never entered.
+		first := strings.Repeat("x", skillsMaxLength-10)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + "," + "Kubernetes"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		got := *metadata.Skills
+		if strings.Contains(got, "Kubernet") {
+			t.Errorf("Skills = %q, must not contain a partial item fragment", got)
 		}
 		if got != first {
 			t.Errorf("Skills = %q, want %q", got, first)
