@@ -7,3 +7,14 @@ builds:
       - -X=main.Version={{.Env.VERSION}}
       - -X=main.BuildTime={{.Env.BUILD_TIME}}
       - -X=main.GitCommit={{.Env.GIT_COMMIT}}
+  # The out-of-band CDP jobs. A second image rather than a flag on the server:
+  # these run to completion on a schedule and share none of its scaffolding.
+  #
+  # It publishes to its own repository, so a deployment pins TWO image tags —
+  # this one and the server's — alongside the chart version.
+  - id: backfill
+    dir: ./cmd/backfill
+    ldflags:
+      - -X=main.Version={{.Env.VERSION}}
+      - -X=main.BuildTime={{.Env.BUILD_TIME}}
+      - -X=main.GitCommit={{.Env.GIT_COMMIT}}
