@@ -575,6 +575,43 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: raw-length guard keeps the last item when the cut lands exactly on a delimiter", func(t *testing.T) {
+		// "dup," x999 (3996 runes) + "abcd" (4 runes) lands exactly at the
+		// skillsMaxRawLength boundary (4000 runes), with the very next rune
+		// being the comma that follows "abcd". That comma is the excluded
+		// (4001st) rune, so the kept 4000 runes already end on a complete
+		// item — "abcd" must survive, not be dropped by an unconditional
+		// back-off to the previous comma.
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "abcd" + "," + "extra_marker"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup, abcd" {
+			t.Errorf("Skills = %v, want %q (item ending exactly at the raw-length boundary must survive)", metadata.Skills, "dup, abcd")
+		}
+	})
+
+	t.Run("skills: raw-length guard discards the fragment when the cut lands inside the first item", func(t *testing.T) {
+		// A single item with no commas at all is longer than
+		// skillsMaxRawLength, so the cut lands mid-item with no prior comma
+		// to back off to. The partial fragment must be discarded entirely,
+		// not kept and later processed as a fabricated skill.
+		raw := strings.Repeat("x", skillsMaxRawLength+50)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "" {
+			t.Errorf("Skills = %v, want empty string (partial first-item fragment must not be kept)", metadata.Skills)
+		}
+	})
+
 	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
 		items := make([]string, skillsMaxCount+10)
 		for i := range items {

@@ -222,19 +222,26 @@ func sanitizeSkills(raw string) string {
 	// allocate proportional to the full input and defeat the guard.
 	count := 0
 	truncated := false
-	for i := range raw {
+	cutOnDelimiter := false
+	for i, r := range raw {
 		if count == skillsMaxRawLength {
 			raw = raw[:i]
 			truncated = true
+			cutOnDelimiter = r == ','
 			break
 		}
 		count++
 	}
-	if truncated {
-		// The cut above can land mid-item; back off to the last complete
-		// item so a truncated fragment is never parsed as a real skill.
+	if truncated && !cutOnDelimiter {
+		// The cut landed mid-item (the excluded rune wasn't the delimiter
+		// right after a complete item); back off to the last complete item
+		// so a truncated fragment is never parsed as a real skill. If the
+		// cut landed inside the very first item, there is no prior comma
+		// and no complete item to keep, so discard the fragment entirely.
 		if j := strings.LastIndexByte(raw, ','); j >= 0 {
 			raw = raw[:j]
+		} else {
+			raw = ""
 		}
 	}
 
