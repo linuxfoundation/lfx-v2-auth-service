@@ -26,6 +26,23 @@ const (
 	// KVKeyProvisioningCursor is the single key in that bucket. One consumer
 	// reads one stream, so there is nothing to partition on.
 	KVKeyProvisioningCursor = "offset"
+
+	// KVBucketNameSweepCursor is the default name of the KV bucket holding the
+	// population sweep's cursor. Override with SweepCursorBucketEnvKey when the
+	// chart renders a different name.
+	KVBucketNameSweepCursor = "cdp-sweep-cursor"
+
+	// SweepCursorBucketEnvKey overrides the sweep cursor bucket name so the
+	// chart value and the bucket the sweep opens cannot drift apart.
+	SweepCursorBucketEnvKey = "SWEEP_CURSOR_BUCKET"
+
+	// KVKeySweepCursor is the single key in that bucket.
+	//
+	// There is exactly one cursor in this feature and it belongs to the
+	// full-cohort sweep. The no-match re-check re-derives its population from
+	// marker presence on every run and stores nothing, which is what lets a
+	// user reappear the moment their CDP answer changes.
+	KVKeySweepCursor = "cursor"
 )
 
 // LeaseNameProvisioningConsumer is the Kubernetes Lease the replicas compete

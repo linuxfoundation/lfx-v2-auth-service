@@ -27,6 +27,12 @@ type Auth0User struct {
 	AlternateEmail []Auth0ProfileData `json:"alternate_email,omitempty"`
 	UserMetadata   *Auth0UserMetadata `json:"user_metadata"`
 	AppMetadata    *Auth0AppMetadata  `json:"app_metadata,omitempty"`
+
+	// UpdatedAt is the RFC3339 timestamp of the last change to the user
+	// record. The population sweep both sorts and keysets on it, so it is the
+	// one field its cursor is derived from. Only ever read; this struct is
+	// never sent as a request body.
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 // Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.
