@@ -140,7 +140,7 @@ func TestCohortQueryIsTheCanonicalStringVerbatim(t *testing.T) {
 	// which is why this asserts equality rather than a shape.
 	const expected = `identities.connection:"Username-Password-Authentication" AND ` +
 		`email_verified:true AND NOT app_metadata.cdp_uuid_source=* AND ` +
-		`updated_at:[2026-08-02T00:00:00Z TO *]`
+		`updated_at:[2026-08-02T00:00:00.000Z TO *]`
 
 	got := CohortQuery(time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, expected, got)
@@ -208,7 +208,7 @@ func TestSweepColdStartsFromTheConfiguredOffset(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, searcher.calls)
 
-	assert.Contains(t, searcher.calls[0].Query, "updated_at:[2026-08-02T12:00:00Z TO *]",
+	assert.Contains(t, searcher.calls[0].Query, "updated_at:[2026-08-02T12:00:00.000Z TO *]",
 		"a cold cursor starts one offset back from now")
 }
 

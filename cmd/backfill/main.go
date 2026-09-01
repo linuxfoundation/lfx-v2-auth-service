@@ -44,12 +44,19 @@ var (
 	GitCommit = "unknown"
 )
 
-// jobSweep is the full-cohort population sweep.
-//
-// The no-match re-check joins this list when it lands. The flag takes a name
-// rather than a boolean per job so adding the second one does not change how
-// the first is invoked.
-const jobSweep = "sweep"
+// The out-of-band jobs. The flag takes a name rather than a boolean per job,
+// so adding one does not change how the others are invoked.
+const (
+	// jobSweep is the full-cohort population sweep: it reaches users nothing
+	// has processed yet, and keeps a cursor.
+	jobSweep = "sweep"
+
+	// jobRecheck is the dormant no-match re-check: it re-resolves users who
+	// carry a no-match marker, and keeps no cursor at all.
+	jobRecheck = "recheck"
+)
+
+var knownJobs = []string{jobSweep, jobRecheck}
 
 const (
 	// exitUsage is a bad invocation: an unknown job, or a flag that cannot
@@ -96,7 +103,8 @@ func init() {
 }
 
 func main() {
-	job := flag.String("job", "", fmt.Sprintf("which out-of-band job to run (one of: %s)", jobSweep))
+	job := flag.String("job", "", fmt.Sprintf("which out-of-band job to run (one of: %s)",
+		strings.Join(knownJobs, ", ")))
 	dryRun := flag.Bool("dry-run", false, "select and report without calling CDP or writing anything")
 	limit := flag.Int("limit", 0, "maximum users to process this run (0 means no cap)")
 	ratePerMinute := flag.Int("rate", backfill.DefaultRatePerMinute,
@@ -115,11 +123,12 @@ func main() {
 		return
 	}
 
-	if *job != jobSweep {
+	if *job != jobSweep && *job != jobRecheck {
+		known := strings.Join(knownJobs, ", ")
 		if strings.TrimSpace(*job) == "" {
-			fmt.Fprintf(os.Stderr, "error: --job is required (one of: %s)\n", jobSweep)
+			fmt.Fprintf(os.Stderr, "error: --job is required (one of: %s)\n", known)
 		} else {
-			fmt.Fprintf(os.Stderr, "error: unknown job %q (one of: %s)\n", *job, jobSweep)
+			fmt.Fprintf(os.Stderr, "error: unknown job %q (one of: %s)\n", *job, known)
 		}
 		flag.Usage()
 		os.Exit(exitUsage)
@@ -149,16 +158,87 @@ func main() {
 		"version", Version,
 	)
 
-	if err := runSweep(ctx, pacer, backfill.Options{
+	opts := backfill.Options{
 		DryRun:              *dryRun,
 		Limit:               *limit,
 		PageSize:            *pageSize,
 		StartOffset:         *startOffset,
 		MaxRateLimitRetries: maxRateLimitRetries,
-	}); err != nil {
-		slog.ErrorContext(ctx, "the out-of-band CDP job failed", "job", *job, "error", err)
+	}
+
+	var runErr error
+	switch *job {
+	case jobSweep:
+		runErr = runSweep(ctx, pacer, opts)
+	case jobRecheck:
+		runErr = runRecheck(ctx, pacer, opts)
+	}
+	if runErr != nil {
+		slog.ErrorContext(ctx, "the out-of-band CDP job failed", "job", *job, "error", runErr)
 		os.Exit(exitFailed)
 	}
+}
+
+// runRecheck wires and runs the dormant no-match re-check.
+//
+// Deliberately lighter than the sweep: no NATS, because this job holds no
+// cursor. Its population is re-derived from marker presence on every run.
+func runRecheck(ctx context.Context, pacer backfill.Pacer, opts backfill.Options) error {
+	auth0Config, err := newAuth0Config(ctx)
+	if err != nil {
+		return err
+	}
+
+	searcher, err := auth0.NewUserSearcher(httpclient.Config{
+		Timeout:    auth0Timeout,
+		MaxRetries: 0,
+	}, auth0Config)
+	if err != nil {
+		return fmt.Errorf("creating the Auth0 user search: %w", err)
+	}
+
+	metadata, err := auth0.NewCDPMetadataWriter(httpclient.Config{
+		Timeout:    auth0Timeout,
+		MaxRetries: 0,
+	}, auth0Config)
+	if err != nil {
+		return fmt.Errorf("creating the CDP metadata writer: %w", err)
+	}
+
+	cdpClient, err := newCDPClient(ctx, auth0Config)
+	if err != nil {
+		return err
+	}
+
+	recheck, err := backfill.NewRecheck(searcher, cdpClient, metadata, pacer, opts)
+	if err != nil {
+		return fmt.Errorf("creating the no-match re-check: %w", err)
+	}
+
+	stats, err := recheck.Run(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "no-match re-check stopped early",
+			"scanned", stats.Scanned,
+			"promoted", stats.Promoted,
+			"conflicted", stats.Conflicted,
+			"errors", stats.Errors,
+			"completed_full_pass", stats.CompletedFullPass,
+			"stopped_reason", stats.StoppedReason,
+		)
+		return err
+	}
+
+	// A partial pass is not a failed run, but it is not a healthy one either:
+	// this job restarts from the beginning of its population every time, so
+	// whatever the deadline cut off stays cut off.
+	if !stats.CompletedFullPass {
+		slog.WarnContext(ctx, "the no-match re-check did not reach the end of its population",
+			"scanned", stats.Scanned,
+			"stopped_reason", stats.StoppedReason,
+			"hint", "raise --max-duration or --rate, or lower the population",
+		)
+	}
+	return nil
 }
 
 // runSweep wires and runs the full-cohort population sweep.

@@ -151,9 +151,20 @@ func NewSweep(
 	}, nil
 }
 
+// auth0TimeFormat renders a bound at the precision Auth0 stores.
+//
+// NOT time.RFC3339, which truncates to whole seconds. Auth0's `updated_at`
+// carries milliseconds (`2026-08-17T20:25:34.048Z`, observed live), and a
+// truncated lower bound re-selects up to a second of already-handled users on
+// every page. The sweep survives that because its processed-marker exclusion
+// removes them, but the no-match re-check has no such exclusion and would
+// stall, re-reading the same second forever. Millisecond bounds are accepted
+// by the tenant, verified 2026-09-01.
+const auth0TimeFormat = "2006-01-02T15:04:05.000Z07:00"
+
 // CohortQuery renders the canonical query for a cursor position.
 func CohortQuery(cursor time.Time) string {
-	return fmt.Sprintf(CohortQueryTemplate, cursor.UTC().Format(time.RFC3339))
+	return fmt.Sprintf(CohortQueryTemplate, cursor.UTC().Format(auth0TimeFormat))
 }
 
 // Run walks forward from the stored cursor until the cohort is exhausted, the
