@@ -218,6 +218,9 @@ func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.U
 			if user.UserMetadata.Bio != nil {
 				updatedUser.UserMetadata.Bio = user.UserMetadata.Bio
 			}
+			if user.UserMetadata.Skills != nil {
+				updatedUser.UserMetadata.Skills = user.UserMetadata.Skills
+			}
 		}
 	}
 
