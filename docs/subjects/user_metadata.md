@@ -71,6 +71,7 @@ The service returns a structured reply with user metadata:
     "phone_number": "+1-555-0123",
     "t_shirt_size": "L",
     "bio": "Software engineer and open source contributor.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://example.com/avatar.jpg",
     "zoneinfo": "America/Los_Angeles"
   }
@@ -147,6 +148,7 @@ The request payload must be a JSON object containing the user data to update. Th
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
     "bio": "Cloud architect building resilient systems in the Skylands.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }
@@ -181,6 +183,7 @@ The service returns a structured reply indicating success or failure:
     "phone_number": "+1-555-STORM-01",
     "t_shirt_size": "M",
     "bio": "Cloud architect building resilient systems in the Skylands.",
+    "skills": "Go, Python, Kubernetes",
     "picture": "https://avatars.mythicaltech.io/zephyr.jpg",
     "zoneinfo": "Aetheria/Skylands"
   }
@@ -210,4 +213,8 @@ nats request lfx.auth-service.user_metadata.update '{
 
 **Important Notes:**
 - The service works with Auth0, Authelia, and mock repositories based on configuration
+- `bio` is trimmed and capped at 2000 characters; longer values are silently truncated rather than rejected
+- `skills` accepts a comma-separated string and is normalized before storage: items are trimmed, empty items are dropped, and duplicates are removed via Unicode case folding (case-insensitive, so `"Go"` and `"go"` are treated as the same skill); when duplicates collide, the first occurrence's casing is kept
+- The raw `skills` input is capped at 4000 characters and the number of items is capped at 50, both applied before splitting into items; an item longer than the 4000-character raw cap is discarded entirely (not truncated) before the final cap is ever applied
+- The final normalized value (items joined with `", "`) is capped at 2000 characters; each item is kept whole if it fits within that cap and dropped whole (not truncated) if it doesn't, so a later, shorter item still gets a chance to fit even if an earlier one was dropped for being too long — except when no item fits at all, in which case the first item is hard-truncated to 2000 characters since there would otherwise be nothing left to keep
 

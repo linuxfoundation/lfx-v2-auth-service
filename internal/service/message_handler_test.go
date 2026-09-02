@@ -301,6 +301,7 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 						PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 						TShirtSize:         converters.StringPtr("M"),
 						Bio:                converters.StringPtr("Senior engineer and mentor"),
+						Skills:             converters.StringPtr("Go, Python, Kubernetes"),
 						Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 						Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 					},
@@ -341,6 +342,11 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					}
 					if organizationDomain, exists := metadata["organization_domain"]; exists && organizationDomain != "techcorp.com" {
 						t.Errorf("Result metadata organization_domain incorrect: got %v, want techcorp.com", organizationDomain)
+					}
+					if skills, exists := metadata["skills"]; !exists {
+						t.Error("Result metadata skills is missing")
+					} else if skills != "Go, Python, Kubernetes" {
+						t.Errorf("Result metadata skills incorrect: got %v, want Go, Python, Kubernetes", skills)
 					}
 				} else {
 					t.Errorf("Data is not a map[string]interface{}, got %T", response.Data)
@@ -2229,6 +2235,7 @@ func compareUserMetadata(actual, expected *model.UserMetadata) bool {
 		compareStringPtr(actual.PhoneNumber, expected.PhoneNumber) &&
 		compareStringPtr(actual.TShirtSize, expected.TShirtSize) &&
 		compareStringPtr(actual.Bio, expected.Bio) &&
+		compareStringPtr(actual.Skills, expected.Skills) &&
 		compareStringPtr(actual.Zoneinfo, expected.Zoneinfo)
 }
 

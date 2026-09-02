@@ -200,6 +200,7 @@ func TestAuth0User_ToUser(t *testing.T) {
 					OrganizationDomain: converters.StringPtr("acme.com"),
 					Country:            converters.StringPtr("US"),
 					Bio:                converters.StringPtr("Engineer and maintainer"),
+					Skills:             converters.StringPtr("Go, Python"),
 				},
 			},
 			validate: func(t *testing.T, user *model.User) {
@@ -210,6 +211,7 @@ func TestAuth0User_ToUser(t *testing.T) {
 				assert.Equal(t, converters.StringPtr("acme.com"), user.UserMetadata.OrganizationDomain)
 				assert.Equal(t, converters.StringPtr("US"), user.UserMetadata.Country)
 				assert.Equal(t, converters.StringPtr("Engineer and maintainer"), user.UserMetadata.Bio)
+				assert.Equal(t, converters.StringPtr("Go, Python"), user.UserMetadata.Skills)
 				assert.Nil(t, user.UserMetadata.FamilyName)
 				assert.Nil(t, user.UserMetadata.Picture)
 			},
