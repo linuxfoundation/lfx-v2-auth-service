@@ -467,6 +467,11 @@ func callWithRateLimitRetry[T any](ctx context.Context, pace *limiter, call func
 }
 
 func main() {
+	os.Exit(realMain())
+}
+
+// realMain carries the deferred signal cleanup; os.Exit in main would skip it.
+func realMain() int {
 	confidence := flag.Float64("confidence", 0.99, "confidence that the disagreement rate is below -ceiling, in (0,1)")
 	ceiling := flag.Float64("ceiling", 0.001, "disagreement-rate ceiling the sample must support, in (0,1)")
 	sampleSize := flag.Int("sample-size", 0, "override the derived sample size (0 = derive from -confidence/-ceiling)")
@@ -483,7 +488,7 @@ func main() {
 	if err != nil {
 		slog.ErrorContext(ctx, "reconcile sample failed", "error", err)
 	}
-	os.Exit(code)
+	return code
 }
 
 func run(ctx context.Context, confidence, ceiling float64, sampleOverride, ratePerMinute int, dryRun bool, seed int64, outPath string) (int, error) {
