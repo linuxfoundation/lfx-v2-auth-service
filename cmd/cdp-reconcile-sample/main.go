@@ -24,8 +24,11 @@
 //
 // With zero failures observed, a sample of n gives `confidence` that the true
 // disagreement rate is below `ceiling`: n = ln(1-confidence)/ln(1-ceiling)
-// (default 99% / 0.1% -> 4,603). When the population is smaller than n the
-// whole population is checked instead.
+// (default 99% / 0.1% -> 4,603). The sampling frame is the *checkable*
+// population: users with no LFID username have no valid resolve call to make
+// (`lfids` is mandatory), so they are reported as a separate count rather than
+// spent as sample slots that prove nothing. When the checkable population is
+// smaller than n the whole of it is checked instead.
 //
 // One-shot by design (it runs a handful of times before enablement, never on a
 // schedule) and read-only everywhere: it writes nothing to Auth0 and nothing
@@ -127,6 +130,7 @@ type checkError struct {
 type report struct {
 	GeneratedAt     time.Time      `json:"generated_at"`
 	Population      int            `json:"population"`
+	SkippedNoLFID   int            `json:"skipped_no_lfid_population"`
 	SampleSize      int            `json:"sample_size"`
 	Census          bool           `json:"census"`
 	Confidence      float64        `json:"confidence"`
@@ -145,10 +149,12 @@ type report struct {
 // gives `confidence` that the true failure rate is below `ceiling`:
 // (1-ceiling)^n <= 1-confidence.
 func requiredSampleSize(confidence, ceiling float64) (int, error) {
-	if confidence <= 0 || confidence >= 1 {
+	// NaN passes plain range checks (every comparison is false) and would
+	// convert to a negative n downstream.
+	if math.IsNaN(confidence) || confidence <= 0 || confidence >= 1 {
 		return 0, fmt.Errorf("confidence must be in (0,1), got %v", confidence)
 	}
-	if ceiling <= 0 || ceiling >= 1 {
+	if math.IsNaN(ceiling) || ceiling <= 0 || ceiling >= 1 {
 		return 0, fmt.Errorf("ceiling must be in (0,1), got %v", ceiling)
 	}
 	// Log1p sidesteps the 1-x rounding hole: for a tiny ceiling, 1-ceiling
@@ -158,6 +164,22 @@ func requiredSampleSize(confidence, ceiling float64) (int, error) {
 		return 0, fmt.Errorf("required sample size %g is impractically large; relax -confidence or -ceiling", n)
 	}
 	return int(n), nil
+}
+
+// splitCheckable removes the users this tool can never check — `lfids` is
+// mandatory on /v1/members/resolve, so a user without an LFID username has no
+// valid call to make. Sampling them would dilute the confidence claim: a
+// sample slot spent on a guaranteed skip proves nothing about the rest.
+func splitCheckable(population []gateUser) (checkable []gateUser, skipped int) {
+	checkable = make([]gateUser, 0, len(population))
+	for _, u := range population {
+		if strings.TrimSpace(u.Username) == "" {
+			skipped++
+			continue
+		}
+		checkable = append(checkable, u)
+	}
+	return checkable, skipped
 }
 
 // sampleUsers draws n users without replacement, deterministically for a given
@@ -241,6 +263,10 @@ type populationWalker struct {
 const (
 	walkPageSize = 100
 
+	// walkOffsetLimit is Auth0's hard window: user search rejects reading
+	// past the 1,000th result of one query.
+	walkOffsetLimit = 1000
+
 	// walkInitialBound predates every Auth0 user, so the first page starts at
 	// the beginning of the population.
 	walkInitialBound = "1970-01-01T00:00:00.000Z"
@@ -260,11 +286,14 @@ const (
 // carry no usable string value — the caller must report those as
 // inconclusive, not silently shrink the population.
 //
-// Auth0's user search rejects offsets past 1,000, so plain page-walking cannot
-// reach a ~43k population. This walks with an ascending `updated_at` lower
-// bound instead: always page 0, bound advanced to the last row seen, boundary
-// kept inclusive so a timestamp shared across a page edge is not skipped, and
-// a seen-set to drop the one-row overlap that inclusivity re-presents.
+// Auth0's user search rejects reading past the 1,000th result of a query, so
+// plain page-walking cannot reach a ~43k population. This walks with an
+// ascending `updated_at` lower bound instead: page 0 of the bounded query,
+// bound advanced to the last row seen, boundary kept inclusive so a timestamp
+// shared across a page edge is not skipped, and a seen-set to drop the overlap
+// that inclusivity re-presents. A block of users sharing one timestamp that
+// fills a whole page cannot advance the bound; it is drained with deeper pages
+// of the same bound (valid until the 1,000-result window ends).
 //
 // `updated_at` moves when a user logs in, so a user active during the walk can
 // migrate across the bound and be missed. Acceptable for drawing a sample;
@@ -275,8 +304,11 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 	seen := make(map[string]struct{})
 	bound := walkInitialBound
 
-	for page := 0; ; page++ {
-		rows, err := w.fetchPage(ctx, bound)
+	// page is the depth within the current bound; nonzero only while draining
+	// a tie block of users sharing one updated_at that overflows a page.
+	page := 0
+	for fetches := 1; ; fetches++ {
+		rows, err := w.fetchPage(ctx, bound, page)
 		if err != nil {
 			return nil, nil, fmt.Errorf("population walk failed at bound %s: %w", bound, err)
 		}
@@ -323,20 +355,27 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 		}
 
 		nextBound := rows[len(rows)-1].UpdatedAt
-		if newRows == 0 && nextBound == bound {
-			return nil, nil, fmt.Errorf("population walk stalled: >%d users share updated_at %s", walkPageSize, bound)
+		if nextBound == bound && len(rows) == walkPageSize {
+			// Advancing the bound would refetch this same page forever, so
+			// drain the tie block with deeper pages of the same bound.
+			page++
+			if (page+1)*walkPageSize > walkOffsetLimit {
+				return nil, nil, fmt.Errorf("population walk cannot enumerate >%d users sharing updated_at %s", walkOffsetLimit, bound)
+			}
+			continue
 		}
+		page = 0
 		bound = nextBound
 
-		if page%10 == 9 {
-			slog.InfoContext(ctx, "population walk progress", "pages", page+1, "users", len(population))
+		if fetches%10 == 0 {
+			slog.InfoContext(ctx, "population walk progress", "pages", fetches, "users", len(population))
 		}
 	}
 
 	return population, malformed, nil
 }
 
-func (w *populationWalker) fetchPage(ctx context.Context, bound string) ([]mgmtUser, error) {
+func (w *populationWalker) fetchPage(ctx context.Context, bound string, page int) ([]mgmtUser, error) {
 	token, err := w.tokens.GetToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Management API token: %w", err)
@@ -345,7 +384,7 @@ func (w *populationWalker) fetchPage(ctx context.Context, bound string) ([]mgmtU
 	params := url.Values{}
 	params.Set("q", fmt.Sprintf("app_metadata.cdp_uuid=* AND updated_at:[%s TO *]", bound))
 	params.Set("sort", "updated_at:1")
-	params.Set("page", "0")
+	params.Set("page", fmt.Sprintf("%d", page))
 	params.Set("per_page", fmt.Sprintf("%d", walkPageSize))
 	params.Set("include_totals", "false")
 	params.Set("search_engine", "v3")
@@ -391,6 +430,22 @@ func (w *populationWalker) fetchPage(ctx context.Context, bound string) ([]mgmtU
 
 const cdpCallMaxAttempts = 5
 const defaultRateLimitWait = time.Minute
+
+// maxRateLimitWait caps a server Retry-After hint: a wrong or hostile header
+// must not park the one-shot gate for hours per attempt.
+const maxRateLimitWait = 5 * time.Minute
+
+// boundedRetryAfter converts a Retry-After hint into a bounded wait.
+func boundedRetryAfter(hint time.Duration) time.Duration {
+	switch {
+	case hint <= 0:
+		return defaultRateLimitWait
+	case hint > maxRateLimitWait:
+		return maxRateLimitWait
+	default:
+		return hint
+	}
+}
 
 func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser) (verdict, string, error) {
 	if strings.TrimSpace(u.Username) == "" {
@@ -453,10 +508,7 @@ func callWithRateLimitRetry[T any](ctx context.Context, pace *limiter, call func
 			return zero, err
 		}
 
-		waitFor := rateLimited.RetryAfter
-		if waitFor <= 0 {
-			waitFor = defaultRateLimitWait
-		}
+		waitFor := boundedRetryAfter(rateLimited.RetryAfter)
 		slog.WarnContext(ctx, "CDP rate limited, waiting", "retry_after", waitFor.String(), "attempt", attempt)
 		select {
 		case <-ctx.Done():
@@ -517,10 +569,13 @@ func run(ctx context.Context, confidence, ceiling float64, sampleOverride, rateP
 	if err != nil {
 		return 2, err
 	}
-	slog.InfoContext(ctx, "population enumerated", "population", len(population), "sample_size", n, "seed", seed)
+	checkable, skippedNoLFID := splitCheckable(population)
+	slog.InfoContext(ctx, "population enumerated",
+		"population", len(population), "checkable", len(checkable),
+		"skipped_no_lfid", skippedNoLFID, "sample_size", n, "seed", seed)
 
-	sampled := sampleUsers(population, n, seed)
-	census := len(sampled) == len(population)
+	sampled := sampleUsers(checkable, n, seed)
+	census := len(sampled) == len(checkable)
 	achievedConfidence := confidence
 	if !census && len(sampled) < derivedN {
 		// An undersized override supports a weaker claim than requested;
@@ -532,6 +587,7 @@ func run(ctx context.Context, confidence, ceiling float64, sampleOverride, rateP
 	out := report{
 		GeneratedAt:   time.Now().UTC(),
 		Population:    len(population),
+		SkippedNoLFID: skippedNoLFID,
 		SampleSize:    len(sampled),
 		Census:        census,
 		Confidence:    achievedConfidence,

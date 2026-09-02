@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -88,6 +90,15 @@ func TestRequiredSampleSize(t *testing.T) {
 		_, err := requiredSampleSize(0.99, 1e-20)
 		require.Error(t, err)
 	})
+
+	t.Run("rejects NaN inputs", func(t *testing.T) {
+		// NaN passes plain range checks (every comparison is false) and
+		// would panic sampleUsers via a negative n.
+		_, err := requiredSampleSize(math.NaN(), 0.001)
+		require.Error(t, err)
+		_, err = requiredSampleSize(0.99, math.NaN())
+		require.Error(t, err)
+	})
 }
 
 func TestSampleUsers(t *testing.T) {
@@ -109,6 +120,26 @@ func TestSampleUsers(t *testing.T) {
 		sampled := sampleUsers(population, 10, 1)
 		assert.Equal(t, population, sampled)
 	})
+}
+
+func TestSplitCheckable(t *testing.T) {
+	population := []gateUser{
+		{UserID: "auth0|1", Username: "alice"},
+		{UserID: "google-oauth2|2"},
+		{UserID: "auth0|3", Username: "  "},
+		{UserID: "auth0|4", Username: "dave"},
+	}
+	checkable, skipped := splitCheckable(population)
+	assert.Equal(t, 2, skipped)
+	require.Len(t, checkable, 2)
+	assert.Equal(t, "alice", checkable[0].Username)
+	assert.Equal(t, "dave", checkable[1].Username)
+}
+
+func TestBoundedRetryAfter(t *testing.T) {
+	assert.Equal(t, defaultRateLimitWait, boundedRetryAfter(0), "missing hint falls back to the default")
+	assert.Equal(t, 30*time.Second, boundedRetryAfter(30*time.Second), "sane hint is honored")
+	assert.Equal(t, maxRateLimitWait, boundedRetryAfter(12*time.Hour), "oversized hint is clamped")
 }
 
 func TestIdentityMatchesUser(t *testing.T) {
@@ -416,6 +447,62 @@ func TestPopulationWalker(t *testing.T) {
 		require.Len(t, population, 1)
 		assert.Equal(t, "google-oauth2|123", population[0].UserID)
 		assert.Empty(t, population[0].Username, "a social-primary root username is not an LFID")
+	})
+
+	t.Run("drains a full page of one shared updated_at with deeper pages", func(t *testing.T) {
+		const tie = "2026-01-01T00:00:00.000Z"
+		tiePage := make([]mgmtUser, walkPageSize)
+		for i := range tiePage {
+			tiePage[i] = mgmtUser{
+				UserID:      fmt.Sprintf("auth0|tie-%03d", i),
+				Username:    fmt.Sprintf("tie%03d", i),
+				UpdatedAt:   tie,
+				AppMetadata: map[string]any{"cdp_uuid": fmt.Sprintf("uuid-tie-%03d", i)},
+			}
+		}
+		tail := []mgmtUser{{
+			UserID:      "auth0|after",
+			Username:    "after",
+			UpdatedAt:   "2026-01-02T00:00:00.000Z",
+			AppMetadata: map[string]any{"cdp_uuid": "uuid-after"},
+		}}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page := r.URL.Query().Get("page")
+			q := r.URL.Query().Get("q")
+			switch {
+			case strings.Contains(q, "1970-01-01"):
+				// The whole population starts at one shared timestamp.
+				require.NoError(t, json.NewEncoder(w).Encode(tiePage))
+			case strings.Contains(q, "2026-01-01") && page == "0":
+				// The inclusive bound re-presents the full tie page: the
+				// bound cannot advance, forcing the deeper-page drain.
+				require.NoError(t, json.NewEncoder(w).Encode(tiePage))
+			case strings.Contains(q, "2026-01-01") && page == "1":
+				require.NoError(t, json.NewEncoder(w).Encode(tail))
+			case strings.Contains(q, "2026-01-02"):
+				require.NoError(t, json.NewEncoder(w).Encode(tail))
+			default:
+				require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
+			}
+		}))
+		defer server.Close()
+
+		target, err := url.Parse(server.URL)
+		require.NoError(t, err)
+
+		walker := &populationWalker{
+			httpClient: httpclient.NewClient(httpclient.Config{
+				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
+			}),
+			domain: "tenant.auth0.com",
+			tokens: fakeTokenProvider{token: "mgmt-token"},
+		}
+
+		population, malformed, err := walker.listCDPUUIDHolders(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, malformed)
+		assert.Len(t, population, walkPageSize+1, "the tie block and the row after it are all enumerated")
 	})
 }
 
