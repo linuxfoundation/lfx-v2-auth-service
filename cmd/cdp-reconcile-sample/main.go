@@ -37,7 +37,8 @@
 // Exit codes: 0 every sampled user agrees; 1 at least one disagreement or
 // unresolvable user (the gate's literal rule blocks on both; the sign-off
 // artifact records any accepted exception); 2 the run is inconclusive —
-// errors, rate-limit exhaustion, or an interrupt left users unchecked.
+// errors, rate-limit exhaustion, an interrupt left users unchecked, or no
+// user was actually checked (dry run, empty population, every user skipped).
 package main
 
 import (
@@ -150,7 +151,13 @@ func requiredSampleSize(confidence, ceiling float64) (int, error) {
 	if ceiling <= 0 || ceiling >= 1 {
 		return 0, fmt.Errorf("ceiling must be in (0,1), got %v", ceiling)
 	}
-	return int(math.Ceil(math.Log(1-confidence) / math.Log(1-ceiling))), nil
+	// Log1p sidesteps the 1-x rounding hole: for a tiny ceiling, 1-ceiling
+	// rounds to 1 and the plain-Log denominator collapses to zero.
+	n := math.Ceil(math.Log1p(-confidence) / math.Log1p(-ceiling))
+	if n > math.MaxInt32 {
+		return 0, fmt.Errorf("required sample size %g is impractically large; relax -confidence or -ceiling", n)
+	}
+	return int(n), nil
 }
 
 // sampleUsers draws n users without replacement, deterministically for a given
@@ -241,10 +248,17 @@ const (
 	// mgmtMaxAttempts bounds retries of one page against Management 429s and
 	// transient failures.
 	mgmtMaxAttempts = 8
+
+	// databaseUserIDPrefix marks a user whose primary identity is the database
+	// connection — the only case where the root `username` is an LFID (the
+	// same guard internal/infrastructure/auth0/cdp_metadata.go applies).
+	databaseUserIDPrefix = "auth0|"
 )
 
 // listCDPUUIDHolders walks the whole population of users with a stored
-// cdp_uuid.
+// cdp_uuid, also returning the user IDs of records that matched the query but
+// carry no usable string value — the caller must report those as
+// inconclusive, not silently shrink the population.
 //
 // Auth0's user search rejects offsets past 1,000, so plain page-walking cannot
 // reach a ~43k population. This walks with an ascending `updated_at` lower
@@ -255,15 +269,16 @@ const (
 // `updated_at` moves when a user logs in, so a user active during the walk can
 // migrate across the bound and be missed. Acceptable for drawing a sample;
 // a census run should quiesce or re-run.
-func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, error) {
+func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, []string, error) {
 	var population []gateUser
+	var malformed []string
 	seen := make(map[string]struct{})
 	bound := walkInitialBound
 
 	for page := 0; ; page++ {
 		rows, err := w.fetchPage(ctx, bound)
 		if err != nil {
-			return nil, fmt.Errorf("population walk failed at bound %s: %w", bound, err)
+			return nil, nil, fmt.Errorf("population walk failed at bound %s: %w", bound, err)
 		}
 
 		newRows := 0
@@ -277,14 +292,23 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 			stored, _ := row.AppMetadata["cdp_uuid"].(string)
 			if strings.TrimSpace(stored) == "" {
 				// The query selects on key existence, so this is a shape
-				// surprise worth surfacing, not silently dropping.
+				// surprise that makes the enumeration inconclusive.
 				slog.WarnContext(ctx, "user matched cdp_uuid=* but carries no string value",
 					"user_id", redaction.Redact(row.UserID))
+				malformed = append(malformed, row.UserID)
 				continue
+			}
+			username := row.Username
+			if !strings.HasPrefix(row.UserID, databaseUserIDPrefix) {
+				// The root username belongs to the primary identity; for a
+				// social- or enterprise-primary user it is not an LFID.
+				// Blank it so the user counts as skipped_no_lfid instead of
+				// being resolved as someone else.
+				username = ""
 			}
 			population = append(population, gateUser{
 				UserID:        row.UserID,
-				Username:      row.Username,
+				Username:      username,
 				Email:         row.Email,
 				EmailVerified: row.EmailVerified,
 				StoredUUID:    strings.ToLower(stored),
@@ -298,11 +322,9 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 			break
 		}
 
-
-
 		nextBound := rows[len(rows)-1].UpdatedAt
 		if newRows == 0 && nextBound == bound {
-			return nil, fmt.Errorf("population walk stalled: >%d users share updated_at %s", walkPageSize, bound)
+			return nil, nil, fmt.Errorf("population walk stalled: >%d users share updated_at %s", walkPageSize, bound)
 		}
 		bound = nextBound
 
@@ -311,7 +333,7 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 		}
 	}
 
-	return population, nil
+	return population, malformed, nil
 }
 
 func (w *populationWalker) fetchPage(ctx context.Context, bound string) ([]mgmtUser, error) {
@@ -346,10 +368,12 @@ func (w *populationWalker) fetchPage(ctx context.Context, bound string) ([]mgmtU
 			return rows, nil
 		}
 		if attempt >= mgmtMaxAttempts {
-			return nil, fmt.Errorf("status code: %d after %d attempts", statusCode, attempt)
+			return nil, fmt.Errorf("status code: %d after %d attempts: %w", statusCode, attempt, errCall)
 		}
-		if statusCode != http.StatusTooManyRequests && statusCode < 500 {
-			return nil, fmt.Errorf("status code: %d", statusCode)
+		// Call reports a negative status when no usable response arrived
+		// (transport failure, decode failure); retry those like a 5xx.
+		if statusCode >= 0 && statusCode != http.StatusTooManyRequests && statusCode < 500 {
+			return nil, fmt.Errorf("status code: %d: %w", statusCode, errCall)
 		}
 
 		slog.WarnContext(ctx, "Management API page retry",
@@ -484,19 +508,28 @@ func run(ctx context.Context, confidence, ceiling float64, sampleOverride, rateP
 	}
 
 	started := time.Now()
-	population, err := walker.listCDPUUIDHolders(ctx)
+	population, malformed, err := walker.listCDPUUIDHolders(ctx)
 	if err != nil {
 		return 2, err
 	}
 	slog.InfoContext(ctx, "population enumerated", "population", len(population), "sample_size", n, "seed", seed)
 
 	sampled := sampleUsers(population, n, seed)
+	census := len(sampled) == len(population)
+	achievedConfidence := confidence
+	if !census && len(sampled) < derivedN {
+		// An undersized override supports a weaker claim than requested;
+		// record what the sample actually proves, not what was asked for.
+		achievedConfidence = -math.Expm1(float64(len(sampled)) * math.Log1p(-ceiling))
+		slog.WarnContext(ctx, "sample smaller than the derived size; reporting the achieved confidence",
+			"sample_size", len(sampled), "derived_n", derivedN, "achieved_confidence", achievedConfidence)
+	}
 	out := report{
 		GeneratedAt:   time.Now().UTC(),
 		Population:    len(population),
 		SampleSize:    len(sampled),
-		Census:        len(sampled) == len(population),
-		Confidence:    confidence,
+		Census:        census,
+		Confidence:    achievedConfidence,
 		Ceiling:       ceiling,
 		Seed:          seed,
 		DryRun:        dryRun,
@@ -504,6 +537,9 @@ func run(ctx context.Context, confidence, ceiling float64, sampleOverride, rateP
 		Disagreements: []disagreement{},
 		Unresolvable:  []string{},
 		Errors:        []checkError{},
+	}
+	for _, userID := range malformed {
+		out.Errors = append(out.Errors, checkError{UserID: userID, Message: "matched cdp_uuid=* but carries no usable string value"})
 	}
 
 	if !dryRun {
@@ -553,11 +589,16 @@ func run(ctx context.Context, confidence, ceiling float64, sampleOverride, rateP
 }
 
 func reportExitCode(out report) int {
+	agreed := out.Counts[string(verdictAgreeSingle)] + out.Counts[string(verdictAgreeMulti)]
 	switch {
 	case len(out.Errors) > 0 || out.Unchecked > 0:
 		return 2
 	case len(out.Disagreements) > 0 || len(out.Unresolvable) > 0:
 		return 1
+	case agreed == 0:
+		// Dry runs, empty populations, and all-skipped samples check nobody;
+		// exit 0 would fabricate gate evidence.
+		return 2
 	default:
 		return 0
 	}
@@ -614,7 +655,21 @@ func writeReport(out report, outPath string) error {
 		_, err = os.Stdout.Write(encoded)
 		return err
 	}
-	if err := os.WriteFile(outPath, encoded, 0o600); err != nil {
+	// The report carries unredacted identifiers. OpenFile's mode applies only
+	// to a newly created file, so force 0600 on a reused path too.
+	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to write the report: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("failed to restrict the report permissions: %w", err)
+	}
+	if _, err := f.Write(encoded); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("failed to write the report: %w", err)
+	}
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("failed to write the report: %w", err)
 	}
 	return nil

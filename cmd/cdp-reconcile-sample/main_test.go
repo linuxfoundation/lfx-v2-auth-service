@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +78,14 @@ func TestRequiredSampleSize(t *testing.T) {
 
 	t.Run("rejects invalid ceiling", func(t *testing.T) {
 		_, err := requiredSampleSize(0.99, 0)
+		require.Error(t, err)
+	})
+
+	t.Run("rejects a ceiling too small to sample", func(t *testing.T) {
+		// 1-1e-20 rounds to 1; plain Log would divide by zero and the cast
+		// would go negative. Log1p keeps the size finite and the bound
+		// rejects it.
+		_, err := requiredSampleSize(0.99, 1e-20)
 		require.Error(t, err)
 	})
 }
@@ -354,8 +364,9 @@ func TestPopulationWalker(t *testing.T) {
 			tokens: fakeTokenProvider{token: "mgmt-token"},
 		}
 
-		population, err := walker.listCDPUUIDHolders(context.Background())
+		population, malformed, err := walker.listCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
+		assert.Empty(t, malformed)
 		require.Len(t, population, 3)
 		assert.Equal(t, "uuid-1", population[0].StoredUUID)
 		assert.Equal(t, "uuid-2", population[1].StoredUUID)
@@ -365,11 +376,52 @@ func TestPopulationWalker(t *testing.T) {
 		assert.Contains(t, queries[0], "updated_at%3A%5B1970-01-01T00%3A00%3A00.000Z+TO+%2A%5D")
 		assert.Contains(t, queries[1], "updated_at%3A%5B2026-01-02T00%3A00%3A00.000Z+TO+%2A%5D")
 	})
+
+	t.Run("reports malformed cdp_uuid holders and blanks non-database usernames", func(t *testing.T) {
+		page := []mgmtUser{{
+			UserID:      "auth0|bad",
+			Username:    "mallory",
+			UpdatedAt:   "2026-01-01T00:00:00.000Z",
+			AppMetadata: map[string]any{"cdp_uuid": 42},
+		}, {
+			UserID:      "google-oauth2|123",
+			Username:    "social-handle",
+			UpdatedAt:   "2026-01-02T00:00:00.000Z",
+			AppMetadata: map[string]any{"cdp_uuid": "uuid-social"},
+		}}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(r.URL.RawQuery, "1970-01-01") {
+				require.NoError(t, json.NewEncoder(w).Encode(page))
+				return
+			}
+			require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
+		}))
+		defer server.Close()
+
+		target, err := url.Parse(server.URL)
+		require.NoError(t, err)
+
+		walker := &populationWalker{
+			httpClient: httpclient.NewClient(httpclient.Config{
+				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
+			}),
+			domain: "tenant.auth0.com",
+			tokens: fakeTokenProvider{token: "mgmt-token"},
+		}
+
+		population, malformed, err := walker.listCDPUUIDHolders(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"auth0|bad"}, malformed)
+		require.Len(t, population, 1)
+		assert.Equal(t, "google-oauth2|123", population[0].UserID)
+		assert.Empty(t, population[0].Username, "a social-primary root username is not an LFID")
+	})
 }
 
 func TestReportExitCode(t *testing.T) {
 	t.Run("zero when every sampled user agrees", func(t *testing.T) {
-		code := reportExitCode(report{Counts: map[string]int{"agree_single": 1}})
+		code := reportExitCode(report{SampleSize: 1, Counts: map[string]int{"agree_single": 1}})
 		assert.Equal(t, 0, code)
 	})
 
@@ -382,4 +434,21 @@ func TestReportExitCode(t *testing.T) {
 		assert.Equal(t, 2, reportExitCode(report{Errors: []checkError{{UserID: "auth0|1"}}}))
 		assert.Equal(t, 2, reportExitCode(report{Unchecked: 3}))
 	})
+
+	t.Run("two when no user was actually checked", func(t *testing.T) {
+		assert.Equal(t, 2, reportExitCode(report{DryRun: true, SampleSize: 5, Counts: map[string]int{}}), "dry run")
+		assert.Equal(t, 2, reportExitCode(report{Counts: map[string]int{}}), "empty population")
+		assert.Equal(t, 2, reportExitCode(report{SampleSize: 2, Counts: map[string]int{"skipped_no_lfid": 2}}), "all skipped")
+	})
+}
+
+func TestWriteReportRestrictsPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.json")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o644))
+
+	require.NoError(t, writeReport(report{Counts: map[string]int{}}, path))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
