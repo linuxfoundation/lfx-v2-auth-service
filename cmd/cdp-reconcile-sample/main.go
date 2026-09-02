@@ -410,8 +410,8 @@ func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, 
 // and silently omit some. The server's own total makes that detectable:
 // passes repeat until the distinct rows collected reach it, and a block this
 // walk cannot prove complete fails the enumeration instead of passing as an
-// incomplete sampling frame. Rows come back sorted by user ID so the
-// population order — and with it the seeded sample — stays reproducible.
+// incomplete sampling frame. Rows come back sorted by user ID so the drain's
+// contribution to the population order is deterministic.
 func (w *populationWalker) drainTieBlock(ctx context.Context, ts string) ([]mgmtUser, error) {
 	collected := make(map[string]mgmtUser)
 	total := 0
@@ -422,8 +422,12 @@ func (w *populationWalker) drainTieBlock(ctx context.Context, ts string) ([]mgmt
 				return nil, fmt.Errorf("tie-block drain failed at updated_at %s: %w", ts, err)
 			}
 			total = pageTotal
-			if total > walkOffsetLimit {
-				return nil, fmt.Errorf("population walk cannot enumerate %d users sharing updated_at %s: past Auth0's %d-result window", total, ts, walkOffsetLimit)
+			if total >= walkOffsetLimit {
+				// Auth0 caps the reported total at the same 1,000-result
+				// window, so a block at the cap cannot be told apart from a
+				// larger one; fail closed instead of passing a possibly
+				// incomplete frame.
+				return nil, fmt.Errorf("population walk cannot enumerate %d users sharing updated_at %s: at or past Auth0's %d-result window", total, ts, walkOffsetLimit)
 			}
 			for _, row := range rows {
 				collected[row.UserID] = row
@@ -575,6 +579,18 @@ func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser
 		}
 		return verdictDisagreeOther, result.MemberID, nil
 	case cdp.OutcomeNoMatch:
+		// No match alone cannot tell "identifiers changed" from "stored
+		// member deleted" — the latter is a hard failure, not merely a
+		// non-re-derivable UUID. Reading the stored member splits the two.
+		_, listErr := callWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
+			return client.ListIdentities(callCtx, u.StoredUUID)
+		})
+		if listErr != nil {
+			if errors.Is(listErr, cdp.ErrMemberNotFound) {
+				return verdictDisagreeGone, "", nil
+			}
+			return verdictError, "", listErr
+		}
 		return verdictUnresolvable, "", nil
 	case cdp.OutcomeConflict:
 		identities, listErr := callWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
@@ -680,6 +696,10 @@ func run(ctx context.Context, clients func(context.Context) (cdp.Client, *popula
 		"population", len(population), "checkable", len(checkable),
 		"skipped_no_lfid", skippedNoLFID, "sample_size", n, "seed", seed)
 
+	// The walk's order is only as stable as Auth0's updated_at sort, which
+	// gives ties no sub-order; sorting the frame by user ID is what actually
+	// makes a (population, seed) pair reproduce the same sample.
+	sort.Slice(checkable, func(i, j int) bool { return checkable[i].UserID < checkable[j].UserID })
 	sampled := sampleUsers(checkable, n, seed)
 	census := len(sampled) == len(checkable)
 	achievedConfidence := confidence

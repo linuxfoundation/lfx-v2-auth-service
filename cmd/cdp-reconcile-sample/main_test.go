@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -175,7 +176,7 @@ func TestIdentityMatchesUser(t *testing.T) {
 		assert.True(t, ok)
 	})
 
-	t.Run("email match ignores platform and requires verified email on both sides", func(t *testing.T) {
+	t.Run("email match ignores platform and the member identity's verified flag; only the Auth0 email-verified flag gates", func(t *testing.T) {
 		ok := identityMatchesUser(user, []cdp.MemberIdentity{{
 			Type:     "email",
 			Value:    "p@example.org",
@@ -275,15 +276,47 @@ func TestCheckUser(t *testing.T) {
 		assert.Equal(t, "member-b", resolved)
 	})
 
-	t.Run("reports unresolvable when resolve returns 404", func(t *testing.T) {
+	t.Run("reports unresolvable when resolve returns 404 but the stored member still exists", func(t *testing.T) {
 		client := stubCDPClient{
 			resolveFn: func(context.Context, string, string) (cdp.ResolveResult, error) {
 				return cdp.ResolveResult{Outcome: cdp.OutcomeNoMatch}, nil
+			},
+			listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+				assert.Equal(t, "member-a", memberID)
+				return []cdp.MemberIdentity{}, nil
 			},
 		}
 		verdict, _, err := checkUser(ctx, client, pace, baseUser)
 		require.NoError(t, err)
 		assert.Equal(t, verdictUnresolvable, verdict)
+	})
+
+	t.Run("reports member gone when resolve returns 404 and the stored member is deleted", func(t *testing.T) {
+		client := stubCDPClient{
+			resolveFn: func(context.Context, string, string) (cdp.ResolveResult, error) {
+				return cdp.ResolveResult{Outcome: cdp.OutcomeNoMatch}, nil
+			},
+			listFn: func(context.Context, string) ([]cdp.MemberIdentity, error) {
+				return nil, cdp.ErrMemberNotFound
+			},
+		}
+		verdict, _, err := checkUser(ctx, client, pace, baseUser)
+		require.NoError(t, err)
+		assert.Equal(t, verdictDisagreeGone, verdict)
+	})
+
+	t.Run("reports an error when the no-match membership read fails", func(t *testing.T) {
+		client := stubCDPClient{
+			resolveFn: func(context.Context, string, string) (cdp.ResolveResult, error) {
+				return cdp.ResolveResult{Outcome: cdp.OutcomeNoMatch}, nil
+			},
+			listFn: func(context.Context, string) ([]cdp.MemberIdentity, error) {
+				return nil, errors.New("boom")
+			},
+		}
+		verdict, _, err := checkUser(ctx, client, pace, baseUser)
+		require.Error(t, err)
+		assert.Equal(t, verdictError, verdict)
 	})
 
 	t.Run("agrees on multi-match when stored member still matches", func(t *testing.T) {
@@ -575,11 +608,13 @@ func TestPopulationWalker(t *testing.T) {
 		assert.Contains(t, err.Error(), "incomplete after")
 	})
 
-	t.Run("aborts a tie block past Auth0's 1,000-result window", func(t *testing.T) {
+	t.Run("fails closed on a tie block at Auth0's 1,000-result cap", func(t *testing.T) {
 		tiePage := makeTiePage()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("include_totals") == "true" {
-				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: walkOffsetLimit + 1, Users: tiePage}))
+				// Auth0 caps the reported total at the window itself, so the
+				// cap is the largest value the guard will ever see.
+				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: walkOffsetLimit, Users: tiePage}))
 				return
 			}
 			require.NoError(t, json.NewEncoder(w).Encode(tiePage))
