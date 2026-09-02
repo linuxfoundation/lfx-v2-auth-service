@@ -196,14 +196,14 @@ func TestIdentityMatchesUser(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("unverified member identity still matches, mirroring holdsLFID", func(t *testing.T) {
+	t.Run("unverified member identity never matches, mirroring resolve", func(t *testing.T) {
 		ok := identityMatchesUser(user, []cdp.MemberIdentity{{
 			Platform: "lfid",
 			Type:     "username",
 			Value:    "psmith",
 			Verified: false,
 		}})
-		assert.True(t, ok, "provisioning's holdsLFID never gates on verified")
+		assert.False(t, ok, "resolve filters verified=true; an unverified identity cannot have produced the 409")
 	})
 
 	t.Run("identity values are trimmed before comparison", func(t *testing.T) {
@@ -211,8 +211,9 @@ func TestIdentityMatchesUser(t *testing.T) {
 			Platform: "lfid",
 			Type:     "username",
 			Value:    "  psmith \n",
+			Verified: true,
 		}})
-		assert.True(t, ok, "provisioning trims identity values; the gate must not diverge")
+		assert.True(t, ok, "resolve trims identity values; the gate must not diverge")
 	})
 }
 

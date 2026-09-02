@@ -202,14 +202,19 @@ func sampleUsers(population []gateUser, n int, seed int64) []gateUser {
 }
 
 // identityMatchesUser reports whether any of a member's identities matches the
-// user's identifiers under the same predicate provisioning applies
-// (holdsLFID): values trimmed and compared case-insensitively, `verified` NOT
-// required — CDP stores identity values as each source supplies them and the
-// service never gates on the flag. The LFID arm is platform-qualified; the
-// email arm is deliberately platform-free and only consulted when the user's
-// email is verified (FR-003a).
+// user's identifiers under the same predicate CDP's /v1/members/resolve applies
+// (crowd.dev resolveMember.ts): only `verified` identities are consulted —
+// resolve filters verified=true on both arms, so an unverified identity can
+// never have produced the 409 and must not count as membership here (a false
+// pass otherwise). `verifiedBy` is not consulted because resolve ignores it.
+// Values are trimmed and compared case-insensitively. The LFID arm is
+// platform-qualified; the email arm is deliberately platform-free and only
+// consulted when the user's email is verified (FR-003a).
 func identityMatchesUser(u gateUser, identities []cdp.MemberIdentity) bool {
 	for _, id := range identities {
+		if !id.Verified {
+			continue
+		}
 		value := strings.TrimSpace(id.Value)
 		if id.Platform == constants.LFIDPlatform && id.Type == constants.CDPIdentityTypeUsername && strings.EqualFold(value, u.Username) {
 			return true
