@@ -612,6 +612,24 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("skills: raw-length guard drops a mid-item fragment after a complete item", func(t *testing.T) {
+		// "dup," x999 = 3996 runes, so the kept 4000 runes end 4 runes into
+		// "PARTIAL_SKILL" ("PART"); that fragment is under skillsMaxLength, so
+		// only the back-off keeps it out. Without the back-off this would
+		// yield "dup, PART".
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "PARTIAL_SKILL"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup" {
+			t.Errorf("Skills = %v, want %q (mid-item fragment must be dropped)", metadata.Skills, "dup")
+		}
+	})
+
 	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
 		items := make([]string, skillsMaxCount+10)
 		for i := range items {
@@ -697,6 +715,55 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 		if got != first {
 			t.Errorf("Skills = %q, want %q", got, first)
+		}
+	})
+
+	t.Run("skills: a later item that fits whole survives even though an earlier oversized item was dropped", func(t *testing.T) {
+		// "x"*1996 fits alone (used=1996). "Rust" doesn't fit (1996+2+4=2002)
+		// and must be dropped whole, but the scan must continue rather than
+		// stop there: "Go" fits exactly (1996+2+2=2000) and must survive.
+		first := strings.Repeat("x", skillsMaxLength-4)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + ",Rust,Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		want := first + ", Go"
+		if metadata.Skills == nil || *metadata.Skills != want {
+			t.Errorf("Skills = %v, want %q (a later fitting item must not be dropped along with an earlier oversized one)", metadata.Skills, want)
+		}
+	})
+
+	t.Run("skills: an oversized first item is dropped whole, not stored as a fabricated fragment, when a later item fits", func(t *testing.T) {
+		// The first item alone exceeds skillsMaxLength (2001 > 2000), but a
+		// later item ("Go") fits on its own. The oversized item must be
+		// dropped whole rather than hard-truncated into a fragment the user
+		// never entered; "Go" must survive.
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("x", skillsMaxLength+1) + ",Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go" {
+			t.Errorf("Skills = %v, want %q (oversized first item must be dropped whole, not truncated, when a later item fits)", metadata.Skills, "Go")
+		}
+	})
+
+	t.Run("skills: joined value landing exactly on skillsMaxLength survives whole", func(t *testing.T) {
+		// 1996 + len(", ") + len("Go") = 2000 exactly; using >= instead of >
+		// in the fit check would drop "Go" even though it fits precisely.
+		first := strings.Repeat("x", skillsMaxLength-4)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + ",Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		want := first + ", Go"
+		if metadata.Skills == nil || *metadata.Skills != want {
+			t.Errorf("Skills = %v, want a value of exactly %d runes ending in %q", metadata.Skills, skillsMaxLength, ", Go")
 		}
 	})
 

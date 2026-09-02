@@ -58,7 +58,9 @@ const bioMaxLength = 2000
 
 // skillsMaxLength is the maximum number of characters allowed in the
 // comma-separated Skills string. Auth0 imposes no limit, so this is the
-// chokepoint cap; the final joined value is truncated during sanitization.
+// chokepoint cap; items that would not fit within it are dropped whole
+// during sanitization, and the first item is truncated only if no item
+// fits at all.
 const skillsMaxLength = 2000
 
 // skillsMaxCount is the maximum number of individual skill items allowed in
@@ -210,6 +212,8 @@ func (um *UserMetadata) userMetadataSanitize() {
 // Unicode case folding, and rejoins the survivors with ", ". Both length
 // guards below operate on whole items only, never mid-item, so an item that
 // doesn't fit is dropped entirely rather than stored as a partial fragment.
+// The one exception: if no item fits at all, the first item is hard-truncated
+// so the value isn't emptied entirely.
 func sanitizeSkills(raw string) string {
 	// Trim before bounding raw length, matching the Bio field's
 	// trim-then-cap order, so leading/trailing whitespace doesn't eat into
@@ -274,30 +278,33 @@ func sanitizeSkills(raw string) string {
 	}
 
 	// Build the joined value one whole item at a time so the length cap
-	// can never land inside an item: an item that would land mid-item or
-	// spill past the cap is dropped entirely rather than stored truncated.
-	// The only exception is a single item that alone exceeds the cap,
-	// which is hard-truncated since there would otherwise be nothing to
-	// keep.
+	// can never land inside an item: an item that doesn't fit whole is
+	// dropped entirely and the scan continues, so a later, shorter item
+	// still gets a chance to fit rather than being dropped along with the
+	// oversized one that preceded it. The only exception is when nothing
+	// fit at all, which hard-truncates the first item since there would
+	// otherwise be nothing to keep.
 	var b strings.Builder
 	used := 0
-	for i, item := range cleaned {
+	for _, item := range cleaned {
 		n := utf8.RuneCountInString(item)
 		sep := 0
-		if i > 0 {
+		if b.Len() > 0 {
 			sep = 2 // len(", ") in runes
 		}
 		if used+sep+n > skillsMaxLength {
-			if i == 0 {
-				b.WriteString(string([]rune(item)[:skillsMaxLength]))
-			}
-			break
+			continue // an item that doesn't fit is dropped whole
 		}
 		if sep > 0 {
 			b.WriteString(", ")
 		}
 		b.WriteString(item)
 		used += sep + n
+	}
+	if b.Len() == 0 && len(cleaned) > 0 {
+		// Nothing fit whole; keep a truncated first item rather than
+		// emptying the field entirely.
+		b.WriteString(string([]rune(cleaned[0])[:skillsMaxLength]))
 	}
 	return b.String()
 }
