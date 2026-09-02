@@ -79,6 +79,9 @@ const LFIDPlatform = "lfid"
 // CDPIdentityTypeUsername is the CDP identity type for a username identity.
 const CDPIdentityTypeUsername = "username"
 
+// CDPIdentityTypeEmail is the CDP identity type for an email identity.
+const CDPIdentityTypeEmail = "email"
+
 // CDPIdentitySource identifies this service as the origin of an identity it
 // creates in CDP.
 const CDPIdentitySource = "lfxV2AuthService"

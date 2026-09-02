@@ -214,7 +214,7 @@ func identityMatchesUser(u gateUser, identities []cdp.MemberIdentity) bool {
 		if id.Platform == constants.LFIDPlatform && id.Type == constants.CDPIdentityTypeUsername && strings.EqualFold(value, u.Username) {
 			return true
 		}
-		if u.EmailVerified && u.Email != "" && id.Type == "email" && strings.EqualFold(value, u.Email) {
+		if u.EmailVerified && u.Email != "" && id.Type == constants.CDPIdentityTypeEmail && strings.EqualFold(value, u.Email) {
 			return true
 		}
 	}
