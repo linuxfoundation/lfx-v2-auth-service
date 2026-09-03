@@ -64,6 +64,14 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 		// broader-audience tokens — accepted for read-only lookups via
 		// ExpectedAudiences — from ever authorizing a write, even if another
 		// resource server were to define an identically named scope.
+		//
+		// Refuse to narrow to an absent audience: the parser skips audience
+		// validation entirely when the allow-list is empty, so clearing
+		// ExpectedAudiences without a Management audience to fall back on would
+		// silently drop the only audience constraint on a write path.
+		if strings.TrimSpace(j.ExpectedAudience) == "" {
+			return nil, errors.NewValidation("Management API audience is required for scope-gated JWT verification")
+		}
 		opts.ExpectedAudiences = nil
 	}
 
