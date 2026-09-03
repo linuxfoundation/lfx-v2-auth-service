@@ -921,7 +921,7 @@ type recordedCall struct {
 type fakeAuth0Transport struct {
 	primaryUserID string // decoded path id, e.g. "auth0|test123"
 	getUserResp   string // body for GET of the primary user
-	stubGetStatus int    // status for GET of the rollback stub
+	stubGetStatus int    // status for GET of any non-primary user (rollback stub, delete pre-flight)
 	stubGetResp   string // body for GET of the rollback stub
 	createStatus  int    // status for POST /api/v2/users
 	createResp    string // body for POST /api/v2/users
@@ -1437,6 +1437,7 @@ func TestUserReaderWriter_DeleteSystemManagedUser(t *testing.T) {
 
 		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to verify system_managed before delete")
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
 	})
 }
@@ -1494,6 +1495,7 @@ func TestUserReaderWriter_DeleteEmailConnectionStub(t *testing.T) {
 
 		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to verify email-connection stub before delete")
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
 	})
 }
