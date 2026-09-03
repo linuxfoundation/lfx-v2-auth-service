@@ -132,6 +132,8 @@ To create a new release of the auth service:
    - Publish the chart to GitHub Container Registry (GHCR)
    - Sign the chart with Cosign
    - Generate SLSA provenance
+   - Dispatch `create-version-bump-pr.yml` on `lfx-v2-argocd` so staging and
+     prod image tags and chart pins are opened as a pull request
 
 ### Important Notes
 
