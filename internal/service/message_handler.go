@@ -932,11 +932,17 @@ type addAliasRequest struct {
 	Domain string `json:"domain"`
 }
 
-// addAliasResponse is the reply for lfx.auth-service.add_alias
+// addAliasResponse is the reply for lfx.auth-service.add_alias on success.
+// Errors go through the shared errorResponse (UserDataResponse) instead.
 type addAliasResponse struct {
 	Success bool   `json:"success"`
 	Email   string `json:"email,omitempty"`
-	Error   string `json:"error,omitempty"`
+}
+
+// hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
+// "@linux.com"), case-insensitively and tolerant of surrounding whitespace.
+func hasEmailDomainSuffix(email, domainSuffix string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), strings.ToLower(strings.TrimSpace(domainSuffix)))
 }
 
 // AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
@@ -1005,16 +1011,16 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 	// hold at most one alias per allowed domain. Cover all three surfaces:
 	// primary email, linked identities, and alternate emails.
 	domainSuffix := "@" + requestedDomain
-	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), domainSuffix) {
+	if hasEmailDomainSuffix(fullUser.PrimaryEmail, domainSuffix) {
 		return m.errorResponse("already_claimed"), nil
 	}
 	for _, id := range fullUser.Identities {
-		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), domainSuffix) {
+		if id.Connection == constants.EmailConnection && hasEmailDomainSuffix(id.Email, domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}
 	for _, alt := range fullUser.AlternateEmails {
-		if strings.HasSuffix(strings.ToLower(alt.Email), domainSuffix) {
+		if hasEmailDomainSuffix(alt.Email, domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}

@@ -3776,3 +3776,51 @@ func TestGetUserByInput_ErrorLogLevel(t *testing.T) {
 		})
 	}
 }
+
+func TestHasEmailDomainSuffix(t *testing.T) {
+	tests := []struct {
+		name         string
+		email        string
+		domainSuffix string
+		want         bool
+	}{
+		{
+			name:         "matches exact case",
+			email:        "jdoe@linux.com",
+			domainSuffix: "@linux.com",
+			want:         true,
+		},
+		{
+			name:         "matches with an uppercase suffix",
+			email:        "jdoe@linux.com",
+			domainSuffix: "@LINUX.COM",
+			want:         true,
+		},
+		{
+			name:         "matches with a whitespace-padded suffix",
+			email:        "jdoe@linux.com",
+			domainSuffix: "  @linux.com  ",
+			want:         true,
+		},
+		{
+			name:         "matches with an uppercase, whitespace-padded email",
+			email:        "  JDOE@LINUX.COM  ",
+			domainSuffix: "@linux.com",
+			want:         true,
+		},
+		{
+			name:         "does not match a different domain",
+			email:        "jdoe@example.com",
+			domainSuffix: "@linux.com",
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasEmailDomainSuffix(tt.email, tt.domainSuffix); got != tt.want {
+				t.Errorf("hasEmailDomainSuffix(%q, %q) = %v, want %v", tt.email, tt.domainSuffix, got, tt.want)
+			}
+		})
+	}
+}
