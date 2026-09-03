@@ -942,7 +942,7 @@ type addAliasResponse struct {
 // hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
 // "@linux.com"), case-insensitively and tolerant of surrounding whitespace.
 func hasEmailDomainSuffix(email, domainSuffix string) bool {
-	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), domainSuffix)
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), strings.ToLower(strings.TrimSpace(domainSuffix)))
 }
 
 // AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
