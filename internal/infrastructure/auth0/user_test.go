@@ -921,6 +921,7 @@ type recordedCall struct {
 type fakeAuth0Transport struct {
 	primaryUserID string // decoded path id, e.g. "auth0|test123"
 	getUserResp   string // body for GET of the primary user
+	stubGetStatus int    // status for GET of any non-primary user (rollback stub, delete pre-flight)
 	stubGetResp   string // body for GET of the rollback stub
 	createStatus  int    // status for POST /api/v2/users
 	createResp    string // body for POST /api/v2/users
@@ -933,6 +934,7 @@ func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
 	return &fakeAuth0Transport{
 		primaryUserID: primaryUserID,
 		getUserResp:   getUserResp,
+		stubGetStatus: http.StatusOK,
 		stubGetResp:   `{"user_id":"email|stub123","identities":[{"connection":"email","provider":"email"}]}`,
 		createStatus:  http.StatusCreated,
 		createResp:    `{"user_id":"email|stub123"}`,
@@ -959,7 +961,7 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		body = f.getUserResp
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		// GET of any other user id is the rollback stub verification.
-		body = f.stubGetResp
+		status, body = f.stubGetStatus, f.stubGetResp
 	case req.Method == http.MethodPost && req.URL.Path == "/api/v2/users":
 		status, body = f.createStatus, f.createResp
 	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/identities"):
@@ -1359,5 +1361,141 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "email already linked")
+	})
+
+	t.Run("link failure rolls back the orphaned stub via the system-managed delete guard", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.linkStatus = http.StatusInternalServerError
+		// The rollback GET must see system_managed=true or the delete guard
+		// refuses, which would leave the DELETE call unasserted below.
+		ft.stubGetResp = `{"user_id":"email|stub123","app_metadata":{"system_managed":true}}`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to link email identity")
+
+		assert.Equal(t, []string{
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+			"GET /api/v2/users/email|stub123",
+			"DELETE /api/v2/users/email|stub123",
+		}, ft.methodPaths())
+	})
+}
+
+func TestUserReaderWriter_DeleteSystemManagedUser(t *testing.T) {
+	ctx := context.Background()
+	const m2mToken = "test-m2m-token"
+
+	t.Run("refuses to delete when app_metadata is missing", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123"}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("refuses to delete when system_managed is false", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","app_metadata":{"system_managed":false}}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("deletes when system_managed is true", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","app_metadata":{"system_managed":true}}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("treats a 404 on the pre-flight GET as already-gone", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetStatus = http.StatusNotFound
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
+		require.NoError(t, err)
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("surfaces an error when the pre-flight GET fails with a non-404 status", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetStatus = http.StatusInternalServerError
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteSystemManagedUser(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to verify system_managed before delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+}
+
+func TestUserReaderWriter_DeleteEmailConnectionStub(t *testing.T) {
+	ctx := context.Background()
+	const m2mToken = "test-m2m-token"
+
+	t.Run("refuses to delete when the stub has no identities", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","identities":[]}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("refuses to delete when an identity is not an email connection", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","identities":[{"connection":"google-oauth2","provider":"google-oauth2"}]}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("deletes when every identity is an email connection", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","identities":[{"connection":"email","provider":"email"}]}`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("treats a 404 on the pre-flight GET as already-gone", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetStatus = http.StatusNotFound
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
+		require.NoError(t, err)
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("surfaces an error when the pre-flight GET fails with a non-404 status", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetStatus = http.StatusInternalServerError
+		rw := newTestReaderWriter(ft)
+
+		err := rw.deleteEmailConnectionStub(ctx, "email|stub123", m2mToken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to verify email-connection stub before delete")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
 	})
 }

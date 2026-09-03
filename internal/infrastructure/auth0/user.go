@@ -628,8 +628,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 		httpclient.WithSensitiveBody(),
 	)
 
-	var linkedIdentities []any
-	statusCode, errLink := apiLink.Call(ctx, &linkedIdentities)
+	statusCode, errLink := apiLink.Call(ctx, nil)
 	if errLink != nil {
 		slog.ErrorContext(ctx, "failed to link email stub to primary user; attempting rollback",
 			"error", errLink,
