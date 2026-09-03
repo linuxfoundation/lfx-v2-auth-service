@@ -109,6 +109,9 @@ type mockUserServiceReader struct {
 	getUserFunc        func(ctx context.Context, user *model.User) (*model.User, error)
 	searchUserFunc     func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
 	metadataLookupFunc func(ctx context.Context, input string) (*model.User, error)
+	// capturedLookupScopes records the requiredScopes passed to the most recent
+	// MetadataLookup call, so tests can assert that write paths are scope-gated.
+	capturedLookupScopes []string
 }
 
 func (m *mockUserServiceReader) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
@@ -126,6 +129,8 @@ func (m *mockUserServiceReader) SearchUser(ctx context.Context, user *model.User
 }
 
 func (m *mockUserServiceReader) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
+	m.capturedLookupScopes = requiredScopes
+
 	if m.metadataLookupFunc != nil {
 		return m.metadataLookupFunc(ctx, input)
 	}
@@ -2332,6 +2337,48 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 				t.Errorf("error = %q, want %q", response.Error, tt.expectError)
 			}
 		})
+	}
+}
+
+// TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated guards the read/write
+// split: the link lookup must request the identity-update scope, exactly like the
+// unlink path. Scope-gated verification is restricted to the Management API
+// audience, so without this a token verified via a broader allow-listed audience
+// (e.g. the LFX v2 API audience) would pass verification here and still be
+// forwarded to the Auth0 Management API as the caller's bearer.
+func TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated(t *testing.T) {
+	ctx := context.Background()
+
+	linkRequest := &model.LinkIdentity{}
+	linkRequest.User.AuthToken = "some-auth-token"
+	linkRequest.LinkWith.IdentityToken = "some-identity-token"
+	messageData, err := json.Marshal(linkRequest)
+	if err != nil {
+		t.Fatalf("failed to marshal link request: %v", err)
+	}
+
+	reader := &mockUserServiceReader{
+		metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+			return &model.User{UserID: "auth0|user123"}, nil
+		},
+	}
+
+	orchestrator := NewMessageHandlerOrchestrator(
+		WithIdentityLinkerForMessageHandler(&mockIdentityLinker{
+			validateLinkRequestFunc: func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+			linkIdentityFunc:        func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+		}),
+		WithUserReaderForMessageHandler(reader),
+	)
+
+	if _, errLink := orchestrator.LinkIdentity(ctx, &mockTransportMessenger{data: messageData}); errLink != nil {
+		t.Fatalf("unexpected Go error: %v", errLink)
+	}
+
+	if len(reader.capturedLookupScopes) != 1 ||
+		reader.capturedLookupScopes[0] != constants.UserUpdateIdentityRequiredScope {
+		t.Errorf("MetadataLookup scopes = %v, want [%s]",
+			reader.capturedLookupScopes, constants.UserUpdateIdentityRequiredScope)
 	}
 }
 
