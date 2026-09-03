@@ -8,6 +8,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -26,7 +30,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      {{- if eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia" }}
+      {{- if or (eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia") .Values.provisioningConsumer.enabled }}
       serviceAccountName: {{ .Chart.Name }}
       {{- end }}
       containers:
@@ -47,6 +51,17 @@ spec:
           {{- end }}
           {{- with .Values.app.extraEnv }}
           {{- toYaml . | nindent 10 }}
+          {{- end }}
+          # Derived rather than configured, so the reader can never be on while
+          # the Lease permissions it needs are off. Emitted after extraEnv
+          # because a duplicate name later in the list is the one the container
+          # gets, which would otherwise let extraEnv switch the consumer on
+          # with none of the RBAC, ServiceAccount or bucket it depends on.
+          - name: PROVISIONING_CONSUMER_ENABLED
+            value: {{ .Values.provisioningConsumer.enabled | quote }}
+          {{- if .Values.provisioningConsumer.enabled }}
+          - name: PROVISIONING_CURSOR_BUCKET
+            value: {{ .Values.nats.provisioning_cursor_kv_bucket.name | quote }}
           {{- end }}
           {{- $otelServiceName := .Values.app.otel.serviceName | toString | trim }}
           {{- if ne $otelServiceName "" }}

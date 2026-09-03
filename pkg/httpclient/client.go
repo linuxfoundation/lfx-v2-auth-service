@@ -5,10 +5,12 @@ package httpclient
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,11 +41,63 @@ type Response struct {
 // RetryableError represents an error that can be retried
 type RetryableError struct {
 	StatusCode int
-	Message    string
+	// RawBody is the unsanitized upstream response body. It can echo submitted
+	// field values or identifiers, so it is deliberately kept out of Error() and
+	// must never be logged directly — parse it, or log StatusCode instead.
+	RawBody string
+	// Headers are the upstream response headers. Unlike RawBody they carry no
+	// submitted values, and a 429 answer is only actionable with the
+	// Retry-After among them.
+	Headers http.Header
 }
 
 func (e *RetryableError) Error() string {
-	return e.Message
+	return fmt.Sprintf("upstream returned status %d", e.StatusCode)
+}
+
+// ResponseBody returns the unsanitized upstream response body carried by err, or
+// "" if err is not a *RetryableError. It exists so callers can PARSE a provider
+// error payload (e.g. Auth0's "message"/"error" fields); the result is
+// unsanitized and must never be logged or returned to a caller verbatim.
+func ResponseBody(err error) string {
+	var retryable *RetryableError
+	if !stderrors.As(err, &retryable) {
+		return ""
+	}
+	return retryable.RawBody
+}
+
+// RetryAfter returns the wait an upstream asked for in the response that
+// produced err, or 0 when err carries no response or no usable hint.
+func RetryAfter(err error) time.Duration {
+	var retryable *RetryableError
+	if !stderrors.As(err, &retryable) {
+		return 0
+	}
+	return ParseRetryAfter(retryable.Headers)
+}
+
+// ParseRetryAfter reads Retry-After, which is either delta-seconds or an
+// HTTP-date. It returns 0 when the header is absent, unparseable, or already in
+// the past, so a caller can treat 0 as "the server named no wait" and fall back
+// to its own backoff rather than retrying at once.
+func ParseRetryAfter(header http.Header) time.Duration {
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if deadline, err := http.ParseTime(raw); err == nil {
+		if wait := time.Until(deadline); wait > 0 {
+			return wait
+		}
+	}
+	return 0
 }
 
 // Do executes an HTTP request with retry logic
@@ -78,7 +132,26 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 		}
 	}
 
-	slog.ErrorContext(ctx, "request failed", "error", lastErr)
+	if lastErr != nil {
+		if re, ok := lastErr.(*RetryableError); ok {
+			if re.StatusCode < http.StatusInternalServerError {
+				slog.DebugContext(ctx, "HTTP request completed with client status",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			} else {
+				slog.ErrorContext(ctx, "HTTP request failed with server error",
+					"status_code", re.StatusCode,
+					"method", req.Method,
+				)
+			}
+		} else {
+			slog.ErrorContext(ctx, "HTTP request failed",
+				"error", SanitizeError(lastErr),
+				"method", req.Method,
+			)
+		}
+	}
 
 	return nil, lastErr
 }
@@ -119,7 +192,8 @@ func (c *Client) doRequest(ctx context.Context, reqConfig Request) (*Response, e
 	if resp.StatusCode >= http.StatusBadRequest {
 		err := &RetryableError{
 			StatusCode: resp.StatusCode,
-			Message:    string(body),
+			RawBody:    string(body),
+			Headers:    resp.Header,
 		}
 		return response, err
 	}

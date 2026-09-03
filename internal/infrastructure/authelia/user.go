@@ -113,7 +113,7 @@ func (a *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to get existing user from storage",
 			"error", err,
-			"key", key,
+			"key", redaction.Redact(key),
 		)
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (a *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to get existing user from storage",
 			"error", err,
-			"key", key,
+			"key", redaction.Redact(key),
 		)
 		return nil, err
 	}
@@ -232,9 +232,9 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	existingUser, err := a.storage.GetUser(ctx, existingAutheliaUser.Username)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to get existing user from storage",
-			"username", user.Username,
+			"username", redaction.Redact(user.Username),
 			"error", err,
-			"key", existingAutheliaUser.Username,
+			"key", redaction.Redact(existingAutheliaUser.Username),
 		)
 		return nil, errs.NewUnexpected("failed to get existing user from storage", err)
 	}
@@ -245,7 +245,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		existingUser.Sub = user.Sub
 		subUpdated = true
 		slog.InfoContext(ctx, "updated user sub field in storage",
-			"username", user.Username,
+			"username", redaction.Redact(user.Username),
 			"sub", redaction.Redact(user.Sub),
 		)
 	}
@@ -264,7 +264,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		_, err = a.storage.SetUser(ctx, existingUser)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to update user in storage",
-				"username", user.Username,
+				"username", redaction.Redact(user.Username),
 				"error", err,
 			)
 			return nil, errs.NewUnexpected("failed to update user in storage", err)
@@ -272,7 +272,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	}
 
 	slog.InfoContext(ctx, "user updated successfully in storage",
-		"username", user.Username)
+		"username", redaction.Redact(user.Username))
 
 	return existingUser.User, nil
 }

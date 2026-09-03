@@ -12,13 +12,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 	"goa.design/clue/debug"
 	goahttp "goa.design/goa/v3/http"
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	authserver "github.com/linuxfoundation/lfx-v2-auth-service/gen/http/auth_service/server"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/middleware"
 )
 
 // handleHTTPServer starts the HTTP server for health check endpoints
@@ -38,6 +39,10 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	var mux goahttp.MiddlewareMuxer
 	{
 		mux = goahttp.NewMuxer()
+
+		// Register access logging middleware before any mounts so chi sees it
+		// for all routes.
+		mux.Use(middleware.AccessLogMiddleware())
 
 		// Register route-tagging middleware before any mounts so chi sees it
 		// for all routes. Reads RoutePattern after next.ServeHTTP because chi

@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/cases"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
@@ -45,12 +48,29 @@ type UserMetadata struct {
 	PhoneNumber        *string `json:"phone_number,omitempty" yaml:"phone_number,omitempty"`
 	TShirtSize         *string `json:"t_shirt_size,omitempty" yaml:"t_shirt_size,omitempty"`
 	Bio                *string `json:"bio,omitempty" yaml:"bio,omitempty"`
+	Skills             *string `json:"skills,omitempty" yaml:"skills,omitempty"`
 }
 
 // bioMaxLength is the maximum number of characters allowed in the About Me (bio)
 // field. Auth0 imposes no limit, so this is the chokepoint cap; longer values are
 // truncated during sanitization.
 const bioMaxLength = 2000
+
+// skillsMaxLength is the maximum number of characters allowed in the
+// comma-separated Skills string. Auth0 imposes no limit, so this is the
+// chokepoint cap; items that would not fit within it are dropped whole
+// during sanitization, and the first item is truncated only if no item
+// fits at all.
+const skillsMaxLength = 2000
+
+// skillsMaxCount is the maximum number of individual skill items allowed in
+// the comma-separated Skills string. Items beyond this count are dropped
+// during sanitization, before the length cap is applied.
+const skillsMaxCount = 50
+
+// skillsMaxRawLength bounds the raw Skills value before it is split into
+// items, so a delimiter-heavy payload can't force an oversized allocation.
+const skillsMaxRawLength = 4000
 
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
@@ -176,12 +196,117 @@ func (um *UserMetadata) userMetadataSanitize() {
 			*um.Bio = string(runes[:bioMaxLength])
 		}
 	}
+	if um.Skills != nil {
+		*um.Skills = sanitizeSkills(*um.Skills)
+	}
 	if um.Picture != nil {
 		*um.Picture = strings.TrimSpace(*um.Picture)
 	}
 	if um.Zoneinfo != nil {
 		*um.Zoneinfo = strings.TrimSpace(*um.Zoneinfo)
 	}
+}
+
+// sanitizeSkills normalizes a comma-separated Skills value: it trims and
+// bounds the raw input, splits on commas, trims and dedupes items via
+// Unicode case folding, and rejoins the survivors with ", ". Both length
+// guards below operate on whole items only, never mid-item, so an item that
+// doesn't fit is dropped entirely rather than stored as a partial fragment.
+// The one exception: if no item fits at all, the first item is hard-truncated
+// so the value isn't emptied entirely.
+func sanitizeSkills(raw string) string {
+	// Trim before bounding raw length, matching the Bio field's
+	// trim-then-cap order, so leading/trailing whitespace doesn't eat into
+	// the raw-length budget ahead of real content.
+	raw = strings.TrimSpace(raw)
+
+	// Bound the raw input before splitting so a delimiter-heavy payload
+	// can't force an oversized allocation ahead of the item-count cap.
+	// Walk runes directly rather than via []rune, which would itself
+	// allocate proportional to the full input and defeat the guard.
+	count := 0
+	truncated := false
+	cutOnDelimiter := false
+	for i, r := range raw {
+		if count == skillsMaxRawLength {
+			raw = raw[:i]
+			truncated = true
+			cutOnDelimiter = r == ','
+			break
+		}
+		count++
+	}
+	if truncated && !cutOnDelimiter {
+		// The cut landed mid-item (the excluded rune wasn't the delimiter
+		// right after a complete item); back off to the last complete item
+		// so a truncated fragment is never parsed as a real skill. If the
+		// cut landed inside the very first item, there is no prior comma
+		// and no complete item to keep, so discard the fragment entirely.
+		if j := strings.LastIndexByte(raw, ','); j >= 0 {
+			raw = raw[:j]
+		} else {
+			raw = ""
+		}
+	}
+
+	// Scan for commas manually instead of strings.Split, so a
+	// delimiter-heavy input stops at skillsMaxCount unique items without
+	// first building a slice of every segment.
+	cleaned := make([]string, 0, skillsMaxCount)
+	seen := make(map[string]struct{}, skillsMaxCount)
+	folder := cases.Fold()
+	for len(cleaned) < skillsMaxCount && raw != "" {
+		item := raw
+		if idx := strings.IndexByte(raw, ','); idx >= 0 {
+			item = raw[:idx]
+			raw = raw[idx+1:]
+		} else {
+			raw = ""
+		}
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		// Use Unicode case folding (not strings.ToLower) so that case
+		// variants like "Σ" and "ς" are recognized as duplicates.
+		key := folder.String(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, item)
+	}
+
+	// Build the joined value one whole item at a time so the length cap
+	// can never land inside an item: an item that doesn't fit whole is
+	// dropped entirely and the scan continues, so a later, shorter item
+	// still gets a chance to fit rather than being dropped along with the
+	// oversized one that preceded it. The only exception is when nothing
+	// fit at all, which hard-truncates the first item since there would
+	// otherwise be nothing to keep.
+	var b strings.Builder
+	used := 0
+	for _, item := range cleaned {
+		n := utf8.RuneCountInString(item)
+		sep := 0
+		if b.Len() > 0 {
+			sep = 2 // len(", ") in runes
+		}
+		if used+sep+n > skillsMaxLength {
+			continue // an item that doesn't fit is dropped whole
+		}
+		if sep > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(item)
+		used += sep + n
+	}
+	if b.Len() == 0 && len(cleaned) > 0 {
+		// Nothing fit whole; keep a truncated first item rather than
+		// emptying the field entirely.
+		b.WriteString(string([]rune(cleaned[0])[:skillsMaxLength]))
+	}
+	return b.String()
 }
 
 // Patch updates the UserMetadata with the update values only if the update values are not nil
@@ -269,6 +394,11 @@ func (a *UserMetadata) Patch(update *UserMetadata) bool {
 
 	if update.Bio != nil {
 		a.Bio = update.Bio
+		updated = true
+	}
+
+	if update.Skills != nil {
+		a.Skills = update.Skills
 		updated = true
 	}
 

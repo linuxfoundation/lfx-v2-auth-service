@@ -126,7 +126,7 @@ func (u *userReaderWriter) SearchUser(ctx context.Context, user *model.User, cri
 // GetUser fetches the full Auth0 user record by user_id.
 func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
 
-	slog.DebugContext(ctx, "getting user", "user_id", user.UserID)
+	slog.DebugContext(ctx, "getting user", "user_id", redaction.Redact(user.UserID))
 
 	if user.Token == "" {
 		slog.DebugContext(ctx, "getting M2M token",
@@ -162,24 +162,33 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	var auth0User *Auth0User
 	statusCode, errCall := apiRequest.Call(ctx, &auth0User)
 	if errCall != nil {
-		slog.ErrorContext(ctx, "failed to get user from Auth0",
-			"error", errCall,
-			"status_code", statusCode,
-			"user_id", user.UserID,
-		)
-		msg := u.errorResponse.ErrorMessage(errCall.Error())
+		if statusCode == http.StatusNotFound {
+			slog.DebugContext(ctx, "user not found in Auth0",
+				"status_code", statusCode,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		} else {
+			slog.ErrorContext(ctx, "failed to get user from Auth0",
+				"error", errCall,
+				"status_code", statusCode,
+				"user_id", redaction.Redact(user.UserID),
+			)
+		}
+		// Parse the provider payload for its human-readable message. Read the raw
+		// body rather than errCall.Error(), which is deliberately status-only.
+		msg := u.errorResponse.ErrorMessage(httpclient.ResponseBody(errCall))
 		return nil, httpclient.ErrorFromStatusCode(statusCode, msg)
 	}
 
 	if auth0User == nil {
-		slog.ErrorContext(ctx, "failed to get user from Auth0",
+		slog.DebugContext(ctx, "user not found in Auth0",
 			"status_code", statusCode,
-			"user_id", user.UserID,
+			"user_id", redaction.Redact(user.UserID),
 		)
 		return nil, errors.NewNotFound("user not found")
 	}
 
-	slog.DebugContext(ctx, "user retrieved successfully", "user_id", user.UserID)
+	slog.DebugContext(ctx, "user retrieved successfully", "user_id", redaction.Redact(user.UserID))
 
 	return auth0User.ToUser(), nil
 }
@@ -291,6 +300,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("update user metadata"),
 		httpclient.WithBody(updateRequest),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var auth0Response struct {
@@ -302,7 +312,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		slog.ErrorContext(ctx, "failed to update user in Auth0",
 			"error", errCall,
 			"status_code", statusCode,
-			"user_id", user.UserID,
+			"user_id", redaction.Redact(user.UserID),
 		)
 		return nil, errors.NewUnexpected("failed to update user in Auth0", errCall)
 	}
@@ -313,7 +323,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	}
 
 	slog.DebugContext(ctx, "user updated successfully",
-		"user_id", user.UserID,
+		"user_id", redaction.Redact(user.UserID),
 	)
 	return updatedUser, nil
 }
@@ -580,22 +590,24 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("create email stub user"),
 		httpclient.WithBody(createPayload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var stubUser Auth0User
 	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
 	if errCreate != nil {
+		if statusCode == http.StatusConflict {
+			slog.InfoContext(ctx, "email stub user already exists in Auth0",
+				"status_code", statusCode,
+				"email", redaction.RedactEmail(email),
+			)
+			return "", errors.NewValidation("email already linked")
+		}
 		slog.ErrorContext(ctx, "failed to create email stub user",
 			"error", errCreate,
 			"status_code", statusCode,
 			"email", redaction.RedactEmail(email),
 		)
-		// Auth0 returns 409 when the email is already registered on the
-		// connection. Surface this as a validation error so the handler can
-		// map it to alias_not_available instead of a generic infra failure.
-		if statusCode == http.StatusConflict {
-			return "", errors.NewValidation("email already linked")
-		}
 		return "", errors.NewUnexpected("failed to create email stub user", errCreate)
 	}
 
@@ -626,6 +638,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("link email stub to primary user"),
 		httpclient.WithBody(linkPayload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var linkedIdentities []any
@@ -827,6 +840,7 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("set primary email"),
 		httpclient.WithBody(payload),
+		httpclient.WithSensitiveBody(),
 	)
 
 	var patchResponse map[string]any
