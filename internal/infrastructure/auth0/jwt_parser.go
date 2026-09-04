@@ -27,7 +27,9 @@ type JWTVerificationConfig struct {
 	// ExpectedIssuer is the expected JWT issuer (e.g., "https://your-domain.auth0.com/")
 	ExpectedIssuer string
 	// ExpectedAudience is the Auth0 Management API audience. Tokens carrying it
-	// may be forwarded to the Management API on the user's behalf.
+	// may be forwarded to the Management API on the user's behalf. Required for
+	// scope-gated verification, which narrows to this audience and rejects the
+	// request when it is empty.
 	ExpectedAudience string
 	// ExpectedAudiences is the full audience allow-list for JWT verification
 	// (Management API plus, when configured, the LFX v2 API audience)
@@ -149,14 +151,7 @@ func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *ht
 				expectedAudience = override
 			}
 
-			// User-facing access tokens and impersonation tokens carry the LFX v2
-			// API audience rather than the Management API audience; accept it for
-			// verification when configured. Such tokens are never forwarded to the
-			// Management API (see MetadataLookup).
-			expectedAudiences := []string{expectedAudience}
-			if lfxAPIAudience := strings.TrimSpace(os.Getenv(constants.Auth0LFXv2APIAudienceEnvKey)); lfxAPIAudience != "" && lfxAPIAudience != expectedAudience {
-				expectedAudiences = append(expectedAudiences, lfxAPIAudience)
-			}
+			expectedAudiences := audienceAllowList(expectedAudience)
 
 			slog.InfoContext(ctx, "JWT signature verification enabled",
 				"issuer", expectedIssuer,
@@ -175,4 +170,22 @@ func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *ht
 	}
 
 	return nil, errors.NewUnexpected("no suitable RSA key found in JWKS for signature verification")
+}
+
+// audienceAllowList returns the audiences accepted for JWT verification.
+//
+// User-facing access tokens and impersonation tokens carry the LFX v2 API
+// audience rather than the Management API audience; accept it for verification
+// when configured. Such tokens are never forwarded to the Management API
+// (see MetadataLookup), and scope-gated verification narrows back to
+// managementAudience alone.
+func audienceAllowList(managementAudience string) []string {
+	audiences := []string{managementAudience}
+
+	lfxAPIAudience := strings.TrimSpace(os.Getenv(constants.Auth0LFXv2APIAudienceEnvKey))
+	if lfxAPIAudience != "" && lfxAPIAudience != managementAudience {
+		audiences = append(audiences, lfxAPIAudience)
+	}
+
+	return audiences
 }

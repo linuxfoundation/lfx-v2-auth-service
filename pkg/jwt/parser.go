@@ -380,10 +380,8 @@ func (o *ParseOptions) expectedAudiences() []string {
 
 // HasAudience reports whether the token's 'aud' claim contains the given audience
 func (c *Claims) HasAudience(audience string) bool {
-	for _, aud := range c.Audiences {
-		if aud == audience {
-			return true
-		}
+	if slices.Contains(c.Audiences, audience) {
+		return true
 	}
 	return c.Audience != "" && c.Audience == audience
 }

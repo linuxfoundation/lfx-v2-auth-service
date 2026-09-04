@@ -243,7 +243,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		}
 
 		slog.DebugContext(ctx, "JWT signature verification successful for metadata lookup",
-			"sub", user.Sub,
+			"sub", redaction.Redact(user.Sub),
 		)
 		return user, nil
 

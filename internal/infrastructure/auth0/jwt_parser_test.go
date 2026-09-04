@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"slices"
 	"testing"
 	"time"
 
@@ -428,5 +429,47 @@ func TestJWTVerify_ScopeGatedRequiresManagementAudience(t *testing.T) {
 	// Read-only (no scope): the allow-list still applies and the token verifies.
 	if _, errVerify := jwtVerify.JWTVerify(ctx, tokenString); errVerify != nil {
 		t.Errorf("expected read-only verification to succeed via the allow-list, got: %v", errVerify)
+	}
+}
+
+func TestAudienceAllowList(t *testing.T) {
+	const managementAudience = "https://example.auth0.com/api/v2/"
+
+	tests := []struct {
+		name           string
+		lfxAPIAudience string
+		expected       []string
+	}{
+		{
+			name:           "unset LFX API audience yields management audience only",
+			lfxAPIAudience: "",
+			expected:       []string{managementAudience},
+		},
+		{
+			name:           "whitespace-only LFX API audience is ignored",
+			lfxAPIAudience: "   ",
+			expected:       []string{managementAudience},
+		},
+		{
+			name:           "distinct LFX API audience is appended",
+			lfxAPIAudience: "https://api.lfx.dev",
+			expected:       []string{managementAudience, "https://api.lfx.dev"},
+		},
+		{
+			name:           "LFX API audience equal to management audience is not duplicated",
+			lfxAPIAudience: managementAudience,
+			expected:       []string{managementAudience},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(constants.Auth0LFXv2APIAudienceEnvKey, test.lfxAPIAudience)
+
+			audiences := audienceAllowList(managementAudience)
+			if !slices.Equal(audiences, test.expected) {
+				t.Errorf("expected audiences %v, got %v", test.expected, audiences)
+			}
+		})
 	}
 }
