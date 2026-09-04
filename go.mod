@@ -3,7 +3,9 @@
 
 module github.com/linuxfoundation/lfx-v2-auth-service
 
-go 1.25.14
+go 1.26.0
+
+toolchain go1.26.6
 
 require (
 	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
@@ -32,7 +34,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.2
 	goa.design/clue v1.2.3
 	goa.design/goa/v3 v3.23.3
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.41.0

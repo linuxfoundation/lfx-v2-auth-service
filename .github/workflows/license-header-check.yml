@@ -12,7 +12,7 @@ permissions:
 jobs:
   license-header-check:
     name: License Header Check
-    uses: linuxfoundation/lfx-public-workflows/.github/workflows/license-header-check.yml@main
+    uses: linuxfoundation/lfx-public-workflows/.github/workflows/license-header-check.yml@main  # zizmor: ignore[unpinned-uses] intentionally tracks main
     with:
       copyright_line: "Copyright The Linux Foundation and each contributor to LFX."
       exclude_pattern: "gen"
