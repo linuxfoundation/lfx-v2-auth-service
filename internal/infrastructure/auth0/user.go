@@ -225,12 +225,25 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		}
 
 		// Successfully verified JWT token
-		user.Token = cleanToken
 		user.UserID = claims.Subject
 		user.Sub = claims.Subject
 
+		// Only tokens minted for the Auth0 Management API may be forwarded to it
+		// on the user's behalf. Tokens verified via another allow-listed audience
+		// (e.g. the LFX v2 API audience used by user-facing access and impersonation
+		// tokens) leave user.Token empty, so read lookups fall back to the service's
+		// M2M credentials while write flows — which require the user's own
+		// management-scoped token — fail closed.
+		if claims.HasAudience(u.config.JWTVerificationConfig.ExpectedAudience) {
+			user.Token = cleanToken
+		} else {
+			slog.DebugContext(ctx, "non-management-audience token verified; using M2M credentials for lookup",
+				"sub", redaction.Redact(user.Sub),
+			)
+		}
+
 		slog.DebugContext(ctx, "JWT signature verification successful for metadata lookup",
-			"sub", user.Sub,
+			"sub", redaction.Redact(user.Sub),
 		)
 		return user, nil
 

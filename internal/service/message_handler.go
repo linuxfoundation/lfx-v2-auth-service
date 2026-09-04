@@ -663,7 +663,7 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		return m.errorResponse(errValidateLinkRequest.Error()), nil
 	}
 
-	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken)
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
 	}
