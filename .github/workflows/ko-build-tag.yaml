@@ -49,6 +49,12 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+          # Disabled only here: this workflow runs on tag pushes (release
+          # artifact publishing), which zizmor's cache-poisoning audit flags
+          # for setup-go's default caching. ko-build-branch.yaml (pull_request)
+          # and ko-build-main.yaml (push to main) don't share that trigger
+          # profile, so they aren't flagged and keep default caching.
+          cache: false
 
       - name: Setup Ko
         uses: ko-build/setup-ko@d982fec422852203cfb2053a8ec6ad302280d04d # v0.8
