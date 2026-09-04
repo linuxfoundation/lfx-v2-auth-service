@@ -49,7 +49,6 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-          cache: false
 
       - name: Setup Ko
         uses: ko-build/setup-ko@d982fec422852203cfb2053a8ec6ad302280d04d # v0.8
@@ -169,7 +168,7 @@ jobs:
         with:
           client-id: ${{ env.TRIGGER_CLIENT_ID }}
           private-key: ${{ env.TRIGGER_PRIVATE_KEY }}
-          owner: linuxfoundation  # zizmor: ignore[github-app] repositories below already scopes this token; false positive in zizmor <1.26 (docs.zizmor.sh/audits/#github-app)
+          owner: linuxfoundation  # zizmor: ignore[github-app] repositories below already scope this token; false positive in zizmor <1.26 (docs.zizmor.sh/audits/#github-app)
           repositories: lfx-v2-argocd
           permission-actions: write
 
