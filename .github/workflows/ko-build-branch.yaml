@@ -20,6 +20,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      # checkout/setup-go versions here predate this workflow's SHA-pinning
+      # pass and differ from ko-build-main.yaml/ko-build-tag.yaml (which were
+      # already on newer floating tags); pinned as-is rather than bumped, to
+      # avoid another undocumented dependency change in the same pass.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
         with:
           persist-credentials: false

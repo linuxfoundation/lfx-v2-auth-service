@@ -9,7 +9,7 @@ The LFX v2 Auth Service provides authentication and profile access in the v2 Pla
 The service operates as a NATS-based microservice, responding to request/reply patterns on specific subjects.
 
 ### Prerequisites
-- Go 1.24.5+
+- Go 1.26.0+
 - NATS server
 - Auth0 configuration (optional, defaults to mock mode)
 - Kubernetes cluster (for local Authelia development setup)
