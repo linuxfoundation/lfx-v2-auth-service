@@ -289,7 +289,7 @@ func sanitizeSkills(raw string) string {
 	for _, item := range cleaned {
 		n := utf8.RuneCountInString(item)
 		sep := 0
-		if b.Len() > 0 {
+		if used > 0 {
 			sep = 2 // len(", ") in runes
 		}
 		if used+sep+n > skillsMaxLength {
@@ -301,7 +301,7 @@ func sanitizeSkills(raw string) string {
 		b.WriteString(item)
 		used += sep + n
 	}
-	if b.Len() == 0 && len(cleaned) > 0 {
+	if used == 0 && len(cleaned) > 0 {
 		// Nothing fit whole; keep a truncated first item rather than
 		// emptying the field entirely.
 		b.WriteString(string([]rune(cleaned[0])[:skillsMaxLength]))
