@@ -40,5 +40,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
           REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
+          # Allow GITHUB_TOKEN so zizmor's artipacked audit can query the GitHub
+          # API for action tags instead of failing unauthenticated.
+          ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
           # container uses GOTOOLCHAIN=local
           GOTOOLCHAIN: auto
