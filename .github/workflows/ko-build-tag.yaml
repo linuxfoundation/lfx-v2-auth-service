@@ -28,15 +28,17 @@ jobs:
       chart_version: ${{ steps.prepare.outputs.chart_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Prepare versions and chart name
         id: prepare
         run: |
           set -euo pipefail
-          APP_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
+          APP_VERSION="${GITHUB_REF_NAME#v}"
           CHART_NAME="$(yq '.name' charts/*/Chart.yaml)"
-          CHART_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
           {
             echo "app_version=$APP_VERSION"
             echo "chart_name=$CHART_NAME"
@@ -44,12 +46,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Setup Ko
-        uses: ko-build/setup-ko@v0.8
+        uses: ko-build/setup-ko@d982fec422852203cfb2053a8ec6ad302280d04d # v0.8
         with:
           version: v0.17.1
 
@@ -57,6 +60,7 @@ jobs:
         env:
           VERSION: ${{ steps.prepare.outputs.app_version }}
           GIT_COMMIT: ${{ github.sha }}
+          STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         run: |
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
@@ -65,8 +69,8 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.ref_name }} \
-            -t ${{ steps.prepare.outputs.app_version }} \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
             -t latest \
             --sbom spdx
 
@@ -82,7 +86,9 @@ jobs:
       image_name: ${{ steps.publish-ghcr.outputs.image_name }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Publish Chart to GHCR
         id: publish-ghcr
@@ -112,9 +118,11 @@ jobs:
       - name: Sign the Helm chart in GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEPS_PUBLISH_GHCR_OUTPUTS_IMAGE_NAME: ${{ steps.publish-ghcr.outputs.image_name }}
+          STEPS_PUBLISH_GHCR_OUTPUTS_DIGEST: ${{ steps.publish-ghcr.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign sign --yes '${{ steps.publish-ghcr.outputs.image_name }}@${{ steps.publish-ghcr.outputs.digest }}'
+          cosign sign --yes "${STEPS_PUBLISH_GHCR_OUTPUTS_IMAGE_NAME}@${STEPS_PUBLISH_GHCR_OUTPUTS_DIGEST}"
 
   create-ghcr-helm-provenance:
     needs:
@@ -123,7 +131,7 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       image: ${{ needs.release-helm-chart.outputs.image_name }}
       digest: ${{ needs.release-helm-chart.outputs.digest }}
