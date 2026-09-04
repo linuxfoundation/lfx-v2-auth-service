@@ -169,7 +169,7 @@ jobs:
         with:
           client-id: ${{ env.TRIGGER_CLIENT_ID }}
           private-key: ${{ env.TRIGGER_PRIVATE_KEY }}
-          owner: linuxfoundation
+          owner: linuxfoundation  # zizmor: ignore[github-app] repositories below already scopes this token; false positive in zizmor <1.26 (docs.zizmor.sh/audits/#github-app)
           repositories: lfx-v2-argocd
           permission-actions: write
 
