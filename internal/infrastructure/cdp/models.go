@@ -92,11 +92,43 @@ const (
 	OutcomeConflict Outcome = "conflict"
 )
 
+// ConflictReason distinguishes the two resolve-409 shapes CDP returns. Both
+// carry `code: "CONFLICT"`; only `message` differs, so the reason is keyed
+// on the message and pinned by a contract test until CDP exposes a stable
+// code or `context.reason`.
+type ConflictReason string
+
+const (
+	// ConflictReasonUnknown: a 409 with no body, or a message this client
+	// does not recognise. Callers treat it as the generic conflict.
+	ConflictReasonUnknown ConflictReason = ""
+
+	// ConflictReasonMultipleMatches: the identifiers matched several members
+	// ("Multiple member profiles matched"). Only CDP can merge them.
+	ConflictReasonMultipleMatches ConflictReason = "multiple-matches"
+
+	// ConflictReasonForeignLFID: the unique match holds verified LFIDs and
+	// none is the caller's ("Member holds a different LFID", live since
+	// linuxfoundation/crowd.dev#4574). The stored member belongs to someone
+	// else; neither login nor provisioning will ever correct it.
+	ConflictReasonForeignLFID ConflictReason = "foreign-lfid"
+)
+
 // ResolveResult is the outcome of a resolve call. MemberID is set only when
-// Outcome is OutcomeFound.
+// Outcome is OutcomeFound; ConflictReason only when Outcome is
+// OutcomeConflict.
 type ResolveResult struct {
-	Outcome  Outcome
-	MemberID string
+	Outcome        Outcome
+	MemberID       string
+	ConflictReason ConflictReason
+}
+
+// resolveConflictResponse is the 409 body for POST /v1/members/resolve.
+type resolveConflictResponse struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // CreateResult is the outcome of a create call. MemberID is set only when

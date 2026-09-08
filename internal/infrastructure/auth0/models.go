@@ -38,12 +38,14 @@ type Auth0AppMetadata struct {
 	SystemManaged bool `json:"system_managed,omitempty"`
 
 	// CDPUUID is the user's resolved CDP member id. Once set it is permanent:
-	// absent to present is the only legal transition.
+	// absent to present is the only legal transition, except the scheduled
+	// merge-repair job's compare-and-swap overwrite.
 	CDPUUID string `json:"cdp_uuid,omitempty"`
 
 	// CDPUUIDSource records which path produced the record — one of
-	// `backfill`, `login-resolve`, or `provisioning`. It is present even when
-	// no member was found, which is what marks a user as already checked.
+	// `backfill`, `login-resolve`, `provisioning`, or `merge-repair`. It is
+	// present even when no member was found, which is what marks a user as
+	// already checked.
 	CDPUUIDSource string `json:"cdp_uuid_source,omitempty"`
 
 	// CDPUUIDCheckedAt is the RFC3339 timestamp of the last CDP check.

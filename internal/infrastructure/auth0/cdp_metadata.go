@@ -55,9 +55,8 @@ type cdpMetadataWriter struct {
 	config     Config
 }
 
-// NewCDPMetadataWriter creates the Auth0 `app_metadata` writer for the CDP
-// enrichment keys.
-func NewCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) (port.CDPMetadataReaderWriter, error) {
+// newCDPMetadataWriter validates and builds the shared concrete writer.
+func newCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) (*cdpMetadataWriter, error) {
 	if auth0Config.M2MTokenManager == nil {
 		return nil, errors.NewUnexpected("M2M token manager is required")
 	}
@@ -69,6 +68,20 @@ func NewCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) (por
 		httpClient: httpclient.NewClient(httpConfig),
 		config:     auth0Config,
 	}, nil
+}
+
+// NewCDPMetadataWriter creates the Auth0 `app_metadata` writer for the CDP
+// enrichment keys.
+func NewCDPMetadataWriter(httpConfig httpclient.Config, auth0Config Config) (port.CDPMetadataReaderWriter, error) {
+	return newCDPMetadataWriter(httpConfig, auth0Config)
+}
+
+// NewCDPMetadataRepairWriter creates the scoped repair writer for the
+// merge-repair job's compare-and-swap. It shares the concrete writer — and
+// its token-before-read ordering — with NewCDPMetadataWriter; only the
+// reachable interface is narrower.
+func NewCDPMetadataRepairWriter(httpConfig httpclient.Config, auth0Config Config) (port.CDPMetadataRepairer, error) {
+	return newCDPMetadataWriter(httpConfig, auth0Config)
 }
 
 // ReadCDPMetadata returns the user's current CDP enrichment record.
@@ -242,6 +255,83 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 		}
 	}
 
+	return w.patchCDPMetadata(ctx, token, userID, record, "write", "wrote")
+}
+
+// isValidCDPSource reports whether source is one of the values the write-once
+// path may stamp. merge-repair is deliberately absent: only the repair path
+// writes it, and it enforces that itself.
+func isValidCDPSource(source string) bool {
+	switch source {
+	case constants.CDPUUIDSourceBackfill,
+		constants.CDPUUIDSourceLoginResolve,
+		constants.CDPUUIDSourceProvisioning:
+		return true
+	}
+	return false
+}
+
+// WriteCDPMetadataRepair overwrites a stored `cdp_uuid` if and only if the
+// stored value still matches from — the merge-repair job's compare-and-swap.
+//
+// Unlike WriteCDPMetadata it requires a stored value to replace (there is
+// nothing to repair on an empty record). Both sides are case-folded to
+// lowercase UUIDs per repo convention (provisioning and the login Action both
+// store lowercase; the walker lowercases at ingestion), so a legacy
+// mixed-case value still CAS-matches instead of failing into `errors` on
+// every run. A from that matches nothing — e.g. a mid-run login write —
+// fails loud here rather than being clobbered. A record UUID identical to
+// from, or any source but merge-repair, is a validation error.
+// Token-before-read ordering matches WriteCDPMetadata so the race window
+// stays one round trip.
+func (w *cdpMetadataWriter) WriteCDPMetadataRepair(ctx context.Context, userID, from string, record port.CDPMetadata) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+	from = strings.ToLower(strings.TrimSpace(from))
+	if from == "" {
+		return errors.NewValidation("expected stored cdp_uuid (from) is required")
+	}
+	if record.Source != constants.CDPUUIDSourceMergeRepair {
+		return errors.NewValidation("repair writes carry cdp_uuid_source merge-repair only")
+	}
+	record.UUID = strings.ToLower(strings.TrimSpace(record.UUID))
+	if record.UUID == "" {
+		return errors.NewValidation("repair record UUID is required")
+	}
+	if record.UUID == from {
+		return errors.NewValidation("repair must change the stored cdp_uuid")
+	}
+
+	// Fetched before the read so a cold token cache cannot stretch the gap
+	// between the compare and the patch it guards.
+	token, errToken := w.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token to write CDP metadata", errToken)
+	}
+
+	existing, err := w.ReadCDPMetadata(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(existing.UUID), from) {
+		slog.ErrorContext(ctx, "rejected stale merge-repair overwrite",
+			"user_id", redaction.Redact(userID),
+			"cdp_uuid_write_rejected", true,
+			"reason", "cas-mismatch",
+		)
+		return errors.NewConflict("stored cdp_uuid changed since classification; repair refused")
+	}
+
+	return w.patchCDPMetadata(ctx, token, userID, record, "repair", "repaired")
+}
+
+// patchCDPMetadata PATCHes exactly the record's keys: a partial update built
+// fresh, never merged from a prior read. op/opPast name the operation for
+// logs and the Management client description ("write"/"wrote",
+// "repair"/"repaired"). A 429 is reported bare for the caller to wait out.
+func (w *cdpMetadataWriter) patchCDPMetadata(ctx context.Context, token, userID string, record port.CDPMetadata, op, opPast string) error {
 	checkedAt := record.CheckedAt
 	if strings.TrimSpace(checkedAt) == "" {
 		checkedAt = time.Now().UTC().Format(time.RFC3339)
@@ -262,7 +352,7 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 		httpclient.WithMethod(http.MethodPatch),
 		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", w.config.Domain, url.PathEscape(userID))),
 		httpclient.WithToken(token),
-		httpclient.WithDescription("write CDP app_metadata"),
+		httpclient.WithDescription(op+" CDP app_metadata"),
 		httpclient.WithBody(patch),
 		httpclient.WithSensitiveBody(),
 	)
@@ -271,32 +361,21 @@ func (w *cdpMetadataWriter) WriteCDPMetadata(ctx context.Context, userID string,
 	statusCode, errCall := request.Call(ctx, &patchResponse)
 	if errCall != nil {
 		if statusCode == http.StatusTooManyRequests {
-			return managementRateLimited(ctx, "app_metadata write", errCall)
+			return managementRateLimited(ctx, "app_metadata "+op, errCall)
 		}
-		slog.ErrorContext(ctx, "failed to write CDP app_metadata",
+		slog.ErrorContext(ctx, "failed to "+op+" CDP app_metadata",
 			"error", errCall,
 			"status_code", statusCode,
 			"user_id", redaction.Redact(userID),
 		)
-		return errors.NewUnexpected("failed to write CDP app_metadata", errCall)
+		return errors.NewUnexpected("failed to "+op+" CDP app_metadata", errCall)
 	}
 
-	slog.InfoContext(ctx, "wrote CDP app_metadata",
+	slog.InfoContext(ctx, opPast+" CDP app_metadata",
 		"user_id", redaction.Redact(userID),
 		"cdp_uuid_source", record.Source,
 		"has_uuid", record.UUID != "",
 	)
 
 	return nil
-}
-
-// isValidCDPSource reports whether source is one of the three allowed values.
-func isValidCDPSource(source string) bool {
-	switch source {
-	case constants.CDPUUIDSourceBackfill,
-		constants.CDPUUIDSourceLoginResolve,
-		constants.CDPUUIDSourceProvisioning:
-		return true
-	}
-	return false
 }

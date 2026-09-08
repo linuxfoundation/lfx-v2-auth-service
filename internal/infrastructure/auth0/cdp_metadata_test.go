@@ -78,8 +78,8 @@ func (c *cdpMetadataTransport) patches() []cdpRecordedRequest {
 	return out
 }
 
-func newTestCDPWriter(transport http.RoundTripper) port.CDPMetadataReaderWriter {
-	writer, err := NewCDPMetadataWriter(
+func newTestCDPWriter(transport http.RoundTripper) *cdpMetadataWriter {
+	writer, err := newCDPMetadataWriter(
 		httpclient.Config{Transport: transport, MaxRetries: 0},
 		Config{
 			Domain:          "test-tenant.auth0.com",
@@ -361,4 +361,95 @@ func TestCDPMetadataRateLimit(t *testing.T) {
 		require.ErrorAs(t, err, &rateLimited)
 		assert.Zero(t, rateLimited.RetryAfter)
 	})
+}
+
+func TestWriteCDPMetadataRepair(t *testing.T) {
+	ctx := context.Background()
+	repairRecord := func(uuid string) port.CDPMetadata {
+		return port.CDPMetadata{
+			UUID:      uuid,
+			Source:    constants.CDPUUIDSourceMergeRepair,
+			CheckedAt: "2026-09-08T00:00:00Z",
+		}
+	}
+
+	t.Run("exact from to to succeeds and stamps merge-repair", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"uuid-stale","cdp_uuid_source":"provisioning"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", repairRecord("uuid-fresh"))
+		require.NoError(t, err)
+		patches := transport.patches()
+		require.Len(t, patches, 1, "one partial-key patch, nothing else")
+		assert.Contains(t, patches[0].body, "uuid-fresh")
+		assert.Contains(t, patches[0].body, constants.CDPUUIDSourceMergeRepair)
+		assert.NotContains(t, patches[0].body, "uuid-stale")
+	})
+
+	t.Run("stale from is refused and writes nothing", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"uuid-current"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", repairRecord("uuid-fresh"))
+		var conflict errors.Conflict
+		require.ErrorAs(t, err, &conflict, "a mid-run login write must not be clobbered")
+		assert.Empty(t, transport.patches())
+	})
+
+	t.Run("nothing stored is refused and writes nothing", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", repairRecord("uuid-fresh"))
+		var conflict errors.Conflict
+		require.ErrorAs(t, err, &conflict)
+		assert.Empty(t, transport.patches())
+	})
+
+	t.Run("empty from is a validation error", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"uuid-stale"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "", repairRecord("uuid-fresh"))
+		require.Error(t, err)
+		assert.Empty(t, transport.patches())
+	})
+
+	t.Run("repair to the same value is a validation error", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"uuid-stale"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", repairRecord("uuid-stale"))
+		require.Error(t, err, "a repair must change the UUID or it is a wasted user.updated event")
+		assert.Empty(t, transport.patches())
+	})
+
+	t.Run("non-merge-repair source is a validation error", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"uuid-stale"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", port.CDPMetadata{
+			UUID:   "uuid-fresh",
+			Source: constants.CDPUUIDSourceProvisioning,
+		})
+		require.Error(t, err, "the repair path carries merge-repair provenance only")
+		assert.Empty(t, transport.patches())
+	})
+}
+
+func TestWriteCDPMetadataRepairCaseFolding(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("legacy mixed-case stored value still CAS-matches and writes lowercase", func(t *testing.T) {
+		transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{"cdp_uuid":"UUID-STALE","cdp_uuid_source":"login-resolve"}}`}
+		err := newTestCDPWriter(transport).WriteCDPMetadataRepair(ctx, "auth0|1", "uuid-stale", port.CDPMetadata{
+			UUID:   "UUID-FRESH",
+			Source: constants.CDPUUIDSourceMergeRepair,
+		})
+		require.NoError(t, err, "case must not turn a repair into a perpetual error")
+		patches := transport.patches()
+		require.Len(t, patches, 1)
+		assert.Contains(t, patches[0].body, "uuid-fresh")
+		assert.NotContains(t, patches[0].body, "UUID-FRESH")
+	})
+}
+
+func TestWriteOncePathRefusesRepairProvenance(t *testing.T) {
+	// Only the CAS repair path may stamp merge-repair; the write-once path
+	// must not be able to fake that provenance.
+	transport := &cdpMetadataTransport{getBody: `{"user_id":"auth0|1","app_metadata":{}}`}
+	err := newTestCDPWriter(transport).WriteCDPMetadata(context.Background(), "auth0|1", port.CDPMetadata{
+		UUID:   "uuid-1",
+		Source: constants.CDPUUIDSourceMergeRepair,
+	})
+	require.Error(t, err)
+	assert.Empty(t, transport.patches())
 }

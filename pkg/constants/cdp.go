@@ -38,6 +38,10 @@ const (
 
 	// CDPUUIDSourceProvisioning marks a value written by the provisioning flow.
 	CDPUUIDSourceProvisioning = "provisioning"
+
+	// CDPUUIDSourceMergeRepair marks a value written by the scheduled
+	// merge-repair job's compare-and-swap overwrite.
+	CDPUUIDSourceMergeRepair = "merge-repair"
 )
 
 // CDP environment variable keys.

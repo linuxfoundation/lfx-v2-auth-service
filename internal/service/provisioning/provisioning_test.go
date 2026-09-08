@@ -671,6 +671,23 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls)
 	})
 
+	t.Run("a resolve 409 naming a foreign LFID keeps the foreign-holder signal", func(t *testing.T) {
+		// crowd.dev#4574 moved this refusal from the identities read to the
+		// resolve itself; the skip reason must not collapse into the generic
+		// conflict or the cross-person-merge count goes dark.
+		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeConflict, ConflictReason: cdp.ConflictReasonForeignLFID}}}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberHoldsForeignLFID, result.Reason)
+		assert.Zero(t, client.createCalls)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls)
+	})
+
 	t.Run("a resolve failure surfaces as an error so the event is retried", func(t *testing.T) {
 		client := &mockCDPClient{resolveErr: assert.AnError}
 		store := &mockMetadataStore{}
