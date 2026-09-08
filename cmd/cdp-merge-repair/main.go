@@ -328,11 +328,16 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		// No holders, no artifact: emit the failure tally anyway so the
 		// scheduled run still reports walk_complete:false on the sink
 		// instead of leaving only a log line. Counters stay zero — nobody
-		// was examined — and the returned error still drives exit 1.
+		// was examined — the warning names the cause, and the returned
+		// error still drives exit 1. Walk errors are page-level status and
+		// bounds, safe for the stdout sink verbatim.
 		out.Run.FinishedAt = time.Now().UTC()
 		out.Run.WalkComplete = false
 		out.DurationSeconds = time.Since(started).Seconds()
-		_ = writeTally(out, opts.outPath, deps.stdout)
+		out.EnumerationWarnings = append(out.EnumerationWarnings, checkError{Message: errMessage(err)})
+		if werr := writeTally(out, opts.outPath, deps.stdout); werr != nil {
+			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
+		}
 		return 1, err
 	}
 	if opts.limit > 0 && len(population) > opts.limit {

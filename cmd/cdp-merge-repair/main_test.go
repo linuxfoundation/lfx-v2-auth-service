@@ -404,6 +404,9 @@ func TestRunEnumerationFailureStillEmitsATally(t *testing.T) {
 	assert.False(t, out.Run.WalkComplete)
 	assert.Zero(t, out.Counters.Examined, "nobody was examined, so no counter may claim otherwise")
 	assert.Equal(t, "dry-run", out.Run.Mode)
+	require.Len(t, out.EnumerationWarnings, 1, "the tally must name the cause, not just report incompleteness")
+	assert.Contains(t, out.EnumerationWarnings[0].Message, "management walk failed")
+	assert.Empty(t, out.EnumerationWarnings[0].UserID)
 }
 
 func TestExitCode(t *testing.T) {
