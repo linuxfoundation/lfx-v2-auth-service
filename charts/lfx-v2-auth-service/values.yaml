@@ -73,6 +73,8 @@ mergeRepair:
   enabled: false
   # schedule is the off-peak start (UTC). The walk itself runs most of the day.
   schedule: "30 2 * * *"
+  # timeZone pins the schedule above; the off-peak window is defined in UTC.
+  timeZone: "UTC"
   dryRun: true
   # rate is the CDP calls-per-minute ceiling; every resolve and identity
   # read takes one slot.

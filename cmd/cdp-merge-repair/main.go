@@ -312,14 +312,6 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	}
 
 	started := time.Now()
-	population, malformed, err := deps.list(ctx)
-	if err != nil {
-		return 1, err
-	}
-	if opts.limit > 0 && len(population) > opts.limit {
-		population = population[:opts.limit]
-	}
-
 	out := tallyReport{
 		Repairs:             []repairRecord{},
 		ErrorSamples:        []checkError{},
@@ -330,6 +322,22 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	out.Run.Limit = opts.limit
 	out.Run.Prefilter = !opts.noPrefilter
 	out.Run.StartedAt = started.UTC()
+
+	population, malformed, err := deps.list(ctx)
+	if err != nil {
+		// No holders, no artifact: emit the failure tally anyway so the
+		// scheduled run still reports walk_complete:false on the sink
+		// instead of leaving only a log line. Counters stay zero — nobody
+		// was examined — and the returned error still drives exit 1.
+		out.Run.FinishedAt = time.Now().UTC()
+		out.Run.WalkComplete = false
+		out.DurationSeconds = time.Since(started).Seconds()
+		_ = writeTally(out, opts.outPath, deps.stdout)
+		return 1, err
+	}
+	if opts.limit > 0 && len(population) > opts.limit {
+		population = population[:opts.limit]
+	}
 
 	for _, userID := range malformed {
 		// A user whose stored value cannot even be read is never assumed to

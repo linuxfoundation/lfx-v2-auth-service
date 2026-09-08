@@ -306,6 +306,29 @@ func (s *aliasTargetClient) ListIdentities(ctx context.Context, memberID string)
 	return nil, cdp.ErrMemberNotFound
 }
 
+func TestTallyRedactedKeepsIdentifiersOutOfLogs(t *testing.T) {
+	out := tallyReport{
+		Repairs:             []repairRecord{{UserID: "auth0|johndoe123", Before: "d6f4a060-f818-4fab-bf36-73032634fe7c", After: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}},
+		ErrorSamples:        []checkError{{UserID: "auth0|janedoe456", Message: "boom"}},
+		EnumerationWarnings: []checkError{{UserID: "google-oauth2|1234567890", Message: "malformed"}},
+	}
+	out.Counters.Add(mergerepair.VerdictRepaired)
+
+	raw, err := json.Marshal(out.redacted())
+	require.NoError(t, err)
+	for _, secret := range []string{"johndoe123", "janedoe456", "1234567890", "d6f4a060-f818", "0a1b2c3d-4e5f"} {
+		assert.NotContains(t, string(raw), secret)
+	}
+	assert.Contains(t, string(raw), `"identifiers_redacted":true`)
+	assert.Contains(t, string(raw), `"repaired":1`, "counters survive redaction")
+	assert.Contains(t, string(raw), `"message":"boom"`, "diagnostics survive redaction")
+
+	full, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(full), "auth0|johndoe123", "the --out copy stays actionable")
+	assert.Contains(t, string(full), `"identifiers_redacted":false`)
+}
+
 func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
 	// One would-repair, one classification error, one malformed holder: every
 	// slice that can carry an identifier is populated, then the run writes to
@@ -360,6 +383,27 @@ func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
 	assert.Contains(t, string(raw), "auth0|johndoe123", "the --out copy stays actionable")
 	assert.Contains(t, string(raw), "0a1b2c3d-4e5f-6789-abcd-ef0123456789")
 	assert.Contains(t, string(raw), `"identifiers_redacted": false`)
+}
+
+func TestRunEnumerationFailureStillEmitsATally(t *testing.T) {
+	ctx := context.Background()
+	var stdout bytes.Buffer
+	deps := repairDeps{
+		client: &stubCDPClient{},
+		writer: &stubWriter{},
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return nil, nil, errors.New("management walk failed")
+		},
+		stdout: &stdout,
+	}
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true})
+	require.Error(t, err)
+	assert.Equal(t, 1, code)
+	var out tallyReport
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &out), "an enumeration failure must still leave the JSON artifact on the sink")
+	assert.False(t, out.Run.WalkComplete)
+	assert.Zero(t, out.Counters.Examined, "nobody was examined, so no counter may claim otherwise")
+	assert.Equal(t, "dry-run", out.Run.Mode)
 }
 
 func TestExitCode(t *testing.T) {

@@ -16,6 +16,9 @@ spec:
   # Off-peak start; the walk itself overlaps the consumer most of the day by
   # construction, so separation is by rate cap, not timing.
   schedule: {{ .Values.mergeRepair.schedule | quote }}
+  # Pinned: without this the schedule runs in the kube-controller-manager's
+  # local time, and a non-UTC control plane would miss the off-peak window.
+  timeZone: {{ .Values.mergeRepair.timeZone | quote }}
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
