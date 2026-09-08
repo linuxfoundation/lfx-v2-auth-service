@@ -30,6 +30,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -258,11 +259,14 @@ func writeRepairWithRetry(ctx context.Context, writer port.CDPMetadataRepairer, 
 	}
 }
 
-// repairDeps carries the seams run needs; tests substitute stubs for all three.
+// repairDeps carries the seams run needs; tests substitute stubs for all of
+// them. stdout is the redacted tally sink when --out is unset; nil means
+// os.Stdout.
 type repairDeps struct {
 	client cdp.Client
 	writer port.CDPMetadataRepairer
 	list   func(context.Context) ([]holderUser, []string, error)
+	stdout io.Writer
 }
 
 // repairOptions mirrors the CLI flags.
@@ -373,7 +377,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	}
 	out.Totals.NoWrite = out.Counters.Examined - out.Totals.Touched
 
-	if err := writeTally(out, opts.outPath); err != nil {
+	if err := writeTally(out, opts.outPath, deps.stdout); err != nil {
 		return 1, err
 	}
 
@@ -471,7 +475,7 @@ func buildRepairDeps(ctx context.Context) (repairDeps, error) {
 // writeTally writes the tally to outPath (0600, unredacted) or, when unset,
 // to stdout with identifiers redacted: stdout is the pod log stream, which
 // has broader access and no per-record deletion path.
-func writeTally(out tallyReport, outPath string) error {
+func writeTally(out tallyReport, outPath string, stdout io.Writer) error {
 	if outPath == "" {
 		out = out.redacted()
 	}
@@ -481,7 +485,10 @@ func writeTally(out tallyReport, outPath string) error {
 	}
 	encoded = append(encoded, '\n')
 	if outPath == "" {
-		_, err = os.Stdout.Write(encoded)
+		if stdout == nil {
+			stdout = os.Stdout
+		}
+		_, err = stdout.Write(encoded)
 		return err
 	}
 	// The tally carries unredacted identifiers. OpenFile's mode applies only

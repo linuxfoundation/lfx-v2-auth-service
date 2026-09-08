@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -304,27 +306,60 @@ func (s *aliasTargetClient) ListIdentities(ctx context.Context, memberID string)
 	return nil, cdp.ErrMemberNotFound
 }
 
-func TestTallyRedactedKeepsIdentifiersOutOfLogs(t *testing.T) {
-	out := tallyReport{
-		Repairs:             []repairRecord{{UserID: "auth0|johndoe123", Before: "d6f4a060-f818-4fab-bf36-73032634fe7c", After: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}},
-		ErrorSamples:        []checkError{{UserID: "auth0|janedoe456", Message: "boom"}},
-		EnumerationWarnings: []checkError{{UserID: "google-oauth2|1234567890", Message: "malformed"}},
+func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
+	// One would-repair, one classification error, one malformed holder: every
+	// slice that can carry an identifier is populated, then the run writes to
+	// the stdout sink (no --out) and to a file, and the two are compared.
+	ctx := context.Background()
+	population := []holderUser{
+		{UserID: "auth0|johndoe123", Username: "psmith", EmailVerified: true, StoredUUID: "d6f4a060-f818-4fab-bf36-73032634fe7c"},
+		{UserID: "auth0|janedoe456", Username: "jdoe", EmailVerified: true, StoredUUID: "uuid-odd"},
 	}
-	out.Counters.Add(mergerepair.VerdictRepaired)
+	newDeps := func(stdout io.Writer) repairDeps {
+		return repairDeps{
+			client: &stubCDPClient{
+				listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+					if memberID == "0a1b2c3d-4e5f-6789-abcd-ef0123456789" {
+						return []cdp.MemberIdentity{lfid("psmith")}, nil
+					}
+					return nil, cdp.ErrMemberNotFound
+				},
+				resolveFn: func(_ context.Context, lfid, _ string) (cdp.ResolveResult, error) {
+					if lfid == "psmith" {
+						return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}, nil
+					}
+					return cdp.ResolveResult{Outcome: cdp.Outcome("unknown-outcome")}, nil
+				},
+			},
+			writer: &stubWriter{},
+			list: func(context.Context) ([]holderUser, []string, error) {
+				return population, []string{"google-oauth2|1234567890"}, nil
+			},
+			stdout: stdout,
+		}
+	}
 
-	raw, err := json.Marshal(out.redacted())
+	var stdout bytes.Buffer
+	code, err := run(ctx, newDeps(&stdout), repairOptions{ratePerMinute: 6000, dryRun: true})
 	require.NoError(t, err)
+	assert.Equal(t, 1, code, "an error row and an enumeration warning are inconclusive")
+	logged := stdout.String()
 	for _, secret := range []string{"johndoe123", "janedoe456", "1234567890", "d6f4a060-f818", "0a1b2c3d-4e5f"} {
-		assert.NotContains(t, string(raw), secret)
+		assert.NotContains(t, logged, secret)
 	}
-	assert.Contains(t, string(raw), `"identifiers_redacted":true`)
-	assert.Contains(t, string(raw), `"repaired":1`, "counters survive redaction")
-	assert.Contains(t, string(raw), `"message":"boom"`, "diagnostics survive redaction")
+	assert.Contains(t, logged, `"identifiers_redacted": true`)
+	assert.Contains(t, logged, `"repaired": 1`, "counters survive redaction")
+	assert.Contains(t, logged, `"errors": 1`)
+	assert.Contains(t, logged, "unclassifiable holder", "diagnostics survive redaction")
 
-	full, err := json.Marshal(out)
+	outPath := filepath.Join(t.TempDir(), "tally.json")
+	_, err = run(ctx, newDeps(nil), repairOptions{ratePerMinute: 6000, dryRun: true, outPath: outPath})
 	require.NoError(t, err)
-	assert.Contains(t, string(full), "auth0|johndoe123", "the --out copy stays actionable")
-	assert.Contains(t, string(full), `"identifiers_redacted":false`)
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "auth0|johndoe123", "the --out copy stays actionable")
+	assert.Contains(t, string(raw), "0a1b2c3d-4e5f-6789-abcd-ef0123456789")
+	assert.Contains(t, string(raw), `"identifiers_redacted": false`)
 }
 
 func TestExitCode(t *testing.T) {
