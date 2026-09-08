@@ -409,6 +409,28 @@ func TestRunEnumerationFailureStillEmitsATally(t *testing.T) {
 	assert.Empty(t, out.EnumerationWarnings[0].UserID)
 }
 
+// errWriter is a stdout sink that always fails, for the sink-error path.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestRunEnumerationFailureSurfacesSinkError(t *testing.T) {
+	ctx := context.Background()
+	deps := repairDeps{
+		client: &stubCDPClient{},
+		writer: &stubWriter{},
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return nil, nil, errors.New("management walk failed")
+		},
+		stdout: errWriter{err: errors.New("stdout closed")},
+	}
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true})
+	require.Error(t, err)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, err.Error(), "management walk failed", "the walk error must survive the join")
+	assert.Contains(t, err.Error(), "stdout closed", "a lost artifact must be visible, not just logged")
+}
+
 func TestExitCode(t *testing.T) {
 	t.Run("clean run exits 0, including dry-run would-repairs", func(t *testing.T) {
 		out := tallyReport{}

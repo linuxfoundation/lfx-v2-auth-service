@@ -322,6 +322,18 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		if errResolve != nil {
 			return "", Result{}, errResolve
 		}
+		if reResolved.Outcome == cdp.OutcomeConflict && reResolved.ConflictReason == cdp.ConflictReasonForeignLFID {
+			// The create 409 proved the LFID claimed on the primary, so a
+			// re-resolve that cannot see it contradicts primary-sourced
+			// proof — the same replica-lag shape as the no-match case
+			// below. Retry, don't skip: unlike the initial resolve (which
+			// has no such proof and keeps its skip), nothing stable can
+			// produce this answer here.
+			slog.WarnContext(ctx, "CDP create conflicted but the claimed LFID resolves foreign, retrying",
+				"user_id", redaction.Redact(req.UserID),
+			)
+			return "", Result{}, errs.NewUnexpected("CDP create conflicted but the claimed LFID resolves foreign")
+		}
 		switch reResolved.Outcome {
 		case cdp.OutcomeFound:
 			// Verified below before any id is stored.

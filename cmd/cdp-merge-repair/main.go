@@ -337,6 +337,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		out.EnumerationWarnings = append(out.EnumerationWarnings, checkError{Message: errMessage(err)})
 		if werr := writeTally(out, opts.outPath, deps.stdout); werr != nil {
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
+			return 1, errors.Join(err, werr)
 		}
 		return 1, err
 	}

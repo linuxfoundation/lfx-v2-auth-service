@@ -655,6 +655,24 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, 1, client.createCalls)
 		assert.Zero(t, store.calls)
 	})
+	t.Run("a create conflict whose re-resolve reports foreign LFID is retried", func(t *testing.T) {
+		// The create 409 proved the LFID claimed on the primary, so a
+		// foreign-LFID re-resolve contradicts it exactly like the no-match
+		// case — replica lag, not a stable cross-person state.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeConflict, ConflictReason: cdp.ConflictReasonForeignLFID},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err, "a primary-contradicting conflict must be retried, not skipped as multi-match")
+		assert.Zero(t, store.calls)
+	})
 
 	t.Run("a resolve conflict writes nothing", func(t *testing.T) {
 		// Picking one of several matching members would store an arbitrary
