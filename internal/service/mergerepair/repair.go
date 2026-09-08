@@ -52,7 +52,9 @@ type Holder struct {
 type StoredCheck struct {
 	// Found is false when the read hit cdp.ErrMemberNotFound (merged away).
 	Found bool
-	// HoldsOwnLFID reports the stored member still carries the holder's LFID.
+	// HoldsOwnLFID reports the stored member still carries the holder's
+	// LFID, verified: resolve ignores unverified identities, so an
+	// unverified carry is not agreement (producers filter first).
 	HoldsOwnLFID bool
 	// HoldsForeignLFID reports the stored member carries somebody else's
 	// LFID. With HoldsOwnLFID false this is the wrong-person holder class
@@ -102,6 +104,9 @@ func Classify(h Holder, stored StoredCheck, res ResolveCheck, target []cdp.Membe
 		if storedForeign || res.ConflictReason == cdp.ConflictReasonForeignLFID {
 			// The reason alone carries the row when the stored read was
 			// skipped (--no-prefilter) or the member vanished between calls.
+			// A foreign-LFID conflict names the unique candidate, which holds
+			// no verified LFID of this holder — so the stored UUID is
+			// wrong-person or gone, and either way unrepairable here.
 			// Whether these are cleared or left is still an open policy
 			// question, so no mode writes here.
 			return VerdictStoredForeignHolder, ""
@@ -126,9 +131,26 @@ func Classify(h Holder, stored StoredCheck, res ResolveCheck, target []cdp.Membe
 	return gateTarget(h.Username, target, res.MemberID)
 }
 
-// gateTarget applies the target guard to a resolve-to-other member.
+// VerifiedOnly returns the member's verified identities. Resolve consults
+// verified identities only, so these are the only ones that can authorize an
+// own-LFID decision; the foreign count deliberately sees the full set.
+func VerifiedOnly(ids []cdp.MemberIdentity) []cdp.MemberIdentity {
+	out := make([]cdp.MemberIdentity, 0, len(ids))
+	for _, id := range ids {
+		if id.Verified {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// gateTarget applies the target guard to a resolve-to-other member. The rule
+// is asymmetric by design: only a verified own LFID authorizes a repair
+// (resolve filters verified=true, so an unverified match can never have
+// produced it), while the foreign count sees every LFID value — an
+// unverified other username still makes the target shared, never own-only.
 func gateTarget(username string, target []cdp.MemberIdentity, memberID string) (Verdict, string) {
-	own := cdpidentity.HoldsLFID(target, username)
+	own := cdpidentity.HoldsLFID(VerifiedOnly(target), username)
 	others := distinctForeignLFIDs(target, username)
 	switch {
 	case own && len(others) == 0:

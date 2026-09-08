@@ -130,10 +130,11 @@ func (w *cdpMetadataWriter) ReadProvisioningState(ctx context.Context, userID st
 	// permanent. Auth0 gives database-connection users an `auth0|` id, so that
 	// prefix is what makes the root username safe to read.
 	//
-	// A social-primary user with a linked database identity is therefore left
-	// without a username here rather than given a wrong one: Auth0 does not
-	// expose a secondary identity's username on this record. Those users are
-	// skipped, and a later login heals them.
+	// A social-primary user with a linked database identity is deliberately
+	// left without a username here: provisioning stays primary-only by
+	// design, even though the linked LFID is readable (the repair job
+	// derives it to check those stored UUIDs). Those users are skipped,
+	// and a later login heals them.
 	primaryIsDatabase := strings.HasPrefix(user.UserID, databaseUserIDPrefix)
 	if primaryIsDatabase {
 		state.Username = user.Username
@@ -271,8 +272,11 @@ func isValidCDPSource(source string) bool {
 	return false
 }
 
-// WriteCDPMetadataRepair overwrites a stored `cdp_uuid` if and only if the
-// stored value still matches from — the merge-repair job's compare-and-swap.
+// WriteCDPMetadataRepair overwrites a stored `cdp_uuid` when the stored
+// value still matches from — the merge-repair job's best-effort
+// compare-and-swap: the read and the patch are two Management API calls
+// (Auth0 offers no conditional update), so a concurrent writer can still
+// interleave between them.
 //
 // Unlike WriteCDPMetadata it requires a stored value to replace (there is
 // nothing to repair on an empty record). Both sides are case-folded to

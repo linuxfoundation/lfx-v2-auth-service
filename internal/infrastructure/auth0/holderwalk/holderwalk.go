@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
@@ -30,7 +31,7 @@ type TokenProvider interface {
 // Holder is one enumerated user carrying a stored cdp_uuid.
 type Holder struct {
 	UserID        string
-	Username      string // blanked when the primary identity is not the database connection
+	Username      string // blank when no database-connection identity (primary or linked) carries an LFID
 	Email         string
 	EmailVerified bool
 	StoredUUID    string // lowercased, as the writers store it
@@ -45,6 +46,15 @@ type MgmtUser struct {
 	EmailVerified bool           `json:"email_verified"`
 	UpdatedAt     string         `json:"updated_at"`
 	AppMetadata   map[string]any `json:"app_metadata"`
+	Identities    []MgmtIdentity `json:"identities,omitempty"`
+}
+
+// MgmtIdentity is the slice of an Auth0 identity the walk reads: only the
+// connection and the user id, which is what derives an LFID from a linked
+// database identity on a social- or enterprise-primary user.
+type MgmtIdentity struct {
+	Connection string `json:"connection"`
+	UserID     any    `json:"user_id"`
 }
 
 // Walker enumerates every user carrying a stored cdp_uuid.
@@ -83,10 +93,31 @@ const (
 	mgmtMaxAttempts = 8
 
 	// databaseUserIDPrefix marks a user whose primary identity is the database
-	// connection — the only case where the root `username` is an LFID (the
-	// same guard internal/infrastructure/auth0/cdp_metadata.go applies).
+	// connection — the case where the root `username` is an LFID outright.
+	// Otherwise the LFID is derived from a linked database identity. That is
+	// deliberately wider than ReadProvisioningState's primary-only guard
+	// (internal/infrastructure/auth0/cdp_metadata.go), which leaves those
+	// users username-less: provisioning never provisions them, while the
+	// repair job still checks their stored UUIDs (writing only CAS-guarded
+	// own-only repairs).
 	databaseUserIDPrefix = "auth0|"
 )
+
+// linkedDatabaseUsername returns the LFID of a linked database identity, or
+// "" when there is none. Mirrors the login username filter
+// (internal/infrastructure/auth0/filter.go): only the database connection
+// carries an LFID user id.
+func linkedDatabaseUsername(identities []MgmtIdentity) string {
+	for _, id := range identities {
+		if id.Connection != constants.Auth0UsernamePasswordConnection {
+			continue
+		}
+		if uid, ok := id.UserID.(string); ok {
+			return strings.TrimSpace(uid)
+		}
+	}
+	return ""
+}
 
 // ListCDPUUIDHolders walks the whole population of users with a stored
 // cdp_uuid, also returning the user IDs of records that matched the query but
@@ -138,10 +169,11 @@ func (w *Walker) ListCDPUUIDHolders(ctx context.Context) ([]Holder, []string, er
 			username := strings.TrimSpace(row.Username)
 			if !strings.HasPrefix(row.UserID, databaseUserIDPrefix) {
 				// The root username belongs to the primary identity; for a
-				// social- or enterprise-primary user it is not an LFID.
-				// Blank it so the user counts as skipped_no_lfid instead of
-				// being resolved as someone else.
-				username = ""
+				// social- or enterprise-primary user it is not an LFID. Fall
+				// back to a linked database identity, and blank it only when
+				// there is none, so the user counts as skipped_no_lfid instead
+				// of being resolved as someone else.
+				username = linkedDatabaseUsername(row.Identities)
 			}
 			population = append(population, Holder{
 				UserID:        row.UserID,
@@ -271,11 +303,6 @@ func (w *Walker) fetchTiePage(ctx context.Context, ts string, page int) ([]MgmtU
 }
 
 func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTotals bool, out any) error {
-	token, err := w.Tokens.GetToken(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get Management API token: %w", err)
-	}
-
 	params := url.Values{}
 	params.Set("q", q)
 	params.Set("sort", "updated_at:1")
@@ -283,7 +310,7 @@ func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTot
 	params.Set("per_page", fmt.Sprintf("%d", walkPageSize))
 	params.Set("include_totals", fmt.Sprintf("%t", includeTotals))
 	params.Set("search_engine", "v3")
-	params.Set("fields", "user_id,username,email,email_verified,updated_at,app_metadata")
+	params.Set("fields", "user_id,username,email,email_verified,updated_at,app_metadata,identities")
 	params.Set("include_fields", "true")
 
 	backoff := w.RetryBackoff
@@ -291,6 +318,11 @@ func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTot
 		backoff = 2 * time.Second
 	}
 	for attempt := 1; ; attempt++ {
+		token, err := w.Tokens.GetToken(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get Management API token: %w", err)
+		}
+
 		request := httpclient.NewAPIRequest(
 			w.HTTPClient,
 			httpclient.WithMethod(http.MethodGet),

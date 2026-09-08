@@ -25,7 +25,11 @@ func ForeignLFID(held []cdp.MemberIdentity, username string) (string, bool) {
 		if identity.Platform != constants.LFIDPlatform || identity.Type != constants.CDPIdentityTypeUsername {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(identity.Value), username) {
+		value := strings.TrimSpace(identity.Value)
+		if value == "" {
+			continue
+		}
+		if !strings.EqualFold(value, username) {
 			return identity.Value, true
 		}
 	}

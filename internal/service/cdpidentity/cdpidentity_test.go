@@ -41,6 +41,13 @@ func TestForeignLFID(t *testing.T) {
 		assert.False(t, occupied)
 		assert.Empty(t, other)
 	})
+
+	t.Run("empty LFID values decide nothing", func(t *testing.T) {
+		other, occupied := cdpidentity.ForeignLFID([]cdp.MemberIdentity{lfid(""), lfid("   "), lfid("psmith")}, "psmith")
+		assert.False(t, occupied, "an empty value is not somebody else's LFID")
+		assert.Empty(t, other)
+	})
+
 }
 
 func TestHoldsLFID(t *testing.T) {

@@ -165,7 +165,7 @@ func TestPopulationWalker(t *testing.T) {
 		assert.Contains(t, queries[1], "updated_at%3A%5B2026-01-02T00%3A00%3A00.000Z+TO+%2A%5D")
 	})
 
-	t.Run("reports malformed cdp_uuid holders and blanks non-database usernames", func(t *testing.T) {
+	t.Run("reports malformed cdp_uuid holders, blanks bare social usernames, and derives LFIDs from linked database identities", func(t *testing.T) {
 		page := []MgmtUser{{
 			UserID:      "auth0|bad",
 			Username:    "mallory",
@@ -176,6 +176,23 @@ func TestPopulationWalker(t *testing.T) {
 			Username:    "social-handle",
 			UpdatedAt:   "2026-01-02T00:00:00.000Z",
 			AppMetadata: map[string]any{"cdp_uuid": "uuid-social"},
+		}, {
+			UserID:      "google-oauth2|456",
+			Username:    "social-handle",
+			UpdatedAt:   "2026-01-03T00:00:00.000Z",
+			AppMetadata: map[string]any{"cdp_uuid": "uuid-linked"},
+			Identities: []MgmtIdentity{
+				{Connection: "google-oauth2", UserID: "123"},
+				{Connection: "Username-Password-Authentication", UserID: "linkedlfid"},
+			},
+		}, {
+			UserID:      "google-oauth2|789",
+			Username:    "social-handle",
+			UpdatedAt:   "2026-01-04T00:00:00.000Z",
+			AppMetadata: map[string]any{"cdp_uuid": "uuid-nonstring"},
+			Identities: []MgmtIdentity{
+				{Connection: "Username-Password-Authentication", UserID: 42},
+			},
 		}}
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,9 +218,13 @@ func TestPopulationWalker(t *testing.T) {
 		population, malformed, err := walker.ListCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, []string{"auth0|bad"}, malformed)
-		require.Len(t, population, 1)
+		require.Len(t, population, 3)
 		assert.Equal(t, "google-oauth2|123", population[0].UserID)
 		assert.Empty(t, population[0].Username, "a social-primary root username is not an LFID")
+		assert.Equal(t, "google-oauth2|456", population[1].UserID)
+		assert.Equal(t, "linkedlfid", population[1].Username, "a linked database identity carries the LFID")
+		assert.Equal(t, "google-oauth2|789", population[2].UserID)
+		assert.Empty(t, population[2].Username, "a non-string database user id derives nothing")
 	})
 
 	newTieWalker := func(t *testing.T, server *httptest.Server) *Walker {

@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0/holderwalk"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/mergerepair"
+	lferrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,8 +70,46 @@ func (s *stubWriter) WriteCDPMetadataRepair(_ context.Context, userID, from stri
 	return s.err
 }
 
+// rateLimitedWriter fails the first len(errs) writes with errs, then succeeds.
+type rateLimitedWriter struct {
+	calls int
+	errs  []error
+}
+
+func (s *rateLimitedWriter) WriteCDPMetadataRepair(_ context.Context, _, _ string, _ port.CDPMetadata) error {
+	s.calls++
+	if len(s.errs) > 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		return err
+	}
+	return nil
+}
+
+func throttled(errs ...error) *rateLimitedWriter {
+	return &rateLimitedWriter{errs: errs}
+}
+
+func throttledWrite() error {
+	return lferrors.NewRateLimited("Auth0 app_metadata repair was rate limited", time.Millisecond)
+}
+
+func liveRepairClient() *stubCDPClient {
+	return &stubCDPClient{
+		listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+			if memberID == "uuid-stale" {
+				return nil, cdp.ErrMemberNotFound
+			}
+			return []cdp.MemberIdentity{lfid("psmith")}, nil
+		},
+		resolveFn: func(_ context.Context, _, _ string) (cdp.ResolveResult, error) {
+			return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"}, nil
+		},
+	}
+}
+
 func lfid(username string) cdp.MemberIdentity {
-	return cdp.MemberIdentity{Platform: "lfid", Type: "username", Value: username}
+	return cdp.MemberIdentity{Platform: "lfid", Type: "username", Value: username, Verified: true}
 }
 
 func repairUser() holderUser {
@@ -147,6 +187,21 @@ func TestProcessUser(t *testing.T) {
 		assert.Equal(t, mergerepair.VerdictError, verdict)
 		assert.Equal(t, 1, writer.calls, "the verdict must come from the writer refusing, not from a stubbed transport error")
 	})
+	t.Run("transient Auth0 throttling waits and retries the write", func(t *testing.T) {
+		writer := throttled(throttledWrite(), throttledWrite())
+		verdict, _, err := processUser(ctx, liveRepairClient(), writer, pace, repairFlags{dryRun: false, live: true}, repairUser())
+		require.NoError(t, err)
+		assert.Equal(t, mergerepair.VerdictRepaired, verdict)
+		assert.Equal(t, 3, writer.calls)
+	})
+
+	t.Run("a throttled-out write is an error after bounded waits", func(t *testing.T) {
+		writer := throttled(throttledWrite(), throttledWrite(), throttledWrite(), throttledWrite(), throttledWrite(), throttledWrite())
+		verdict, _, err := processUser(ctx, liveRepairClient(), writer, pace, repairFlags{dryRun: false, live: true}, repairUser())
+		require.Error(t, err)
+		assert.Equal(t, mergerepair.VerdictError, verdict)
+		assert.Equal(t, auth0WriteMaxAttempts, writer.calls)
+	})
 
 	t.Run("live refusal writes nothing", func(t *testing.T) {
 		client := &stubCDPClient{
@@ -177,6 +232,25 @@ func TestProcessUser(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, mergerepair.VerdictUnchangedAgrees, verdict)
 		assert.Zero(t, client.resolveCalls, "no resolve call spent on an agreeing holder")
+	})
+	t.Run("stored unverified own LFID is not agreement", func(t *testing.T) {
+		unverified := lfid("psmith")
+		unverified.Verified = false
+		client := &stubCDPClient{
+			listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+				if memberID == "uuid-stale" {
+					return []cdp.MemberIdentity{unverified}, nil
+				}
+				return []cdp.MemberIdentity{lfid("psmith")}, nil
+			},
+			resolveFn: func(_ context.Context, _, _ string) (cdp.ResolveResult, error) {
+				return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"}, nil
+			},
+		}
+		verdict, to, err := processUser(ctx, client, &stubWriter{}, pace, repairFlags{dryRun: true}, repairUser())
+		require.NoError(t, err)
+		assert.Equal(t, mergerepair.VerdictRepaired, verdict, "resolve ignores unverified identities, so the row must reach the target guard")
+		assert.Equal(t, "uuid-fresh", to)
 	})
 
 	t.Run("unverified email is not sent to resolve", func(t *testing.T) {

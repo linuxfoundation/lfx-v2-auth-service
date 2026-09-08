@@ -44,6 +44,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/cdpidentity"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/mergerepair"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
+	lferrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
@@ -130,8 +131,12 @@ func processUser(ctx context.Context, client cdp.Client, writer port.CDPMetadata
 		} else {
 			_, foreign := cdpidentity.ForeignLFID(held, u.Username)
 			stored = mergerepair.StoredCheck{
-				Found:            true,
-				HoldsOwnLFID:     cdpidentity.HoldsLFID(held, u.Username),
+				Found: true,
+				// Own agreement needs a verified carry: resolve ignores
+				// unverified identities, so an unverified own LFID must
+				// not short-circuit before resolve. The foreign arm
+				// keeps the full set, mirroring the target guard.
+				HoldsOwnLFID:     cdpidentity.HoldsLFID(mergerepair.VerifiedOnly(held), u.Username),
 				HoldsForeignLFID: foreign,
 			}
 			if stored.HoldsOwnLFID {
@@ -185,13 +190,40 @@ func processUser(ctx context.Context, client cdp.Client, writer port.CDPMetadata
 	if writer == nil {
 		return mergerepair.VerdictError, "", errors.New("live repair needs a metadata writer")
 	}
-	if err := writer.WriteCDPMetadataRepair(ctx, u.UserID, u.StoredUUID, port.CDPMetadata{
-		UUID:   to,
-		Source: constants.CDPUUIDSourceMergeRepair,
-	}); err != nil {
+	if err := writeRepairWithRetry(ctx, writer, u.UserID, u.StoredUUID, to); err != nil {
 		return mergerepair.VerdictError, "", err
 	}
 	return verdict, to, nil
+}
+
+// auth0WriteMaxAttempts bounds waits on a throttled Management write: the
+// repair is one PATCH per qualifying holder, so a limit that outlasts five
+// bounded waits is an outage the next day's run retries, not this row's.
+const auth0WriteMaxAttempts = 5
+
+// writeRepairWithRetry waits out a bare RateLimited from the repair writer
+// instead of erroring the row on transient Auth0 throttling. Any other error
+// — including a CAS Conflict, which means the stored value moved mid-run —
+// returns immediately: refusing to clobber is the point, not a retry case.
+func writeRepairWithRetry(ctx context.Context, writer port.CDPMetadataRepairer, userID, from, to string) error {
+	for attempt := 1; ; attempt++ {
+		err := writer.WriteCDPMetadataRepair(ctx, userID, from, port.CDPMetadata{
+			UUID:   to,
+			Source: constants.CDPUUIDSourceMergeRepair,
+		})
+		var limited lferrors.RateLimited
+		if !errors.As(err, &limited) || attempt >= auth0WriteMaxAttempts {
+			return err
+		}
+		waitFor := holderwalk.BoundedRetryAfter(limited.RetryAfter)
+		slog.WarnContext(ctx, "Auth0 throttled the repair write, waiting",
+			"retry_after", waitFor.String(), "attempt", attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitFor):
+		}
+	}
 }
 
 // repairDeps carries the seams run needs; tests substitute stubs for all three.

@@ -68,9 +68,10 @@ type CDPMetadataWriter interface {
 	WriteCDPMetadata(ctx context.Context, userID string, record CDPMetadata) error
 }
 
-// CDPMetadataRepairer overwrites a stored UUID if and only if the stored
-// value still equals the observed stale value — the merge-repair job's
-// compare-and-swap.
+// CDPMetadataRepairer overwrites a stored UUID when the stored value still
+// equals the observed stale value — the merge-repair job's best-effort
+// compare-and-swap (read-then-check; a concurrent writer can interleave —
+// see the writer docs).
 //
 // It is a separate interface so the capability is reachable only where it is
 // depended on: provisioning and login depend on CDPMetadataWriter and cannot

@@ -15,7 +15,7 @@ import (
 func lfidIdentities(values ...string) []cdp.MemberIdentity {
 	out := make([]cdp.MemberIdentity, 0, len(values))
 	for _, v := range values {
-		out = append(out, cdp.MemberIdentity{Platform: "lfid", Type: "username", Value: v})
+		out = append(out, cdp.MemberIdentity{Platform: "lfid", Type: "username", Value: v, Verified: true})
 	}
 	return out
 }
@@ -144,6 +144,17 @@ func TestClassify(t *testing.T) {
 		assert.Equal(t, mergerepair.VerdictTargetHoldsAlias, v)
 		assert.Empty(t, to)
 	})
+	t.Run("own-verified plus an unverified other is still an alias refusal", func(t *testing.T) {
+		h := mergerepair.Holder{UserID: "auth0|2", Username: "kmaida", StoredUUID: "uuid-stale"}
+		v, to := mergerepair.Classify(h, gone,
+			mergerepair.ResolveCheck{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"},
+			[]cdp.MemberIdentity{
+				{Platform: "lfid", Type: "username", Value: "kmaida", Verified: true},
+				{Platform: "lfid", Type: "username", Value: "kimmaida", Verified: false},
+			})
+		assert.Equal(t, mergerepair.VerdictTargetHoldsAlias, v, "the foreign arm counts unverified LFIDs too")
+		assert.Empty(t, to)
+	})
 
 	t.Run("own absent is a foreign refusal", func(t *testing.T) {
 		v, to := mergerepair.Classify(holder, gone,
@@ -209,11 +220,18 @@ func TestClassify(t *testing.T) {
 		v, to := mergerepair.Classify(holder, gone,
 			mergerepair.ResolveCheck{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"},
 			[]cdp.MemberIdentity{
-				{Platform: "lfid", Type: "username", Value: "psmith"},
+				{Platform: "lfid", Type: "username", Value: "psmith", Verified: true},
 				{Platform: "email", Type: "email", Value: "someone-else@example.com"},
 			})
 		assert.Equal(t, mergerepair.VerdictRepaired, v)
 		assert.Equal(t, "uuid-fresh", to)
+	})
+	t.Run("an unverified own-only target never authorizes a repair", func(t *testing.T) {
+		v, to := mergerepair.Classify(holder, gone,
+			mergerepair.ResolveCheck{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"},
+			[]cdp.MemberIdentity{{Platform: "lfid", Type: "username", Value: "psmith", Verified: false}})
+		assert.Equal(t, mergerepair.VerdictUnresolvableSkipped, v, "resolve only consults verified identities; an unverified match proves nothing")
+		assert.Empty(t, to)
 	})
 }
 
