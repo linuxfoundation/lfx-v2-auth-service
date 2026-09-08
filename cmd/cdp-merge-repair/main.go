@@ -53,9 +53,10 @@ import (
 // repair verdicts keep their names.
 type holderUser = holderwalk.Holder
 
-// repairRecord is one applied (live) or would-apply (dry-run) repair, carried
-// into the tally verbatim — the follow-up needs actionable identifiers, so
-// these are not redacted.
+// repairRecord is one applied (live) or would-apply (dry-run) repair. The
+// follow-up needs actionable identifiers, so they are carried verbatim into
+// the --out file (0600) and redacted only on the stdout sink, which lands in
+// pod logs.
 type repairRecord struct {
 	UserID string `json:"user_id"`
 	Before string `json:"before"`
@@ -106,6 +107,35 @@ type tallyReport struct {
 	EnumerationWarnings   []checkError   `json:"enumeration_warnings"`
 	Unchecked             int            `json:"unchecked"`
 	DurationSeconds       float64        `json:"duration_seconds"`
+	// IdentifiersRedacted marks the stdout copy, whose user ids and UUIDs
+	// are redacted because container logs have no per-record deletion.
+	IdentifiersRedacted bool `json:"identifiers_redacted"`
+}
+
+// redacted returns the copy safe for a log sink: counters intact, every
+// user id and UUID passed through redaction.Redact.
+func (t tallyReport) redacted() tallyReport {
+	out := t
+	out.IdentifiersRedacted = true
+	out.Repairs = make([]repairRecord, len(t.Repairs))
+	for i, r := range t.Repairs {
+		out.Repairs[i] = repairRecord{
+			UserID: redaction.Redact(r.UserID),
+			Before: redaction.Redact(r.Before),
+			After:  redaction.Redact(r.After),
+		}
+	}
+	out.ErrorSamples = redactedErrors(t.ErrorSamples)
+	out.EnumerationWarnings = redactedErrors(t.EnumerationWarnings)
+	return out
+}
+
+func redactedErrors(in []checkError) []checkError {
+	out := make([]checkError, len(in))
+	for i, e := range in {
+		out[i] = checkError{UserID: redaction.Redact(e.UserID), Message: e.Message}
+	}
+	return out
 }
 
 // processUser classifies one holder and, in live mode only, CAS-writes a
@@ -436,7 +466,13 @@ func buildRepairDeps(ctx context.Context) (repairDeps, error) {
 	}, nil
 }
 
+// writeTally writes the tally to outPath (0600, unredacted) or, when unset,
+// to stdout with identifiers redacted: stdout is the pod log stream, which
+// has broader access and no per-record deletion path.
 func writeTally(out tallyReport, outPath string) error {
+	if outPath == "" {
+		out = out.redacted()
+	}
 	encoded, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to encode the tally: %w", err)

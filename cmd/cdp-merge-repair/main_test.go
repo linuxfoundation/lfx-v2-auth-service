@@ -269,6 +269,26 @@ func TestProcessUser(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, mergerepair.VerdictResolve404, verdict)
 	})
+
+	t.Run("a failed target identities read is an error, never a write", func(t *testing.T) {
+		client := &stubCDPClient{
+			listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+				if memberID == "uuid-stale" {
+					return nil, cdp.ErrMemberNotFound
+				}
+				return nil, errors.New("cdp read failed")
+			},
+			resolveFn: func(_ context.Context, _, _ string) (cdp.ResolveResult, error) {
+				return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "uuid-fresh"}, nil
+			},
+		}
+		writer := &stubWriter{}
+		verdict, to, err := processUser(ctx, client, writer, pace, repairFlags{dryRun: false, live: true}, repairUser())
+		require.Error(t, err)
+		assert.Equal(t, mergerepair.VerdictError, verdict)
+		assert.Empty(t, to)
+		assert.Zero(t, writer.calls, "nothing may be stored off a target that could not be read")
+	})
 }
 
 // aliasTargetClient answers the target-identities read with own-plus-one.
@@ -282,6 +302,29 @@ func (s *aliasTargetClient) ListIdentities(ctx context.Context, memberID string)
 		return []cdp.MemberIdentity{lfid("kmaida"), lfid("kimmaida")}, nil
 	}
 	return nil, cdp.ErrMemberNotFound
+}
+
+func TestTallyRedactedKeepsIdentifiersOutOfLogs(t *testing.T) {
+	out := tallyReport{
+		Repairs:             []repairRecord{{UserID: "auth0|johndoe123", Before: "d6f4a060-f818-4fab-bf36-73032634fe7c", After: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}},
+		ErrorSamples:        []checkError{{UserID: "auth0|janedoe456", Message: "boom"}},
+		EnumerationWarnings: []checkError{{UserID: "google-oauth2|1234567890", Message: "malformed"}},
+	}
+	out.Counters.Add(mergerepair.VerdictRepaired)
+
+	raw, err := json.Marshal(out.redacted())
+	require.NoError(t, err)
+	for _, secret := range []string{"johndoe123", "janedoe456", "1234567890", "d6f4a060-f818", "0a1b2c3d-4e5f"} {
+		assert.NotContains(t, string(raw), secret)
+	}
+	assert.Contains(t, string(raw), `"identifiers_redacted":true`)
+	assert.Contains(t, string(raw), `"repaired":1`, "counters survive redaction")
+	assert.Contains(t, string(raw), `"message":"boom"`, "diagnostics survive redaction")
+
+	full, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(full), "auth0|johndoe123", "the --out copy stays actionable")
+	assert.Contains(t, string(full), `"identifiers_redacted":false`)
 }
 
 func TestExitCode(t *testing.T) {

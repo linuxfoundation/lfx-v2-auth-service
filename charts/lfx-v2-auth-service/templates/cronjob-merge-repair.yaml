@@ -20,7 +20,7 @@ spec:
   jobTemplate:
     spec:
       # A repeat walk is correct (repaired holders are no-ops next run), only
-      # slow — so a failed run never retries in place; the next schedule
+      # slow; so a failed run never retries in place and the next schedule
       # covers it. Must stay under 24h so runs cannot pile up.
       activeDeadlineSeconds: {{ .Values.mergeRepair.activeDeadlineSeconds }}
       backoffLimit: 0
@@ -43,8 +43,9 @@ spec:
           automountServiceAccountToken: false
           containers:
             # Named app like the Deployment: prod podAnnotations scope log
-            # collection to a container named app, and the tally on stdout is
-            # this job's only artifact when --out is unset.
+            # collection to a container named app, and the tally on stdout
+            # (identifiers redacted) is this job's only artifact when --out
+            # is unset.
             - name: app
               image: "{{ .Values.mergeRepair.image.repository }}:{{ .Values.mergeRepair.image.tag | default .Chart.AppVersion }}"
               securityContext:
