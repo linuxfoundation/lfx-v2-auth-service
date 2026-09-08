@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"slices"
 	"testing"
 	"time"
 
@@ -381,6 +382,93 @@ func TestMetadataLookupWithoutJWTVerificationConfig(t *testing.T) {
 				if user == nil {
 					t.Error("Expected user but got nil")
 				}
+			}
+		})
+	}
+}
+
+// TestJWTVerify_ScopeGatedRequiresManagementAudience guards the write-path audience
+// constraint. Scope-gated verification narrows to ExpectedAudience by clearing
+// ExpectedAudiences, and the parser skips audience validation entirely when the
+// allow-list is empty — so a config carrying only ExpectedAudiences must be
+// rejected rather than silently verifying a write with no audience constraint.
+func TestJWTVerify_ScopeGatedRequiresManagementAudience(t *testing.T) {
+	ctx := context.Background()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate RSA key: %v", err)
+	}
+
+	// ExpectedAudiences set, ExpectedAudience absent.
+	jwtVerify := &JWTVerificationConfig{
+		PublicKey:         &privateKey.PublicKey,
+		ExpectedIssuer:    "https://test.auth0.com/",
+		ExpectedAudiences: []string{"https://api.lfx.dev/"},
+	}
+
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub":   "test-user-123",
+		"iss":   "https://test.auth0.com/",
+		"aud":   "https://api.lfx.dev/",
+		"exp":   now.Add(time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"scope": constants.UserUpdateIdentityRequiredScope,
+	})
+	tokenString, errSign := token.SignedString(privateKey)
+	if errSign != nil {
+		t.Fatalf("Failed to sign token: %v", errSign)
+	}
+
+	// Scope-gated: must be rejected, not verified without an audience constraint.
+	if _, errVerify := jwtVerify.JWTVerify(ctx, tokenString, constants.UserUpdateIdentityRequiredScope); errVerify == nil {
+		t.Error("expected scope-gated verification to fail without a Management API audience, got nil error")
+	}
+
+	// Read-only (no scope): the allow-list still applies and the token verifies.
+	if _, errVerify := jwtVerify.JWTVerify(ctx, tokenString); errVerify != nil {
+		t.Errorf("expected read-only verification to succeed via the allow-list, got: %v", errVerify)
+	}
+}
+
+func TestAudienceAllowList(t *testing.T) {
+	const managementAudience = "https://example.auth0.com/api/v2/"
+
+	tests := []struct {
+		name           string
+		lfxAPIAudience string
+		expected       []string
+	}{
+		{
+			name:           "unset LFX API audience yields management audience only",
+			lfxAPIAudience: "",
+			expected:       []string{managementAudience},
+		},
+		{
+			name:           "whitespace-only LFX API audience is ignored",
+			lfxAPIAudience: "   ",
+			expected:       []string{managementAudience},
+		},
+		{
+			name:           "distinct LFX API audience is appended",
+			lfxAPIAudience: "https://api.lfx.dev",
+			expected:       []string{managementAudience, "https://api.lfx.dev"},
+		},
+		{
+			name:           "LFX API audience equal to management audience is not duplicated",
+			lfxAPIAudience: managementAudience,
+			expected:       []string{managementAudience},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(constants.Auth0LFXv2APIAudienceEnvKey, test.lfxAPIAudience)
+
+			audiences := audienceAllowList(managementAudience)
+			if !slices.Equal(audiences, test.expected) {
+				t.Errorf("expected audiences %v, got %v", test.expected, audiences)
 			}
 		})
 	}

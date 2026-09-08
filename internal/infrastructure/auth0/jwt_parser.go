@@ -26,8 +26,14 @@ type JWTVerificationConfig struct {
 	PublicKey *rsa.PublicKey
 	// ExpectedIssuer is the expected JWT issuer (e.g., "https://your-domain.auth0.com/")
 	ExpectedIssuer string
-	// ExpectedAudience is the expected JWT audience
+	// ExpectedAudience is the Auth0 Management API audience. Tokens carrying it
+	// may be forwarded to the Management API on the user's behalf. Required for
+	// scope-gated verification, which narrows to this audience and rejects the
+	// request when it is empty.
 	ExpectedAudience string
+	// ExpectedAudiences is the full audience allow-list for JWT verification
+	// (Management API plus, when configured, the LFX v2 API audience)
+	ExpectedAudiences []string
 	// JWKSURL is the URL to fetch JSON Web Key Set (optional, alternative to PublicKey)
 	JWKSURL string
 }
@@ -49,10 +55,26 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 		SigningKey:        j.PublicKey,
 		ExpectedIssuer:    j.ExpectedIssuer,
 		ExpectedAudience:  j.ExpectedAudience,
+		ExpectedAudiences: j.ExpectedAudiences,
 	}
 
 	if len(requiredScope) > 0 {
 		opts.RequiredScopes = requiredScope
+		// Required scopes are Auth0 Management API scopes, which are only
+		// meaningful on Management-API-audience tokens. Restricting scope-gated
+		// verifications (the write-authorizing paths) to that audience keeps
+		// broader-audience tokens — accepted for read-only lookups via
+		// ExpectedAudiences — from ever authorizing a write, even if another
+		// resource server were to define an identically named scope.
+		//
+		// Refuse to narrow to an absent audience: the parser skips audience
+		// validation entirely when the allow-list is empty, so clearing
+		// ExpectedAudiences without a Management audience to fall back on would
+		// silently drop the only audience constraint on a write path.
+		if strings.TrimSpace(j.ExpectedAudience) == "" {
+			return nil, errors.NewValidation("Management API audience is required for scope-gated JWT verification")
+		}
+		opts.ExpectedAudiences = nil
 	}
 
 	// Parse and validate the JWT token with signature verification
@@ -129,19 +151,41 @@ func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *ht
 				expectedAudience = override
 			}
 
+			expectedAudiences := audienceAllowList(expectedAudience)
+
 			slog.InfoContext(ctx, "JWT signature verification enabled",
 				"issuer", expectedIssuer,
 				"audience", expectedAudience,
+				"audiences", expectedAudiences,
 				"key_id", key.Kid)
 
 			return &JWTVerificationConfig{
-				PublicKey:        publicKey,
-				ExpectedIssuer:   expectedIssuer,
-				ExpectedAudience: expectedAudience,
-				JWKSURL:          jwksURL,
+				PublicKey:         publicKey,
+				ExpectedIssuer:    expectedIssuer,
+				ExpectedAudience:  expectedAudience,
+				ExpectedAudiences: expectedAudiences,
+				JWKSURL:           jwksURL,
 			}, nil
 		}
 	}
 
 	return nil, errors.NewUnexpected("no suitable RSA key found in JWKS for signature verification")
+}
+
+// audienceAllowList returns the audiences accepted for JWT verification.
+//
+// User-facing access tokens and impersonation tokens carry the LFX v2 API
+// audience rather than the Management API audience; accept it for verification
+// when configured. Such tokens are never forwarded to the Management API
+// (see MetadataLookup), and scope-gated verification narrows back to
+// managementAudience alone.
+func audienceAllowList(managementAudience string) []string {
+	audiences := []string{managementAudience}
+
+	lfxAPIAudience := strings.TrimSpace(os.Getenv(constants.Auth0LFXv2APIAudienceEnvKey))
+	if lfxAPIAudience != "" && lfxAPIAudience != managementAudience {
+		audiences = append(audiences, lfxAPIAudience)
+	}
+
+	return audiences
 }
