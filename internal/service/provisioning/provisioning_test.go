@@ -655,6 +655,24 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, 1, client.createCalls)
 		assert.Zero(t, store.calls)
 	})
+	t.Run("a create conflict whose re-resolve reports foreign LFID is retried", func(t *testing.T) {
+		// The create 409 proved the LFID claimed on the primary, so a
+		// foreign-LFID re-resolve contradicts it exactly like the no-match
+		// case — replica lag, not a stable cross-person state.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeConflict, ConflictReason: cdp.ConflictReasonForeignLFID},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err, "a primary-contradicting conflict must be retried, not skipped as multi-match")
+		assert.Zero(t, store.calls)
+	})
 
 	t.Run("a resolve conflict writes nothing", func(t *testing.T) {
 		// Picking one of several matching members would store an arbitrary
@@ -668,6 +686,23 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, OutcomeSkipped, result.Outcome)
 		assert.Equal(t, reasonConflict, result.Reason)
 		assert.Zero(t, client.createCalls)
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a resolve 409 naming a foreign LFID keeps the foreign-holder signal", func(t *testing.T) {
+		// crowd.dev#4574 moved this refusal from the identities read to the
+		// resolve itself; the skip reason must not collapse into the generic
+		// conflict or the cross-person-merge count goes dark.
+		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeConflict, ConflictReason: cdp.ConflictReasonForeignLFID}}}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberHoldsForeignLFID, result.Reason)
+		assert.Zero(t, client.createCalls)
+		assert.Zero(t, client.attachCalls)
 		assert.Zero(t, store.calls)
 	})
 

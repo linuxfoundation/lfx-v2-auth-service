@@ -56,8 +56,6 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -66,9 +64,9 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0/holderwalk"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
-	lferrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
@@ -106,14 +104,9 @@ const (
 	verdictError verdict = "error"
 )
 
-// gateUser is one member of the sampled population.
-type gateUser struct {
-	UserID        string
-	Username      string
-	Email         string
-	EmailVerified bool
-	StoredUUID    string // lowercased, as the writers store it
-}
+// gateUser is one member of the sampled population: the shared holder shape,
+// aliased so the gate verdicts keep their names.
+type gateUser = holderwalk.Holder
 
 // disagreement is one hard failure, carried into the report verbatim — the
 // gate evidence needs actionable identifiers, so these are not redacted.
@@ -226,341 +219,7 @@ func identityMatchesUser(u gateUser, identities []cdp.MemberIdentity) bool {
 	return false
 }
 
-// limiter paces CDP calls to a fixed per-minute rate. Every CDP call — resolve
-// and identity read alike — takes one slot: the budget is per client, not per
-// endpoint.
-type limiter struct {
-	interval time.Duration
-	next     time.Time
-}
-
-func newLimiter(perMinute int) *limiter {
-	return &limiter{interval: time.Minute / time.Duration(perMinute)}
-}
-
-func (l *limiter) wait(ctx context.Context) error {
-	now := time.Now()
-	if now.Before(l.next) {
-		timer := time.NewTimer(l.next.Sub(now))
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	l.next = time.Now().Add(l.interval)
-	return nil
-}
-
-// mgmtUser is the slice of an Auth0 Management user this tool reads.
-type mgmtUser struct {
-	UserID        string         `json:"user_id"`
-	Username      string         `json:"username"`
-	Email         string         `json:"email"`
-	EmailVerified bool           `json:"email_verified"`
-	UpdatedAt     string         `json:"updated_at"`
-	AppMetadata   map[string]any `json:"app_metadata"`
-}
-
-// populationWalker enumerates every user carrying a stored cdp_uuid.
-type populationWalker struct {
-	httpClient *httpclient.Client
-	domain     string
-	tokens     cdp.TokenProvider
-
-	// retryBackoff overrides the initial retry backoff; zero means the
-	// production default. Tests shrink it to keep retry paths fast.
-	retryBackoff time.Duration
-}
-
-const (
-	walkPageSize = 100
-
-	// walkOffsetLimit is Auth0's hard window: user search rejects reading
-	// past the 1,000th result of one query.
-	walkOffsetLimit = 1000
-
-	// walkInitialBound predates every Auth0 user, so the first page starts at
-	// the beginning of the population.
-	walkInitialBound = "1970-01-01T00:00:00.000Z"
-
-	// holderQuery selects every user carrying the stored key. Wildcard
-	// searches are not supported on app_metadata fields; `_exists_` is the
-	// documented existence operator.
-	holderQuery = "_exists_:app_metadata.cdp_uuid"
-
-	// drainPasses bounds re-reads of one tie block whose collected rows keep
-	// falling short of the server's total.
-	drainPasses = 3
-
-	// mgmtMaxAttempts bounds retries of one page against Management 429s and
-	// transient failures.
-	mgmtMaxAttempts = 8
-
-	// databaseUserIDPrefix marks a user whose primary identity is the database
-	// connection — the only case where the root `username` is an LFID (the
-	// same guard internal/infrastructure/auth0/cdp_metadata.go applies).
-	databaseUserIDPrefix = "auth0|"
-)
-
-// listCDPUUIDHolders walks the whole population of users with a stored
-// cdp_uuid, also returning the user IDs of records that matched the query but
-// carry no usable string value — the caller must report those as
-// inconclusive, not silently shrink the population.
-//
-// Auth0's user search rejects reading past the 1,000th result of a query, so
-// plain page-walking cannot reach a ~43k population. This walks page 0 of an
-// ascending `updated_at` lower bound instead: bound advanced to the last row
-// seen, boundary kept inclusive so a timestamp shared across a page edge is
-// not skipped, and a seen-set to drop the overlap that inclusivity
-// re-presents. A block of users sharing one timestamp that fills a whole page
-// cannot advance the bound — and deeper offset pages of one query cannot be
-// trusted for completeness, because Auth0 gives ties no guaranteed sub-order
-// and separate page requests can reshuffle them. Such a block is drained by
-// drainTieBlock, which verifies its row count against the server's own total,
-// and the walk resumes with an exclusive bound strictly past the drained
-// timestamp.
-//
-// `updated_at` moves when a user logs in, so a user active during the walk can
-// migrate across the bound and be missed. Acceptable for drawing a sample;
-// a census run should quiesce or re-run.
-func (w *populationWalker) listCDPUUIDHolders(ctx context.Context) ([]gateUser, []string, error) {
-	var population []gateUser
-	var malformed []string
-	seen := make(map[string]struct{})
-
-	absorb := func(rows []mgmtUser) (newRows int) {
-		for _, row := range rows {
-			if _, dup := seen[row.UserID]; dup {
-				continue
-			}
-			seen[row.UserID] = struct{}{}
-			newRows++
-
-			stored, _ := row.AppMetadata["cdp_uuid"].(string)
-			stored = strings.TrimSpace(stored)
-			if stored == "" {
-				// The query selects on key existence, so this is a shape
-				// surprise that makes the enumeration inconclusive.
-				slog.WarnContext(ctx, "user matched _exists_:app_metadata.cdp_uuid but carries no string value",
-					"user_id", redaction.Redact(row.UserID))
-				malformed = append(malformed, row.UserID)
-				continue
-			}
-			// Trimmed like provisioning trims its resolve inputs — an
-			// untrimmed legacy value must not resolve differently here than
-			// it would for the writer.
-			username := strings.TrimSpace(row.Username)
-			if !strings.HasPrefix(row.UserID, databaseUserIDPrefix) {
-				// The root username belongs to the primary identity; for a
-				// social- or enterprise-primary user it is not an LFID.
-				// Blank it so the user counts as skipped_no_lfid instead of
-				// being resolved as someone else.
-				username = ""
-			}
-			population = append(population, gateUser{
-				UserID:        row.UserID,
-				Username:      username,
-				Email:         strings.TrimSpace(row.Email),
-				EmailVerified: row.EmailVerified,
-				StoredUUID:    strings.ToLower(stored),
-			})
-		}
-		return newRows
-	}
-
-	bound := walkInitialBound
-	exclusive := false
-	for fetches := 1; ; fetches++ {
-		rows, err := w.fetchWalkPage(ctx, bound, exclusive)
-		if err != nil {
-			return nil, nil, fmt.Errorf("population walk failed at bound %s: %w", bound, err)
-		}
-		newRows := absorb(rows)
-
-		if len(rows) == 0 || (len(rows) < walkPageSize && newRows == 0) {
-			break // a short page of only already-seen rows is the end
-		}
-
-		nextBound := rows[len(rows)-1].UpdatedAt
-		if nextBound == bound && len(rows) == walkPageSize {
-			if exclusive {
-				// An exclusive lower bound must move strictly past itself; a
-				// server ignoring it would loop this walk forever.
-				return nil, nil, fmt.Errorf("population walk stalled: exclusive bound %s not honored", bound)
-			}
-			tieRows, errDrain := w.drainTieBlock(ctx, bound)
-			if errDrain != nil {
-				return nil, nil, errDrain
-			}
-			absorb(tieRows)
-			exclusive = true
-			continue
-		}
-		exclusive = false
-		bound = nextBound
-
-		if fetches%10 == 0 {
-			slog.InfoContext(ctx, "population walk progress", "pages", fetches, "users", len(population))
-		}
-	}
-
-	return population, malformed, nil
-}
-
-// drainTieBlock enumerates every holder sharing one exact updated_at. Deeper
-// offset pages of one query are the only way in, and Auth0 gives ties no
-// stable sub-order across requests, so separate page reads can reshuffle rows
-// and silently omit some. The server's own total makes that detectable:
-// passes repeat until the distinct rows collected reach it, and a block this
-// walk cannot prove complete fails the enumeration instead of passing as an
-// incomplete sampling frame. Rows come back sorted by user ID so the drain's
-// contribution to the population order is deterministic.
-func (w *populationWalker) drainTieBlock(ctx context.Context, ts string) ([]mgmtUser, error) {
-	collected := make(map[string]mgmtUser)
-	total := 0
-	for pass := 1; pass <= drainPasses; pass++ {
-		for page := 0; ; page++ {
-			rows, pageTotal, err := w.fetchTiePage(ctx, ts, page)
-			if err != nil {
-				return nil, fmt.Errorf("tie-block drain failed at updated_at %s: %w", ts, err)
-			}
-			total = pageTotal
-			if total >= walkOffsetLimit {
-				// Auth0 caps the reported total at the same 1,000-result
-				// window, so a block at the cap cannot be told apart from a
-				// larger one; fail closed instead of passing a possibly
-				// incomplete frame.
-				return nil, fmt.Errorf("population walk cannot enumerate %d users sharing updated_at %s: at or past Auth0's %d-result window", total, ts, walkOffsetLimit)
-			}
-			for _, row := range rows {
-				collected[row.UserID] = row
-			}
-			if len(rows) < walkPageSize || (page+1)*walkPageSize >= total {
-				break
-			}
-		}
-		if len(collected) >= total {
-			rows := make([]mgmtUser, 0, len(collected))
-			for _, row := range collected {
-				rows = append(rows, row)
-			}
-			sort.Slice(rows, func(i, j int) bool { return rows[i].UserID < rows[j].UserID })
-			return rows, nil
-		}
-		slog.WarnContext(ctx, "tie-block drain came up short, re-reading",
-			"updated_at", ts, "collected", len(collected), "total", total, "pass", pass)
-	}
-	return nil, fmt.Errorf("tie-block drain at updated_at %s incomplete after %d passes: %d of %d users seen", ts, drainPasses, len(collected), total)
-}
-
-func (w *populationWalker) fetchWalkPage(ctx context.Context, bound string, exclusive bool) ([]mgmtUser, error) {
-	// The exclusive open bracket steps strictly past a fully drained tie
-	// block; everywhere else the bound stays inclusive so a timestamp shared
-	// across a page edge is not skipped.
-	open := "["
-	if exclusive {
-		open = "{"
-	}
-	q := fmt.Sprintf("%s AND updated_at:%s%s TO *]", holderQuery, open, bound)
-	var rows []mgmtUser
-	if err := w.searchUsers(ctx, q, 0, false, &rows); err != nil {
-		return nil, err
-	}
-	return rows, nil
-}
-
-// mgmtUserPage is the include_totals=true response envelope.
-type mgmtUserPage struct {
-	Total int        `json:"total"`
-	Users []mgmtUser `json:"users"`
-}
-
-func (w *populationWalker) fetchTiePage(ctx context.Context, ts string, page int) ([]mgmtUser, int, error) {
-	q := fmt.Sprintf("%s AND updated_at:[%s TO %s]", holderQuery, ts, ts)
-	var envelope mgmtUserPage
-	if err := w.searchUsers(ctx, q, page, true, &envelope); err != nil {
-		return nil, 0, err
-	}
-	return envelope.Users, envelope.Total, nil
-}
-
-func (w *populationWalker) searchUsers(ctx context.Context, q string, page int, includeTotals bool, out any) error {
-	token, err := w.tokens.GetToken(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get Management API token: %w", err)
-	}
-
-	params := url.Values{}
-	params.Set("q", q)
-	params.Set("sort", "updated_at:1")
-	params.Set("page", fmt.Sprintf("%d", page))
-	params.Set("per_page", fmt.Sprintf("%d", walkPageSize))
-	params.Set("include_totals", fmt.Sprintf("%t", includeTotals))
-	params.Set("search_engine", "v3")
-	params.Set("fields", "user_id,username,email,email_verified,updated_at,app_metadata")
-	params.Set("include_fields", "true")
-
-	backoff := w.retryBackoff
-	if backoff == 0 {
-		backoff = 2 * time.Second
-	}
-	for attempt := 1; ; attempt++ {
-		request := httpclient.NewAPIRequest(
-			w.httpClient,
-			httpclient.WithMethod(http.MethodGet),
-			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users?%s", w.domain, params.Encode())),
-			httpclient.WithToken(token),
-			httpclient.WithDescription("list cdp_uuid holders"),
-		)
-
-		statusCode, errCall := request.Call(ctx, out)
-		if errCall == nil {
-			return nil
-		}
-		if attempt >= mgmtMaxAttempts {
-			return fmt.Errorf("status code: %d after %d attempts: %w", statusCode, attempt, errCall)
-		}
-		// Call reports a negative status when no usable response arrived
-		// (transport failure, decode failure); retry those like a 5xx.
-		if statusCode >= 0 && statusCode != http.StatusTooManyRequests && statusCode < 500 {
-			return fmt.Errorf("status code: %d: %w", statusCode, errCall)
-		}
-
-		slog.WarnContext(ctx, "Management API page retry",
-			"status_code", statusCode, "attempt", attempt, "backoff", backoff.String())
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		if backoff < time.Minute {
-			backoff *= 2
-		}
-	}
-}
-
-const cdpCallMaxAttempts = 5
-const defaultRateLimitWait = time.Minute
-
-// maxRateLimitWait caps a server Retry-After hint: a wrong or hostile header
-// must not park the one-shot gate for hours per attempt.
-const maxRateLimitWait = 5 * time.Minute
-
-// boundedRetryAfter converts a Retry-After hint into a bounded wait.
-func boundedRetryAfter(hint time.Duration) time.Duration {
-	switch {
-	case hint <= 0:
-		return defaultRateLimitWait
-	case hint > maxRateLimitWait:
-		return maxRateLimitWait
-	default:
-		return hint
-	}
-}
-
-func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser) (verdict, string, error) {
+func checkUser(ctx context.Context, client cdp.Client, pace *holderwalk.Limiter, u gateUser) (verdict, string, error) {
 	if strings.TrimSpace(u.Username) == "" {
 		return verdictSkippedNoLFID, "", nil
 	}
@@ -570,7 +229,7 @@ func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser
 		email = u.Email
 	}
 
-	result, err := callWithRateLimitRetry(ctx, pace, func(callCtx context.Context) (cdp.ResolveResult, error) {
+	result, err := holderwalk.CallWithRateLimitRetry(ctx, pace, func(callCtx context.Context) (cdp.ResolveResult, error) {
 		return client.Resolve(callCtx, u.Username, email)
 	})
 	if err != nil {
@@ -587,7 +246,7 @@ func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser
 		// No match alone cannot tell "identifiers changed" from "stored
 		// member deleted" — the latter is a hard failure, not merely a
 		// non-re-derivable UUID. Reading the stored member splits the two.
-		_, listErr := callWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
+		_, listErr := holderwalk.CallWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
 			return client.ListIdentities(callCtx, u.StoredUUID)
 		})
 		if listErr != nil {
@@ -598,7 +257,7 @@ func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser
 		}
 		return verdictUnresolvable, "", nil
 	case cdp.OutcomeConflict:
-		identities, listErr := callWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
+		identities, listErr := holderwalk.CallWithRateLimitRetry(ctx, pace, func(callCtx context.Context) ([]cdp.MemberIdentity, error) {
 			return client.ListIdentities(callCtx, u.StoredUUID)
 		})
 		if listErr != nil {
@@ -614,33 +273,6 @@ func checkUser(ctx context.Context, client cdp.Client, pace *limiter, u gateUser
 	}
 
 	return verdictError, "", fmt.Errorf("unexpected resolve outcome %q", result.Outcome)
-}
-
-func callWithRateLimitRetry[T any](ctx context.Context, pace *limiter, call func(context.Context) (T, error)) (T, error) {
-	var zero T
-	for attempt := 1; ; attempt++ {
-		if err := pace.wait(ctx); err != nil {
-			return zero, err
-		}
-
-		result, err := call(ctx)
-		if err == nil {
-			return result, nil
-		}
-
-		var rateLimited lferrors.RateLimited
-		if !errors.As(err, &rateLimited) || attempt >= cdpCallMaxAttempts {
-			return zero, err
-		}
-
-		waitFor := boundedRetryAfter(rateLimited.RetryAfter)
-		slog.WarnContext(ctx, "CDP rate limited, waiting", "retry_after", waitFor.String(), "attempt", attempt)
-		select {
-		case <-ctx.Done():
-			return zero, ctx.Err()
-		case <-time.After(waitFor):
-		}
-	}
 }
 
 func main() {
@@ -670,7 +302,7 @@ func realMain() int {
 
 // run executes the whole gate check. The clients factory is injected so tests
 // can substitute a stub CDP client and an httptest-backed walker.
-func run(ctx context.Context, clients func(context.Context) (cdp.Client, *populationWalker, error), confidence, ceiling float64, sampleOverride, ratePerMinute int, dryRun bool, seed int64, outPath string) (int, error) {
+func run(ctx context.Context, clients func(context.Context) (cdp.Client, *holderwalk.Walker, error), confidence, ceiling float64, sampleOverride, ratePerMinute int, dryRun bool, seed int64, outPath string) (int, error) {
 	if ratePerMinute <= 0 {
 		return 2, fmt.Errorf("-rate must be positive, got %d", ratePerMinute)
 	}
@@ -692,7 +324,7 @@ func run(ctx context.Context, clients func(context.Context) (cdp.Client, *popula
 	}
 
 	started := time.Now()
-	population, malformed, err := walker.listCDPUUIDHolders(ctx)
+	population, malformed, err := walker.ListCDPUUIDHolders(ctx)
 	if err != nil {
 		return 2, err
 	}
@@ -740,7 +372,7 @@ func run(ctx context.Context, clients func(context.Context) (cdp.Client, *popula
 	}
 
 	if !dryRun {
-		pace := newLimiter(ratePerMinute)
+		pace := holderwalk.NewLimiter(ratePerMinute)
 		for i, user := range sampled {
 			if ctx.Err() != nil {
 				out.Unchecked = len(sampled) - i
@@ -804,7 +436,7 @@ func reportExitCode(out report) int {
 	}
 }
 
-func buildClients(ctx context.Context) (cdp.Client, *populationWalker, error) {
+func buildClients(ctx context.Context) (cdp.Client, *holderwalk.Walker, error) {
 	cdpBaseURL := os.Getenv(constants.CDPBaseURLEnvKey)
 	cdpAudience := os.Getenv(constants.CDPAudienceEnvKey)
 	if cdpBaseURL == "" || cdpAudience == "" {
@@ -834,13 +466,13 @@ func buildClients(ctx context.Context) (cdp.Client, *populationWalker, error) {
 		BaseURL:      strings.TrimSuffix(cdpBaseURL, "/"),
 		TokenManager: cdpTokens,
 	})
-	walker := &populationWalker{
-		httpClient: httpclient.NewClient(httpclient.Config{
+	walker := &holderwalk.Walker{
+		HTTPClient: httpclient.NewClient(httpclient.Config{
 			Timeout:    30 * time.Second,
 			MaxRetries: 0,
 		}),
-		domain: auth0Domain,
-		tokens: managementTokens,
+		Domain: auth0Domain,
+		Tokens: managementTokens,
 	}
 	return cdpClient, walker, nil
 }

@@ -114,6 +114,47 @@ func TestResolve(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, OutcomeConflict, result.Outcome)
+		assert.Equal(t, ConflictReasonUnknown, result.ConflictReason, "a bodyless 409 names no reason")
+	})
+
+	t.Run("409 multi-match is classified by its message", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusConflict,
+			body: `{"error":{"code":"CONFLICT","message":"Multiple member profiles matched"}}`}
+		result, err := newTestClient(transport).Resolve(context.Background(), "psmith", "")
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeConflict, result.Outcome)
+		assert.Equal(t, ConflictReasonMultipleMatches, result.ConflictReason)
+	})
+
+	t.Run("409 foreign-LFID (crowd.dev#4574) is classified by its message", func(t *testing.T) {
+		// Pinned contract: CDP does not yet expose a stable code for this
+		// reason, so the message is the only discriminator until it does.
+		transport := &recordingTransport{status: http.StatusConflict,
+			body: `{"error":{"code":"CONFLICT","message":"Member holds a different LFID"}}`}
+		result, err := newTestClient(transport).Resolve(context.Background(), "psmith", "")
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeConflict, result.Outcome)
+		assert.Equal(t, ConflictReasonForeignLFID, result.ConflictReason)
+	})
+
+	t.Run("409 with an unrecognised message stays unknown, never guessed", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusConflict,
+			body: `{"error":{"code":"CONFLICT","message":"something new"}}`}
+		result, err := newTestClient(transport).Resolve(context.Background(), "psmith", "")
+
+		require.NoError(t, err)
+		assert.Equal(t, ConflictReasonUnknown, result.ConflictReason)
+	})
+
+	t.Run("409 classification tolerates casing and punctuation drift upstream", func(t *testing.T) {
+		transport := &recordingTransport{status: http.StatusConflict,
+			body: `{"error":{"code":"CONFLICT","message":"member holds a DIFFERENT LFID."}}`}
+		result, err := newTestClient(transport).Resolve(context.Background(), "psmith", "")
+
+		require.NoError(t, err)
+		assert.Equal(t, ConflictReasonForeignLFID, result.ConflictReason)
 	})
 
 	t.Run("a 400 validation response is an error, never a no-match", func(t *testing.T) {

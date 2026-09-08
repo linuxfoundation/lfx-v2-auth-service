@@ -68,6 +68,23 @@ type CDPMetadataWriter interface {
 	WriteCDPMetadata(ctx context.Context, userID string, record CDPMetadata) error
 }
 
+// CDPMetadataRepairer overwrites a stored UUID when the stored value still
+// equals the observed stale value — the merge-repair job's best-effort
+// compare-and-swap (read-then-check; a concurrent writer can interleave —
+// see the writer docs).
+//
+// It is a separate interface so the capability is reachable only where it is
+// depended on: provisioning and login depend on CDPMetadataWriter and cannot
+// reach the repair path by construction. The shared concrete writer
+// implements both; only the merge-repair job depends on this one.
+type CDPMetadataRepairer interface {
+	// WriteCDPMetadataRepair CAS-overwrites from with record.UUID. The
+	// record's source must be merge-repair and its UUID must differ from
+	// from: a repair that changes nothing is a wasted user.updated event,
+	// not a repair.
+	WriteCDPMetadataRepair(ctx context.Context, userID, from string, record CDPMetadata) error
+}
+
 // CDPMetadataReaderWriter combines the CDP metadata read and write sides.
 type CDPMetadataReaderWriter interface {
 	CDPMetadataReader

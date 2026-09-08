@@ -19,6 +19,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/cdpidentity"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
@@ -255,7 +256,7 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		if errIdentities != nil {
 			return "", Result{}, errIdentities
 		}
-		if other, occupied := foreignLFID(held, username); occupied {
+		if other, occupied := cdpidentity.ForeignLFID(held, username); occupied {
 			// The member already carries somebody else's LFID, so it holds
 			// more than one person. Attaching would add a third and make the
 			// eventual split harder. A resolve conflict is CDP telling us it
@@ -289,6 +290,16 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		return resolved.MemberID, Result{}, nil
 
 	case cdp.OutcomeConflict:
+		if resolved.ConflictReason == cdp.ConflictReasonForeignLFID {
+			// The unique match holds somebody else's LFID. CDP says so at
+			// resolve time since linuxfoundation/crowd.dev#4574; before, it
+			// surfaced through the identities read above. The skip keeps its
+			// name so the cross-person-merge count stays continuous.
+			slog.WarnContext(ctx, "CDP resolve says the matched member holds another LFID, skipping provisioning",
+				"user_id", redaction.Redact(req.UserID),
+			)
+			return "", skip(reasonMemberHoldsForeignLFID), nil
+		}
 		// The identifiers match more than one member. Picking one would store
 		// an arbitrary identity permanently, so this waits for CDP to merge.
 		slog.WarnContext(ctx, "CDP resolve conflicted, skipping provisioning",
@@ -310,6 +321,18 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		reResolved, errResolve := o.cdpClient.Resolve(ctx, username, email)
 		if errResolve != nil {
 			return "", Result{}, errResolve
+		}
+		if reResolved.Outcome == cdp.OutcomeConflict && reResolved.ConflictReason == cdp.ConflictReasonForeignLFID {
+			// The create 409 proved the LFID claimed on the primary, so a
+			// re-resolve that cannot see it contradicts primary-sourced
+			// proof — the same replica-lag shape as the no-match case
+			// below. Retry, don't skip: unlike the initial resolve (which
+			// has no such proof and keeps its skip), nothing stable can
+			// produce this answer here.
+			slog.WarnContext(ctx, "CDP create conflicted but the claimed LFID resolves foreign, retrying",
+				"user_id", redaction.Redact(req.UserID),
+			)
+			return "", Result{}, errs.NewUnexpected("CDP create conflicted but the claimed LFID resolves foreign")
 		}
 		switch reResolved.Outcome {
 		case cdp.OutcomeFound:
@@ -342,7 +365,7 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		if errIdentities != nil {
 			return "", Result{}, errIdentities
 		}
-		if other, occupied := foreignLFID(held, username); occupied {
+		if other, occupied := cdpidentity.ForeignLFID(held, username); occupied {
 			slog.WarnContext(ctx, "CDP member already holds another LFID, skipping provisioning",
 				"user_id", redaction.Redact(req.UserID),
 				"member_id", redaction.Redact(reResolved.MemberID),
@@ -350,7 +373,7 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
 		}
-		if !holdsLFID(held, username) {
+		if !cdpidentity.HoldsLFID(held, username) {
 			// Should not happen: the 409 says the identity is attached
 			// somewhere, and a single-member re-resolve should be the member
 			// holding it. Logged rather than enforced because CDP's
@@ -401,7 +424,7 @@ func (o *orchestrator) adoptConflictMember(
 		return "", Result{}, err
 	}
 
-	if other, occupied := foreignLFID(held, username); occupied {
+	if other, occupied := cdpidentity.ForeignLFID(held, username); occupied {
 		slog.WarnContext(ctx, "the conflicting CDP member holds another LFID, skipping provisioning",
 			"user_id", redaction.Redact(req.UserID),
 			"conflict_member_id", redaction.Redact(conflictMemberID),
@@ -410,7 +433,7 @@ func (o *orchestrator) adoptConflictMember(
 		return "", skip(reasonLFIDOnAnotherMember), nil
 	}
 
-	if !holdsLFID(held, username) {
+	if !cdpidentity.HoldsLFID(held, username) {
 		// It was named as the holder of this LFID and does not hold it, so the
 		// two answers disagree and neither is worth making permanent.
 		slog.WarnContext(ctx, "the conflicting CDP member does not hold this LFID, skipping provisioning",
@@ -426,40 +449,6 @@ func (o *orchestrator) adoptConflictMember(
 		"conflict_member_id", redaction.Redact(conflictMemberID),
 	)
 	return conflictMemberID, Result{}, nil
-}
-
-// foreignLFID reports the first LFID username on the member that is not this
-// user's, if there is one.
-//
-// LFID usernames are one per person, so a member carrying two of them holds
-// two people. Comparison is case-insensitive because CDP stores identity
-// values as they arrive from each source.
-func foreignLFID(held []cdp.MemberIdentity, username string) (string, bool) {
-	for _, identity := range held {
-		if identity.Platform != constants.LFIDPlatform || identity.Type != constants.CDPIdentityTypeUsername {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(identity.Value), username) {
-			return identity.Value, true
-		}
-	}
-	return "", false
-}
-
-// holdsLFID reports whether the member already carries this user's own LFID.
-//
-// The mirror of foreignLFID, and case-insensitive for the same reason: CDP
-// stores identity values as each source supplies them.
-func holdsLFID(held []cdp.MemberIdentity, username string) bool {
-	for _, identity := range held {
-		if identity.Platform != constants.LFIDPlatform || identity.Type != constants.CDPIdentityTypeUsername {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(identity.Value), username) {
-			return true
-		}
-	}
-	return false
 }
 
 // lfidIdentity builds the CDP identity for an LFID username.

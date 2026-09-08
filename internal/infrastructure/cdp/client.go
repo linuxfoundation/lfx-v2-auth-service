@@ -158,10 +158,12 @@ func (c *client) Resolve(ctx context.Context, lfid string, verifiedEmail string)
 		case http.StatusNotFound:
 			return ResolveResult{Outcome: OutcomeNoMatch}, nil
 		case http.StatusConflict:
-			slog.WarnContext(ctx, "CDP resolve matched multiple members",
+			reason := resolveConflictReason(errCall)
+			slog.WarnContext(ctx, "CDP resolve conflicted",
 				"lfid", redaction.Redact(lfid),
+				"reason", string(reason),
 			)
-			return ResolveResult{Outcome: OutcomeConflict}, nil
+			return ResolveResult{Outcome: OutcomeConflict, ConflictReason: reason}, nil
 		case http.StatusTooManyRequests:
 			return ResolveResult{}, rateLimited(ctx, "resolve", errCall)
 		}
@@ -368,4 +370,40 @@ func attachConflictMemberID(err error) string {
 		return ""
 	}
 	return strings.TrimSpace(body.Error.Context.ConflictMemberID)
+}
+
+// Resolve-409 message fragments CDP emits today, verified against
+// backend/src/api/public/v1/members/resolveMember.ts on crowd.dev main
+// ("Multiple member profiles matched" / "Member holds a different LFID").
+// Matched as case-insensitive substrings so a punctuation or casing tweak
+// upstream degrades to Unknown — the generic skip — instead of silently
+// misrouting the foreign-holder class into the multi-match bucket. Revisit
+// when CDP exposes a stable code or context.reason.
+const (
+	resolveConflictFragmentMultiple    = "multiple member profiles matched"
+	resolveConflictFragmentForeignLFID = "different lfid"
+)
+
+// resolveConflictReason classifies a resolve-409 body by its message. Read
+// off the error like attachConflictMemberID; parsed, never logged, because the
+// body may echo the submitted identifiers. Anything unrecognised is Unknown —
+// a guessed reason could turn a foreign-holder into a multi-match skip, or
+// worse.
+func resolveConflictReason(err error) ConflictReason {
+	raw := httpclient.ResponseBody(err)
+	if raw == "" {
+		return ConflictReasonUnknown
+	}
+	var body resolveConflictResponse
+	if jsonErr := json.Unmarshal([]byte(raw), &body); jsonErr != nil {
+		return ConflictReasonUnknown
+	}
+	message := strings.ToLower(body.Error.Message)
+	switch {
+	case strings.Contains(message, resolveConflictFragmentMultiple):
+		return ConflictReasonMultipleMatches
+	case strings.Contains(message, resolveConflictFragmentForeignLFID):
+		return ConflictReasonForeignLFID
+	}
+	return ConflictReasonUnknown
 }
