@@ -386,13 +386,15 @@ func TestProcessUserClassificationError(t *testing.T) {
 				return nil, cdp.ErrMemberNotFound
 			},
 			resolveFn: func(_ context.Context, _, _ string) (cdp.ResolveResult, error) {
-				return cdp.ResolveResult{Outcome: cdp.Outcome("something-cdp-added-later")}, nil
+				return cdp.ResolveResult{Outcome: cdp.Outcome("something-cdp-added-later"), MemberID: "leaked-member-id"}, nil
 			},
 		}
 		verdict, _, err := processUser(ctx, client, &stubWriter{}, pace, repairFlags{dryRun: true}, repairUser())
 		assert.Equal(t, mergerepair.VerdictError, verdict)
 		require.Error(t, err, "run records checkErr.Error(); a nil here would panic and lose the whole tally")
 		assert.Contains(t, err.Error(), "something-cdp-added-later")
+		assert.NotContains(t, err.Error(), "leaked-member-id", "the message reaches stdout unredacted; it must carry no CDP identifier")
+		assert.NotContains(t, err.Error(), "uuid-stale")
 	})
 }
 

@@ -65,8 +65,13 @@ spec:
                 {{- if .Values.mergeRepair.noPrefilter }}
                 - --no-prefilter
                 {{- end }}
+              # Only what buildRepairDeps and the M2M token manager read; the
+              # rest of the service environment (profile client secret, NATS,
+              # SMTP, ...) is not this job's to hold.
+              {{- $allowed := list "AUTH0_TENANT" "AUTH0_DOMAIN" "AUTH0_AUDIENCE" "AUTH0_M2M_CLIENT_ID" "AUTH0_M2M_PRIVATE_BASE64_KEY" "CDP_BASE_URL" "CDP_AUDIENCE" }}
               env:
               {{- range $name, $config := .Values.app.environment }}
+              {{- if has $name $allowed }}
               - name: {{ $name }}
                 {{- if $config.value }}
                 value: {{ $config.value | quote }}
@@ -75,7 +80,8 @@ spec:
                   {{- toYaml $config.valueFrom | nindent 18 }}
                 {{- end }}
               {{- end }}
-              {{- with .Values.app.extraEnv }}
+              {{- end }}
+              {{- with .Values.mergeRepair.extraEnv }}
               {{- toYaml . | nindent 14 }}
               {{- end }}
               {{- $res := .Values.mergeRepair.resources | default .Values.resources }}

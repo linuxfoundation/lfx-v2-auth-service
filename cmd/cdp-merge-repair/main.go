@@ -211,8 +211,10 @@ func processUser(ctx context.Context, client cdp.Client, writer port.CDPMetadata
 	if verdict == mergerepair.VerdictError {
 		// Classify's fail-loud row for inputs it does not recognise; carry a
 		// message so the tally records it instead of run dereferencing nil.
-		return verdict, "", fmt.Errorf("unclassifiable holder: resolve %q member %q stored %q",
-			resolved.Outcome, resolved.MemberID, u.StoredUUID)
+		// Identifier-free: the message survives stdout redaction verbatim,
+		// and the row's user_id already names it in the --out report.
+		return verdict, "", fmt.Errorf("unclassifiable holder: resolve outcome %q, member id present: %t",
+			resolved.Outcome, strings.TrimSpace(resolved.MemberID) != "")
 	}
 	if verdict != mergerepair.VerdictRepaired || !flags.live {
 		return verdict, to, nil

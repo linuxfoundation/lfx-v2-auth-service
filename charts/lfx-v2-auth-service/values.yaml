@@ -94,6 +94,10 @@ mergeRepair:
   # resources overrides the shared deployment resources for the job; unset
   # means the shared block below.
   resources: {}
+  # extraEnv adds environment to the job container only. The job receives an
+  # allowlist of app.environment (Auth0 M2M + CDP keys), never the whole
+  # service environment; anything else it needs goes here.
+  extraEnv: []
 
 # resources is the configuration for resource requests and limits
 resources:
