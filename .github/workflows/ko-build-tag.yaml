@@ -79,6 +79,24 @@ jobs:
             -t latest \
             --sbom spdx
 
+      - name: Build and publish merge-repair image
+        env:
+          VERSION: ${{ steps.prepare.outputs.app_version }}
+          GIT_COMMIT: ${{ github.sha }}
+          STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
+        run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export BUILD_TIME
+          GIT_COMMIT=${GIT_COMMIT:0:7}
+          export GIT_COMMIT
+          ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/cdp-merge-repair \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
+            -t latest \
+            --sbom spdx
+
   release-helm-chart:
     needs: publish
     runs-on: ubuntu-24.04

@@ -60,6 +60,41 @@ service:
 provisioningConsumer:
   enabled: false
 
+# mergeRepair runs the scheduled CDP UUID merge-repair job
+# (linuxfoundation/segment-web-scripts#43). Opt-in like provisioningConsumer: nothing is
+# scheduled unless enabled, and dryRun defaults to true so enabling the
+# schedule can never switch an environment to live writes.
+#
+# "Disjoint from the consumer" is rate-level, not time-level: a full walk
+# takes ~21h at the default cap, so the job overlaps the consumer most of
+# the day by construction. Separation is the uniform cap plus the off-peak
+# start, on the shared per-client CDP budget.
+mergeRepair:
+  enabled: false
+  # schedule is the off-peak start (UTC). The walk itself runs most of the day.
+  schedule: "30 2 * * *"
+  dryRun: true
+  # rate is the CDP calls-per-minute ceiling; every resolve and identity
+  # read takes one slot.
+  rate: 50
+  # limit examines at most N holders (0 = all; canary path).
+  limit: 0
+  # noPrefilter resolves every holder instead of checking the stored member
+  # first (audit mode).
+  noPrefilter: false
+  # activeDeadlineSeconds must stay under 24h so runs cannot pile up; a repeat
+  # walk is correct, only slow, so expiry simply yields to the next schedule.
+  activeDeadlineSeconds: 82800
+  image:
+    # repository is the merge-repair image published beside the server image
+    # (same ko release, package-derived suffix).
+    repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/cdp-merge-repair
+    # tag overrides appVersion from Chart.yaml.
+    tag: ""
+  # resources overrides the shared deployment resources for the job; unset
+  # means the shared block below.
+  resources: {}
+
 # resources is the configuration for resource requests and limits
 resources:
   limits:
