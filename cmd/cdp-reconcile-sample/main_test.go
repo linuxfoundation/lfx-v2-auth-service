@@ -21,8 +21,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0/holderwalk"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
-	lferrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
 
@@ -65,22 +65,6 @@ func (rt *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	req.URL.Scheme = rt.target.Scheme
 	req.URL.Host = rt.target.Host
 	return rt.inner.RoundTrip(req)
-}
-
-// flakyTransport drops the first `failures` requests before the wire, the way
-// a transport error surfaces to the retry loop as a negative status.
-type flakyTransport struct {
-	failures int
-	calls    int
-	inner    http.RoundTripper
-}
-
-func (ft *flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	ft.calls++
-	if ft.calls <= ft.failures {
-		return nil, fmt.Errorf("connection dropped")
-	}
-	return ft.inner.RoundTrip(req)
 }
 
 func TestRequiredSampleSize(t *testing.T) {
@@ -153,12 +137,6 @@ func TestSplitCheckable(t *testing.T) {
 	assert.Equal(t, "dave", checkable[1].Username)
 }
 
-func TestBoundedRetryAfter(t *testing.T) {
-	assert.Equal(t, defaultRateLimitWait, boundedRetryAfter(0), "missing hint falls back to the default")
-	assert.Equal(t, 30*time.Second, boundedRetryAfter(30*time.Second), "sane hint is honored")
-	assert.Equal(t, maxRateLimitWait, boundedRetryAfter(12*time.Hour), "oversized hint is clamped")
-}
-
 func TestIdentityMatchesUser(t *testing.T) {
 	user := gateUser{
 		Username:      "psmith",
@@ -219,7 +197,7 @@ func TestIdentityMatchesUser(t *testing.T) {
 
 func TestCheckUser(t *testing.T) {
 	ctx := context.Background()
-	pace := newLimiter(6000)
+	pace := holderwalk.NewLimiter(6000)
 
 	baseUser := gateUser{
 		UserID:        "auth0|1",
@@ -375,318 +353,6 @@ func TestCheckUser(t *testing.T) {
 	})
 }
 
-func TestCallWithRateLimitRetry(t *testing.T) {
-	ctx := context.Background()
-	pace := newLimiter(6000)
-
-	t.Run("waits and retries on bare RateLimited", func(t *testing.T) {
-		attempts := 0
-		start := time.Now()
-		result, err := callWithRateLimitRetry(ctx, pace, func(context.Context) (string, error) {
-			attempts++
-			if attempts == 1 {
-				return "", lferrors.NewRateLimited("rate limited", 10*time.Millisecond)
-			}
-			return "ok", nil
-		})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", result)
-		assert.Equal(t, 2, attempts)
-		assert.GreaterOrEqual(t, time.Since(start), 10*time.Millisecond)
-	})
-
-	t.Run("returns the last error once retries are exhausted", func(t *testing.T) {
-		attempts := 0
-		_, err := callWithRateLimitRetry(ctx, pace, func(context.Context) (string, error) {
-			attempts++
-			return "", lferrors.NewRateLimited("rate limited", time.Millisecond)
-		})
-		require.Error(t, err)
-		assert.Equal(t, cdpCallMaxAttempts, attempts)
-	})
-}
-
-func TestPopulationWalker(t *testing.T) {
-	t.Run("walks with updated_at bounds and deduplicates overlap", func(t *testing.T) {
-		pageOne := []mgmtUser{{
-			UserID:    "auth0|1",
-			Username:  "alice",
-			UpdatedAt: "2026-01-01T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "UUID-1",
-			},
-		}, {
-			UserID:    "auth0|2",
-			Username:  "bob",
-			UpdatedAt: "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-2",
-			},
-		}}
-		pageTwo := []mgmtUser{{
-			UserID:    "auth0|2",
-			Username:  "bob",
-			UpdatedAt: "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-2",
-			},
-		}, {
-			UserID:    "auth0|3",
-			Username:  "carol",
-			UpdatedAt: "2026-01-03T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-3",
-			},
-		}}
-
-		var queries []string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			queries = append(queries, r.URL.RawQuery)
-			switch {
-			case strings.Contains(r.URL.RawQuery, "1970-01-01"):
-				require.NoError(t, json.NewEncoder(w).Encode(pageOne))
-			case strings.Contains(r.URL.RawQuery, "2026-01-02"):
-				require.NoError(t, json.NewEncoder(w).Encode(pageTwo))
-			default:
-				require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
-			}
-		}))
-		defer server.Close()
-
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-
-		walker := &populationWalker{
-			httpClient: httpclient.NewClient(httpclient.Config{
-				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
-			}),
-			domain: "tenant.auth0.com",
-			tokens: fakeTokenProvider{token: "mgmt-token"},
-		}
-
-		population, malformed, err := walker.listCDPUUIDHolders(context.Background())
-		require.NoError(t, err)
-		assert.Empty(t, malformed)
-		require.Len(t, population, 3)
-		assert.Equal(t, "uuid-1", population[0].StoredUUID)
-		assert.Equal(t, "uuid-2", population[1].StoredUUID)
-		assert.Equal(t, "uuid-3", population[2].StoredUUID)
-		require.GreaterOrEqual(t, len(queries), 2)
-		assert.Contains(t, queries[0], "_exists_%3Aapp_metadata.cdp_uuid")
-		assert.Contains(t, queries[0], "updated_at%3A%5B1970-01-01T00%3A00%3A00.000Z+TO+%2A%5D")
-		assert.Contains(t, queries[1], "updated_at%3A%5B2026-01-02T00%3A00%3A00.000Z+TO+%2A%5D")
-	})
-
-	t.Run("reports malformed cdp_uuid holders and blanks non-database usernames", func(t *testing.T) {
-		page := []mgmtUser{{
-			UserID:      "auth0|bad",
-			Username:    "mallory",
-			UpdatedAt:   "2026-01-01T00:00:00.000Z",
-			AppMetadata: map[string]any{"cdp_uuid": 42},
-		}, {
-			UserID:      "google-oauth2|123",
-			Username:    "social-handle",
-			UpdatedAt:   "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{"cdp_uuid": "uuid-social"},
-		}}
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.RawQuery, "1970-01-01") {
-				require.NoError(t, json.NewEncoder(w).Encode(page))
-				return
-			}
-			require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
-		}))
-		defer server.Close()
-
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-
-		walker := &populationWalker{
-			httpClient: httpclient.NewClient(httpclient.Config{
-				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
-			}),
-			domain: "tenant.auth0.com",
-			tokens: fakeTokenProvider{token: "mgmt-token"},
-		}
-
-		population, malformed, err := walker.listCDPUUIDHolders(context.Background())
-		require.NoError(t, err)
-		assert.Equal(t, []string{"auth0|bad"}, malformed)
-		require.Len(t, population, 1)
-		assert.Equal(t, "google-oauth2|123", population[0].UserID)
-		assert.Empty(t, population[0].Username, "a social-primary root username is not an LFID")
-	})
-
-	newTieWalker := func(t *testing.T, server *httptest.Server) *populationWalker {
-		t.Helper()
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-		return &populationWalker{
-			httpClient: httpclient.NewClient(httpclient.Config{
-				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
-			}),
-			domain:       "tenant.auth0.com",
-			tokens:       fakeTokenProvider{token: "mgmt-token"},
-			retryBackoff: time.Millisecond,
-		}
-	}
-
-	const tie = "2026-01-01T00:00:00.000Z"
-	makeTiePage := func() []mgmtUser {
-		tiePage := make([]mgmtUser, walkPageSize)
-		for i := range tiePage {
-			tiePage[i] = mgmtUser{
-				UserID:      fmt.Sprintf("auth0|tie-%03d", i),
-				Username:    fmt.Sprintf("tie%03d", i),
-				UpdatedAt:   tie,
-				AppMetadata: map[string]any{"cdp_uuid": fmt.Sprintf("uuid-tie-%03d", i)},
-			}
-		}
-		return tiePage
-	}
-
-	t.Run("drains a full page of one shared updated_at with a count-verified exact query", func(t *testing.T) {
-		tiePage := makeTiePage()
-		tail := []mgmtUser{{
-			UserID:      "auth0|after",
-			Username:    "after",
-			UpdatedAt:   "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{"cdp_uuid": "uuid-after"},
-		}}
-
-		var sawDrain, sawExclusive bool
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			q := r.URL.Query().Get("q")
-			switch {
-			case strings.Contains(q, "1970-01-01"):
-				// The whole population starts at one shared timestamp.
-				require.NoError(t, json.NewEncoder(w).Encode(tiePage))
-			case r.URL.Query().Get("include_totals") == "true":
-				// The exact-timestamp drain, verified against the total.
-				sawDrain = true
-				require.Contains(t, q, fmt.Sprintf("updated_at:[%s TO %s]", tie, tie))
-				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: len(tiePage), Users: tiePage}))
-			case strings.Contains(q, "updated_at:{"+tie):
-				// The exclusive bound steps strictly past the drained block.
-				sawExclusive = true
-				require.NoError(t, json.NewEncoder(w).Encode(tail))
-			case strings.Contains(q, "updated_at:["+tie):
-				// The inclusive bound re-presents the full tie page: the
-				// bound cannot advance, forcing the drain.
-				require.NoError(t, json.NewEncoder(w).Encode(tiePage))
-			case strings.Contains(q, "2026-01-02"):
-				require.NoError(t, json.NewEncoder(w).Encode(tail))
-			default:
-				require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
-			}
-		}))
-		defer server.Close()
-
-		population, malformed, err := newTieWalker(t, server).listCDPUUIDHolders(context.Background())
-		require.NoError(t, err)
-		assert.Empty(t, malformed)
-		assert.Len(t, population, walkPageSize+1, "the tie block and the row after it are all enumerated")
-		assert.True(t, sawDrain, "the tie block must be drained through the exact-timestamp query")
-		assert.True(t, sawExclusive, "the walk must resume strictly past the drained timestamp")
-	})
-
-	t.Run("fails when a tie block cannot be proven complete", func(t *testing.T) {
-		tiePage := makeTiePage()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("include_totals") == "true" {
-				// One more holder than any pass ever returns — the reshuffle
-				// omission the count check exists to catch.
-				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: len(tiePage) + 1, Users: tiePage}))
-				return
-			}
-			require.NoError(t, json.NewEncoder(w).Encode(tiePage))
-		}))
-		defer server.Close()
-
-		_, _, err := newTieWalker(t, server).listCDPUUIDHolders(context.Background())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "incomplete after")
-	})
-
-	t.Run("fails closed on a tie block at Auth0's 1,000-result cap", func(t *testing.T) {
-		tiePage := makeTiePage()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("include_totals") == "true" {
-				// Auth0 caps the reported total at the window itself, so the
-				// cap is the largest value the guard will ever see.
-				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: walkOffsetLimit, Users: tiePage}))
-				return
-			}
-			require.NoError(t, json.NewEncoder(w).Encode(tiePage))
-		}))
-		defer server.Close()
-
-		_, _, err := newTieWalker(t, server).listCDPUUIDHolders(context.Background())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot enumerate")
-	})
-
-	t.Run("retries a 5xx page and succeeds", func(t *testing.T) {
-		var calls int
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			calls++
-			if calls == 1 {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
-		}))
-		defer server.Close()
-
-		population, malformed, err := newTieWalker(t, server).listCDPUUIDHolders(context.Background())
-		require.NoError(t, err)
-		assert.Empty(t, population)
-		assert.Empty(t, malformed)
-		assert.Equal(t, 2, calls, "the transient 503 is retried exactly once")
-	})
-
-	t.Run("fails immediately on a non-retryable 4xx", func(t *testing.T) {
-		var calls int
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			calls++
-			w.WriteHeader(http.StatusBadRequest)
-		}))
-		defer server.Close()
-
-		_, _, err := newTieWalker(t, server).listCDPUUIDHolders(context.Background())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "status code: 400")
-		assert.Equal(t, 1, calls, "a 4xx is a caller bug, never retried")
-	})
-
-	t.Run("retries a transport failure like a 5xx", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
-		}))
-		defer server.Close()
-
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-		transport := &flakyTransport{
-			failures: 1,
-			inner:    &rewriteTransport{target: target, inner: server.Client().Transport},
-		}
-		walker := &populationWalker{
-			httpClient:   httpclient.NewClient(httpclient.Config{Transport: transport}),
-			domain:       "tenant.auth0.com",
-			tokens:       fakeTokenProvider{token: "mgmt-token"},
-			retryBackoff: time.Millisecond,
-		}
-
-		population, malformed, errWalk := walker.listCDPUUIDHolders(context.Background())
-		require.NoError(t, errWalk)
-		assert.Empty(t, population)
-		assert.Empty(t, malformed)
-		assert.Equal(t, 2, transport.calls, "the dropped connection is retried")
-	})
-}
-
 func TestReportExitCode(t *testing.T) {
 	t.Run("zero when every sampled user agrees", func(t *testing.T) {
 		code := reportExitCode(report{SampleSize: 1, Counts: map[string]int{"agree_single": 1}})
@@ -740,37 +406,37 @@ func TestWriteReportRestrictsPermissions(t *testing.T) {
 
 // populationServer serves one page of holders for the initial bound and an
 // empty page for every later query.
-func populationServer(t *testing.T, users []mgmtUser) *httptest.Server {
+func populationServer(t *testing.T, users []holderwalk.MgmtUser) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Query().Get("q"), "1970-01-01") {
 			require.NoError(t, json.NewEncoder(w).Encode(users))
 			return
 		}
-		require.NoError(t, json.NewEncoder(w).Encode([]mgmtUser{}))
+		require.NoError(t, json.NewEncoder(w).Encode([]holderwalk.MgmtUser{}))
 	}))
 }
 
-func testRunClients(t *testing.T, client cdp.Client, server *httptest.Server) func(context.Context) (cdp.Client, *populationWalker, error) {
+func testRunClients(t *testing.T, client cdp.Client, server *httptest.Server) func(context.Context) (cdp.Client, *holderwalk.Walker, error) {
 	t.Helper()
 	target, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	return func(context.Context) (cdp.Client, *populationWalker, error) {
-		walker := &populationWalker{
-			httpClient: httpclient.NewClient(httpclient.Config{
+	return func(context.Context) (cdp.Client, *holderwalk.Walker, error) {
+		walker := &holderwalk.Walker{
+			HTTPClient: httpclient.NewClient(httpclient.Config{
 				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
 			}),
-			domain:       "tenant.auth0.com",
-			tokens:       fakeTokenProvider{token: "mgmt-token"},
-			retryBackoff: time.Millisecond,
+			Domain:       "tenant.auth0.com",
+			Tokens:       fakeTokenProvider{token: "mgmt-token"},
+			RetryBackoff: time.Millisecond,
 		}
 		return client, walker, nil
 	}
 }
 
 func TestRun(t *testing.T) {
-	mkUser := func(i int, uuid any) mgmtUser {
-		return mgmtUser{
+	mkUser := func(i int, uuid any) holderwalk.MgmtUser {
+		return holderwalk.MgmtUser{
 			UserID:        fmt.Sprintf("auth0|u%d", i),
 			Username:      fmt.Sprintf("user%d", i),
 			Email:         fmt.Sprintf("u%d@example.org", i),
@@ -795,7 +461,7 @@ func TestRun(t *testing.T) {
 	}
 
 	t.Run("census agreement exits 0 with the requested confidence", func(t *testing.T) {
-		server := populationServer(t, []mgmtUser{mkUser(1, "uuid-1"), mkUser(2, "uuid-2"), mkUser(3, "uuid-3")})
+		server := populationServer(t, []holderwalk.MgmtUser{mkUser(1, "uuid-1"), mkUser(2, "uuid-2"), mkUser(3, "uuid-3")})
 		defer server.Close()
 		outPath := filepath.Join(t.TempDir(), "report.json")
 
@@ -810,7 +476,7 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("undersized override reports the achieved confidence", func(t *testing.T) {
-		server := populationServer(t, []mgmtUser{
+		server := populationServer(t, []holderwalk.MgmtUser{
 			mkUser(1, "uuid-1"), mkUser(2, "uuid-2"), mkUser(3, "uuid-3"), mkUser(4, "uuid-4"), mkUser(5, "uuid-5"),
 		})
 		defer server.Close()
@@ -827,7 +493,7 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("a disagreement beside an error still exits 1", func(t *testing.T) {
-		server := populationServer(t, []mgmtUser{mkUser(1, "uuid-1"), mkUser(2, "uuid-2")})
+		server := populationServer(t, []holderwalk.MgmtUser{mkUser(1, "uuid-1"), mkUser(2, "uuid-2")})
 		defer server.Close()
 		client := stubCDPClient{
 			resolveFn: func(_ context.Context, lfid, _ string) (cdp.ResolveResult, error) {
@@ -849,7 +515,7 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("a malformed stored value is an enumeration warning, not a check error", func(t *testing.T) {
-		server := populationServer(t, []mgmtUser{mkUser(1, "uuid-1"), mkUser(2, 42)})
+		server := populationServer(t, []holderwalk.MgmtUser{mkUser(1, "uuid-1"), mkUser(2, 42)})
 		defer server.Close()
 		outPath := filepath.Join(t.TempDir(), "report.json")
 
