@@ -91,7 +91,8 @@ mergeRepair:
     # repository is the merge-repair image published beside the server image
     # (same ko release, package-derived suffix).
     repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/cdp-merge-repair
-    # tag overrides appVersion from Chart.yaml.
+    # tag pins the job image. Unset means the deployment image.tag, which
+    # itself falls back to appVersion from Chart.yaml.
     tag: ""
   # resources overrides the shared deployment resources for the job; unset
   # means the shared block below.

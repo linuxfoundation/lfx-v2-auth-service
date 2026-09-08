@@ -50,7 +50,10 @@ spec:
             # (identifiers redacted) is this job's only artifact when --out
             # is unset.
             - name: app
-              image: "{{ .Values.mergeRepair.image.repository }}:{{ .Values.mergeRepair.image.tag | default .Chart.AppVersion }}"
+              # mergeRepair.image.tag wins; otherwise the job tracks the
+              # deployment image tag (mutable "development" in dev, pinned
+              # release tags in staging/prod), then the chart AppVersion.
+              image: "{{ .Values.mergeRepair.image.repository }}:{{ .Values.mergeRepair.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
               securityContext:
                 allowPrivilegeEscalation: false
                 runAsNonRoot: true
