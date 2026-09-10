@@ -29,15 +29,16 @@ spec:
       backoffLimit: 0
       template:
         metadata:
+          # The walk runs ~20h+; Karpenter consolidation evicted the first
+          # full run at 15h (2026-09-10). Job-specific on purpose: the
+          # Deployment must stay consolidatable, so this never goes in the
+          # shared podAnnotations. merge keeps the first argument on key
+          # clash, so a podAnnotations entry for the same key cannot
+          # override or duplicate it.
+          {{- $jobAnnotations := dict "karpenter.sh/do-not-disrupt" "true" }}
+          {{- $annotations := merge $jobAnnotations (default (dict) .Values.podAnnotations) }}
           annotations:
-            # The walk runs ~20h+; Karpenter consolidation evicted the first
-            # full run at 15h (2026-09-10). Job-specific on purpose: the
-            # Deployment must stay consolidatable, so this never goes in the
-            # shared podAnnotations.
-            karpenter.sh/do-not-disrupt: "true"
-            {{- with .Values.podAnnotations }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
+            {{- toYaml $annotations | nindent 12 }}
           labels:
             app: {{ .Chart.Name }}-merge-repair
             app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
