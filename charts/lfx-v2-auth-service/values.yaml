@@ -84,6 +84,10 @@ mergeRepair:
   # noPrefilter resolves every holder instead of checking the stored member
   # first (audit mode).
   noPrefilter: false
+  # direction is the walk order: asc (oldest updated_at first), desc (newest
+  # first) or auto, which alternates daily so a deadline-truncated tail is
+  # never the same holders two nights running.
+  direction: auto
   # activeDeadlineSeconds must stay under 24h so runs cannot pile up; a repeat
   # walk is correct, only slow, so expiry simply yields to the next schedule.
   activeDeadlineSeconds: 82800

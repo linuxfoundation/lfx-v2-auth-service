@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -92,6 +93,7 @@ type tallyReport struct {
 		RatePerMinute int       `json:"rate_per_min"`
 		Limit         int       `json:"limit"`
 		Prefilter     bool      `json:"prefilter"`
+		Direction     string    `json:"direction"`
 		StartedAt     time.Time `json:"started_at"`
 		FinishedAt    time.Time `json:"finished_at"`
 		WalkComplete  bool      `json:"walk_complete"`
@@ -277,6 +279,36 @@ type repairOptions struct {
 	live          bool
 	noPrefilter   bool
 	outPath       string
+	direction     string
+	// now supplies the clock for direction=auto; nil means time.Now.
+	now func() time.Time
+}
+
+// Walk directions. The walker enumerates the whole population ascending by
+// updated_at, so desc is a slice reversal before the --limit cut: a
+// deadline-truncated walk always skips a tail, and alternating which tail
+// keeps the blind spot from being the same holders every night.
+const (
+	directionAsc  = "asc"
+	directionDesc = "desc"
+	directionAuto = "auto"
+)
+
+// resolveDirection maps the flag to asc or desc. auto alternates on epoch-day
+// parity (not year-day, which repeats across Dec 31 -> Jan 1) so consecutive
+// scheduled runs face opposite ways.
+func resolveDirection(value string, now time.Time) (string, error) {
+	switch value {
+	case directionAsc, directionDesc:
+		return value, nil
+	case directionAuto:
+		if (now.UTC().Unix()/86400)%2 == 0 {
+			return directionAsc, nil
+		}
+		return directionDesc, nil
+	default:
+		return "", fmt.Errorf("-direction must be asc, desc or auto, got %q", value)
+	}
 }
 
 // maxRepairRecords caps the per-repair listing in the tally; the counters
@@ -302,6 +334,14 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	if opts.limit < 0 {
 		return 2, fmt.Errorf("-limit must be zero or positive, got %d", opts.limit)
 	}
+	now := opts.now
+	if now == nil {
+		now = time.Now
+	}
+	direction, err := resolveDirection(opts.direction, now())
+	if err != nil {
+		return 2, err
+	}
 	live := opts.live && !opts.dryRun
 	if opts.live && opts.dryRun {
 		slog.WarnContext(ctx, "--live without --dry-run=false stays a dry run")
@@ -311,7 +351,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		mode = "live"
 	}
 
-	started := time.Now()
+	started := now()
 	out := tallyReport{
 		Repairs:             []repairRecord{},
 		ErrorSamples:        []checkError{},
@@ -321,7 +361,9 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	out.Run.RatePerMinute = opts.ratePerMinute
 	out.Run.Limit = opts.limit
 	out.Run.Prefilter = !opts.noPrefilter
+	out.Run.Direction = direction
 	out.Run.StartedAt = started.UTC()
+	slog.InfoContext(ctx, "merge-repair walk direction", "direction", direction, "requested", opts.direction)
 
 	population, malformed, err := deps.list(ctx)
 	if err != nil {
@@ -340,6 +382,11 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 			return 1, errors.Join(err, werr)
 		}
 		return 1, err
+	}
+	// Reverse before the cut so desc --limit N examines the newest-updated N,
+	// not the oldest N in reverse.
+	if direction == directionDesc {
+		slices.Reverse(population)
 	}
 	if opts.limit > 0 && len(population) > opts.limit {
 		population = population[:opts.limit]
@@ -534,9 +581,10 @@ func realMain() int {
 	dryRun := flag.Bool("dry-run", true, "classify and tally only; zero writes")
 	live := flag.Bool("live", false, "authorize live CAS writes (requires --dry-run=false)")
 	ratePerMinute := flag.Int("rate", defaultRatePerMinute, "CDP calls per minute ceiling; every resolve and identity read takes one slot")
-	limit := flag.Int("limit", 0, "examine at most N holders (0 = all; canary path)")
+	limit := flag.Int("limit", 0, "examine at most N holders in walk order (0 = all; canary path — the newest N under desc)")
 	noPrefilter := flag.Bool("no-prefilter", false, "resolve every holder; skip the stored-member pre-filter (audit mode)")
 	outPath := flag.String("out", "", "write the JSON tally here (default stdout)")
+	direction := flag.String("direction", directionAuto, "walk order: asc (oldest updated_at first), desc (newest first), or auto (alternates daily)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -554,6 +602,7 @@ func realMain() int {
 		live:          *live,
 		noPrefilter:   *noPrefilter,
 		outPath:       *outPath,
+		direction:     *direction,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "merge-repair failed", "error", err)
