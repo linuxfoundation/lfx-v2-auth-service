@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,7 +365,7 @@ func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code, err := run(ctx, newDeps(&stdout), repairOptions{ratePerMinute: 6000, dryRun: true})
+	code, err := run(ctx, newDeps(&stdout), repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc})
 	require.NoError(t, err)
 	assert.Equal(t, 1, code, "an error row and an enumeration warning are inconclusive")
 	logged := stdout.String()
@@ -376,7 +378,7 @@ func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
 	assert.Contains(t, logged, "unclassifiable holder", "diagnostics survive redaction")
 
 	outPath := filepath.Join(t.TempDir(), "tally.json")
-	_, err = run(ctx, newDeps(nil), repairOptions{ratePerMinute: 6000, dryRun: true, outPath: outPath})
+	_, err = run(ctx, newDeps(nil), repairOptions{ratePerMinute: 6000, dryRun: true, outPath: outPath, direction: directionAsc})
 	require.NoError(t, err)
 	raw, err := os.ReadFile(outPath)
 	require.NoError(t, err)
@@ -396,7 +398,7 @@ func TestRunEnumerationFailureStillEmitsATally(t *testing.T) {
 		},
 		stdout: &stdout,
 	}
-	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true})
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc})
 	require.Error(t, err)
 	assert.Equal(t, 1, code)
 	var out tallyReport
@@ -424,7 +426,7 @@ func TestRunEnumerationFailureSurfacesSinkError(t *testing.T) {
 		},
 		stdout: errWriter{err: errors.New("stdout closed")},
 	}
-	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true})
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc})
 	require.Error(t, err)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, err.Error(), "management walk failed", "the walk error must survive the join")
@@ -531,7 +533,7 @@ func TestRunWritesNothingWhenNothingQualifies(t *testing.T) {
 			return population, nil, nil
 		},
 	}
-	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: false, live: true})
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: false, live: true, direction: directionAsc})
 	require.NoError(t, err)
 	assert.Equal(t, 0, code)
 	assert.Zero(t, writer.calls, "no qualifying repair means zero PATCH calls")
@@ -559,7 +561,7 @@ func TestRunLimitIsIntentNotTruncation(t *testing.T) {
 		},
 	}
 	outPath := filepath.Join(t.TempDir(), "tally.json")
-	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, limit: 1, outPath: outPath})
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, limit: 1, outPath: outPath, direction: directionAsc})
 	require.NoError(t, err)
 	assert.Equal(t, 0, code)
 
@@ -570,6 +572,104 @@ func TestRunLimitIsIntentNotTruncation(t *testing.T) {
 	assert.True(t, out.Run.WalkComplete, "--limit is operator intent; only deadline/interrupt truncation flips this")
 	assert.Equal(t, 1, out.Run.Limit)
 	assert.Equal(t, 1, out.Counters.Examined)
+}
+
+func TestResolveDirection(t *testing.T) {
+	// Epoch-day parity, not year-day: Dec 31 -> Jan 1 must still alternate.
+	even := time.Date(2026, 12, 31, 3, 0, 0, 0, time.UTC) // day 20818 (even)
+	odd := even.Add(24 * time.Hour)                       // Jan 1, day 20819
+	require.Equal(t, int64(0), (even.Unix()/86400)%2, "fixture must land on an even epoch day")
+
+	got, err := resolveDirection(directionAuto, even)
+	require.NoError(t, err)
+	assert.Equal(t, directionAsc, got)
+	got, err = resolveDirection(directionAuto, odd)
+	require.NoError(t, err)
+	assert.Equal(t, directionDesc, got)
+
+	for _, explicit := range []string{directionAsc, directionDesc} {
+		got, err = resolveDirection(explicit, odd)
+		require.NoError(t, err)
+		assert.Equal(t, explicit, got, "explicit direction ignores the clock")
+	}
+
+	_, err = resolveDirection("sideways", odd)
+	assert.Error(t, err)
+	_, err = resolveDirection("", odd)
+	assert.Error(t, err, "empty is a usage error, never a silent default")
+}
+
+func TestRunDirectionDescSelectsNewestUnderLimit(t *testing.T) {
+	// The walker enumerates ascending by updated_at; desc must reverse before
+	// the --limit cut so a canary examines the newest N, and the tally must
+	// say which way the walk ran.
+	ctx := context.Background()
+	population := []holderUser{
+		{UserID: "auth0|old", Username: "old", EmailVerified: true, StoredUUID: "uuid-old"},
+		{UserID: "auth0|mid", Username: "mid", EmailVerified: true, StoredUUID: "uuid-mid"},
+		{UserID: "auth0|new", Username: "new", EmailVerified: true, StoredUUID: "uuid-new"},
+	}
+	var seen []string
+	client := &stubCDPClient{
+		listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+			seen = append(seen, memberID)
+			return []cdp.MemberIdentity{lfid(strings.TrimPrefix(memberID, "uuid-"))}, nil
+		},
+	}
+	newDeps := func() repairDeps {
+		return repairDeps{
+			client: client,
+			writer: &stubWriter{},
+			list: func(context.Context) ([]holderUser, []string, error) {
+				return slices.Clone(population), nil, nil
+			},
+		}
+	}
+	runWith := func(direction string, limit int) tallyReport {
+		seen = nil
+		outPath := filepath.Join(t.TempDir(), "tally.json")
+		code, err := run(ctx, newDeps(), repairOptions{ratePerMinute: 6000, dryRun: true, limit: limit, outPath: outPath, direction: direction})
+		require.NoError(t, err)
+		require.Equal(t, 0, code)
+		raw, err := os.ReadFile(outPath)
+		require.NoError(t, err)
+		var out tallyReport
+		require.NoError(t, json.Unmarshal(raw, &out))
+		return out
+	}
+
+	out := runWith(directionDesc, 2)
+	assert.Equal(t, []string{"uuid-new", "uuid-mid"}, seen, "desc --limit 2 examines the newest two, newest first")
+	assert.Equal(t, directionDesc, out.Run.Direction)
+	assert.Equal(t, 2, out.Counters.Examined)
+
+	out = runWith(directionAsc, 2)
+	assert.Equal(t, []string{"uuid-old", "uuid-mid"}, seen, "asc --limit 2 examines the oldest two")
+	assert.Equal(t, directionAsc, out.Run.Direction)
+
+	// auto records the resolved direction, not the word "auto".
+	fixed := time.Date(2026, 9, 11, 2, 30, 0, 0, time.UTC)
+	outPath := filepath.Join(t.TempDir(), "tally.json")
+	code, err := run(ctx, newDeps(), repairOptions{ratePerMinute: 6000, dryRun: true, outPath: outPath, direction: directionAuto, now: func() time.Time { return fixed }})
+	require.NoError(t, err)
+	require.Equal(t, 0, code)
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	var autoOut tallyReport
+	require.NoError(t, json.Unmarshal(raw, &autoOut))
+	want, err := resolveDirection(directionAuto, fixed)
+	require.NoError(t, err)
+	assert.Equal(t, want, autoOut.Run.Direction)
+	assert.NotEqual(t, directionAuto, autoOut.Run.Direction)
+	// The fixed clock steers direction only; run timing stays on the real clock.
+	assert.GreaterOrEqual(t, autoOut.DurationSeconds, 0.0)
+	assert.False(t, autoOut.Run.FinishedAt.Before(autoOut.Run.StartedAt))
+}
+
+func TestRunRejectsUnknownDirection(t *testing.T) {
+	code, err := run(context.Background(), repairDeps{}, repairOptions{ratePerMinute: 6000, dryRun: true, direction: "sideways"})
+	assert.Error(t, err)
+	assert.Equal(t, 2, code, "unknown -direction is a usage error like a bad -rate")
 }
 
 func TestTallyJSONKeys(t *testing.T) {
