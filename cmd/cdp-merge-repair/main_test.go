@@ -661,6 +661,9 @@ func TestRunDirectionDescSelectsNewestUnderLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, autoOut.Run.Direction)
 	assert.NotEqual(t, directionAuto, autoOut.Run.Direction)
+	// The fixed clock steers direction only; run timing stays on the real clock.
+	assert.GreaterOrEqual(t, autoOut.DurationSeconds, 0.0)
+	assert.False(t, autoOut.Run.FinishedAt.Before(autoOut.Run.StartedAt))
 }
 
 func TestRunRejectsUnknownDirection(t *testing.T) {

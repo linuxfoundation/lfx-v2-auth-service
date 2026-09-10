@@ -280,7 +280,8 @@ type repairOptions struct {
 	noPrefilter   bool
 	outPath       string
 	direction     string
-	// now supplies the clock for direction=auto; nil means time.Now.
+	// now supplies the clock for direction=auto only; nil means time.Now.
+	// Run timing (StartedAt/FinishedAt/DurationSeconds) always uses the real clock.
 	now func() time.Time
 }
 
@@ -351,7 +352,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		mode = "live"
 	}
 
-	started := now()
+	started := time.Now()
 	out := tallyReport{
 		Repairs:             []repairRecord{},
 		ErrorSamples:        []checkError{},
