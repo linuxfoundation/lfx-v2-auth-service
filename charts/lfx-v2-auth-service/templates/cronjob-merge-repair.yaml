@@ -29,10 +29,15 @@ spec:
       backoffLimit: 0
       template:
         metadata:
-          {{- with .Values.podAnnotations }}
           annotations:
+            # The walk runs ~20h+; Karpenter consolidation evicted the first
+            # full run at 15h (2026-09-10). Job-specific on purpose: the
+            # Deployment must stay consolidatable, so this never goes in the
+            # shared podAnnotations.
+            karpenter.sh/do-not-disrupt: "true"
+            {{- with .Values.podAnnotations }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           labels:
             app: {{ .Chart.Name }}-merge-repair
             app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
