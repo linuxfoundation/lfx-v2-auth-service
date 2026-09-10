@@ -68,7 +68,7 @@ spec:
                 {{- end }}
                 - --rate={{ .Values.mergeRepair.rate }}
                 - --limit={{ .Values.mergeRepair.limit }}
-                - --direction={{ .Values.mergeRepair.direction }}
+                - --direction={{ .Values.mergeRepair.direction | default "auto" }}
                 {{- if .Values.mergeRepair.noPrefilter }}
                 - --no-prefilter
                 {{- end }}
