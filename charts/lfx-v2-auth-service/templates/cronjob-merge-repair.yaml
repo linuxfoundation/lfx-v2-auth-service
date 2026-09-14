@@ -47,6 +47,12 @@ spec:
             {{- end }}
         spec:
           restartPolicy: Never
+          # On a deadline kill or eviction the binary writes its truncated
+          # tally and then holds ~60s (--exit-hold) so the log shipper drains
+          # it; the grace period must outlast that hold or SIGKILL lands
+          # first and the tally dies with the pod. Normal completion never
+          # receives SIGTERM, so this only matters on the truncated paths.
+          terminationGracePeriodSeconds: 90
           # The job talks to Auth0 and CDP only; it never uses a Kubernetes
           # token and gets none of the provisioning Lease RBAC.
           automountServiceAccountToken: false

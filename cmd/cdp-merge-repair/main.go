@@ -315,9 +315,14 @@ type terminationSummary struct {
 // writeTerminationSummary writes the counters-only summary as one JSON line.
 // Best effort by design: the stdout tally is the contract artifact; this is
 // the copy that outlives the log pipeline. No identifiers are included, so
-// no redaction question arises.
+// no redaction question arises. The kubelet pre-creates the termination file
+// in every container, so "path exists" is the in-pod signal: a dev machine
+// (no such file) stays silent instead of warning on every local run.
 func writeTerminationSummary(out tallyReport, path string) {
 	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
 		return
 	}
 	summary := terminationSummary{
@@ -438,7 +443,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 			return 1, errors.Join(err, werr)
 		}
 		writeTerminationSummary(out, opts.terminationPath)
-		holdBeforeExit(ctx, opts.exitHold)
+		holdBeforeExit(opts.exitHold)
 		return 1, err
 	}
 	// Reverse before the cut so desc --limit N examines the newest-updated N,
@@ -514,19 +519,29 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		"unchecked", out.Unchecked,
 	)
 
-	holdBeforeExit(ctx, opts.exitHold)
+	holdBeforeExit(opts.exitHold)
 
 	return exitCode(out), nil
 }
 
 // holdBeforeExit lingers after the tally is written so the node's log
 // shipper drains the final stdout burst while the pod still exists (and, in
-// the CronJob, still pins its node via do-not-disrupt). Interruptible: a
-// SIGTERM during the hold exits at once.
-func holdBeforeExit(ctx context.Context, hold time.Duration) {
+// the CronJob, still pins its node via do-not-disrupt).
+//
+// It deliberately does NOT select on the run context: on the two paths where
+// the tally matters most — deadline kill and eviction — that context is
+// already cancelled by the SIGTERM that truncated the walk, and a hold
+// keyed on it would return instantly (exactly the 2026-09-11 shape). Instead
+// a fresh signal context is armed, so a *second* SIGINT/SIGTERM cuts the
+// hold short (local Ctrl-C twice still exits) while Kubernetes, which sends
+// exactly one SIGTERM, always gets the full hold — bounded by the pod's
+// terminationGracePeriodSeconds, which the chart sets above this value.
+func holdBeforeExit(hold time.Duration) {
 	if hold <= 0 {
 		return
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	select {
 	case <-time.After(hold):
 	case <-ctx.Done():
@@ -665,9 +680,19 @@ func realMain() int {
 	noPrefilter := flag.Bool("no-prefilter", false, "resolve every holder; skip the stored-member pre-filter (audit mode)")
 	outPath := flag.String("out", "", "write the JSON tally here (default stdout)")
 	direction := flag.String("direction", directionAuto, "walk order: asc (oldest updated_at first), desc (newest first), or auto (alternates daily)")
-	exitHold := flag.Duration("exit-hold", defaultExitHold, "linger after the tally is written so the log shipper drains it (0 to exit at once)")
+	// The hold exists to protect the stdout->shipper path only, so its default
+	// follows the sink: 60s when stdout is the tally sink (the CronJob), none
+	// when --out names a file. An explicit --exit-hold overrides either.
+	exitHold := flag.Duration("exit-hold", -1, "linger after the tally is written so the log shipper drains it (default 60s with stdout, 0 with --out)")
 	terminationPath := flag.String("termination-log", defaultTerminationPath, "also write a counters-only summary here (kubelet termination message; empty to disable)")
 	flag.Parse()
+	if *exitHold < 0 {
+		if *outPath == "" {
+			*exitHold = defaultExitHold
+		} else {
+			*exitHold = 0
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

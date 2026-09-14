@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -697,6 +698,7 @@ func TestRunWritesCountersOnlyTerminationSummary(t *testing.T) {
 		},
 	}
 	termPath := filepath.Join(t.TempDir(), "termination-log")
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644), "the kubelet pre-creates the file; its presence is the in-pod signal")
 	deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
 		list: func(context.Context) ([]holderUser, []string, error) { return population, nil, nil }}
 	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
@@ -719,8 +721,9 @@ func TestRunWritesCountersOnlyTerminationSummary(t *testing.T) {
 }
 
 func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
-	// An unwritable path (local run without the kubelet mount) must not turn
-	// a clean run into a failure; the stdout tally is the contract artifact.
+	// A missing path (local run without the kubelet mount) must be silent and
+	// must not turn a clean run into a failure; the stdout tally is the
+	// contract artifact.
 	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
 		return []cdp.MemberIdentity{lfid("alice")}, nil // stored member alive and agrees
 	}}
@@ -732,20 +735,44 @@ func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
 	assert.Equal(t, 0, code)
 }
 
-func TestHoldBeforeExitIsInterruptible(t *testing.T) {
+func TestHoldBeforeExitIgnoresTheCancelledRunContext(t *testing.T) {
+	// The deadline-kill and eviction paths reach the hold with the run ctx
+	// already cancelled by the truncating SIGTERM. The hold must still run its
+	// full course there (that is when the tally matters most), so it keys on
+	// a fresh signal context, not the run ctx. Exercised via run(): a
+	// pre-cancelled ctx must not shorten the hold.
 	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+		return []cdp.MemberIdentity{lfid("alice")}, nil
+	}}
+	deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+		}}
 	started := time.Now()
-	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
-	holdBeforeExit(ctx, time.Hour)
-	assert.Less(t, time.Since(started), time.Second, "SIGTERM (ctx cancel) must cut the hold short")
+	_, _ = run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, exitHold: 150 * time.Millisecond})
+	assert.GreaterOrEqual(t, time.Since(started), 150*time.Millisecond, "a cancelled run ctx must not cut the hold short")
 
 	started = time.Now()
-	holdBeforeExit(context.Background(), 0)
+	holdBeforeExit(0)
 	assert.Less(t, time.Since(started), 50*time.Millisecond, "zero hold returns immediately")
 
 	started = time.Now()
-	holdBeforeExit(context.Background(), 30*time.Millisecond)
+	holdBeforeExit(30 * time.Millisecond)
 	assert.GreaterOrEqual(t, time.Since(started), 30*time.Millisecond, "positive hold actually waits")
+}
+
+func TestHoldBeforeExitCutShortByASecondSignal(t *testing.T) {
+	// Kubernetes sends exactly one SIGTERM, so in-cluster the hold always
+	// completes; a second signal (local Ctrl-C twice) must still exit at once.
+	started := time.Now()
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+	}()
+	holdBeforeExit(time.Hour)
+	assert.Less(t, time.Since(started), 2*time.Second, "SIGINT during the hold must end it")
 }
 
 func TestTallyJSONKeys(t *testing.T) {
