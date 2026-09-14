@@ -438,12 +438,17 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		out.Run.WalkComplete = false
 		out.DurationSeconds = time.Since(started).Seconds()
 		out.EnumerationWarnings = append(out.EnumerationWarnings, checkError{Message: errMessage(err)})
-		if werr := writeTally(out, opts.outPath, deps.stdout); werr != nil {
+		// Both nets, unconditionally: the termination summary must not depend
+		// on the stdout/--out sink succeeding, or a closed sink loses both.
+		werr := writeTally(out, opts.outPath, deps.stdout)
+		writeTerminationSummary(out, opts.terminationPath)
+		if werr != nil {
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
+		}
+		holdBeforeExit(opts.exitHold)
+		if werr != nil {
 			return 1, errors.Join(err, werr)
 		}
-		writeTerminationSummary(out, opts.terminationPath)
-		holdBeforeExit(opts.exitHold)
 		return 1, err
 	}
 	// Reverse before the cut so desc --limit N examines the newest-updated N,
@@ -501,15 +506,18 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	}
 	out.Totals.NoWrite = out.Counters.Examined - out.Totals.Touched
 
-	if err := writeTally(out, opts.outPath, deps.stdout); err != nil {
-		return 1, err
-	}
-	// A second, log-pipeline-free copy: the counters-only summary goes to the
+	// Both nets, unconditionally. The counters-only summary goes to the
 	// kubelet termination message, which lands in the pod object (etcd) and
 	// survives container-log GC and node teardown — three nightly stdout
-	// tallies were lost at pod exit before this existed. Best effort: a
-	// missing path (local run) or a write error never fails the run.
+	// tallies were lost at pod exit before this existed. It must not depend
+	// on the stdout/--out write succeeding: a closed sink would otherwise
+	// lose both artifacts. Best effort: a missing path or write error never
+	// fails the run.
+	werr := writeTally(out, opts.outPath, deps.stdout)
 	writeTerminationSummary(out, opts.terminationPath)
+	if werr != nil {
+		slog.WarnContext(ctx, "merge-repair failed to write the tally", "error", werr)
+	}
 
 	slog.InfoContext(ctx, "merge-repair finished",
 		"mode", mode,
@@ -521,6 +529,9 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 
 	holdBeforeExit(opts.exitHold)
 
+	if werr != nil {
+		return 1, werr
+	}
 	return exitCode(out), nil
 }
 

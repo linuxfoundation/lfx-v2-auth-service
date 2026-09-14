@@ -435,6 +435,44 @@ func TestRunEnumerationFailureSurfacesSinkError(t *testing.T) {
 	assert.Contains(t, err.Error(), "stdout closed", "a lost artifact must be visible, not just logged")
 }
 
+func TestRunTerminationSummarySurvivesAClosedSink(t *testing.T) {
+	// The two nets must be independent: a closed stdout (or unwritable --out)
+	// loses the contract tally, but the termination summary is exactly the
+	// recovery path for that case and must still be written — on both the
+	// enumeration-failure exit and the normal exit. The sink error stays the
+	// returned error either way.
+	termPath := filepath.Join(t.TempDir(), "termination-log")
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644))
+	closed := errWriter{err: errors.New("stdout closed")}
+
+	deps := repairDeps{client: &stubCDPClient{}, writer: &stubWriter{}, stdout: closed,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return nil, nil, errors.New("management walk failed")
+		}}
+	code, err := run(context.Background(), deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.Error(t, err)
+	assert.Equal(t, 1, code)
+	raw, rerr := os.ReadFile(termPath)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(raw), `"walk_complete":false`, "failure summary written despite the closed sink")
+
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644))
+	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+		return []cdp.MemberIdentity{lfid("alice")}, nil
+	}}
+	deps = repairDeps{client: client, writer: &stubWriter{}, stdout: closed,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+		}}
+	code, err = run(context.Background(), deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.Error(t, err)
+	assert.Equal(t, 1, code, "a lost contract tally is still a failed run")
+	assert.Contains(t, err.Error(), "stdout closed")
+	raw, rerr = os.ReadFile(termPath)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(raw), `"examined":1`, "completion summary written despite the closed sink")
+	assert.Contains(t, string(raw), `"walk_complete":true`)
+}
 func TestExitCode(t *testing.T) {
 	t.Run("clean run exits 0, including dry-run would-repairs", func(t *testing.T) {
 		out := tallyReport{}
