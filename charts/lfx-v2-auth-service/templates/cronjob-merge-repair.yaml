@@ -47,19 +47,32 @@ spec:
             {{- end }}
         spec:
           restartPolicy: Never
+          # On a deadline kill or eviction the binary writes its truncated
+          # tally and then holds --exit-hold so the log shipper drains it; the
+          # grace period must outlast that hold or SIGKILL lands first and the
+          # tally dies with the pod. Derived from the same value as the flag
+          # below so the two cannot drift. Normal completion never receives
+          # SIGTERM, so this only matters on the truncated paths.
+          terminationGracePeriodSeconds: {{ add (int .Values.mergeRepair.exitHoldSeconds) 30 }}
           # The job talks to Auth0 and CDP only; it never uses a Kubernetes
           # token and gets none of the provisioning Lease RBAC.
           automountServiceAccountToken: false
           containers:
             # Named app like the Deployment: prod podAnnotations scope log
             # collection to a container named app, and the tally on stdout
-            # (identifiers redacted) is this job's only artifact when --out
-            # is unset.
+            # (identifiers redacted) is the job's contract artifact when --out
+            # is unset. A counters-only summary also goes to the termination
+            # message below — it lives in the pod object, so it survives the
+            # container-log GC that lost three nightly stdout tallies.
             - name: app
               # mergeRepair.image.tag wins; otherwise the job tracks the
               # deployment image tag (mutable "development" in dev, pinned
               # release tags in staging/prod), then the chart AppVersion.
               image: "{{ .Values.mergeRepair.image.repository }}:{{ .Values.mergeRepair.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+              # Explicit rather than the kubelet default so the binary's
+              # --termination-log default and this path cannot drift apart.
+              terminationMessagePath: /dev/termination-log
+              terminationMessagePolicy: File
               securityContext:
                 allowPrivilegeEscalation: false
                 runAsNonRoot: true
@@ -75,6 +88,7 @@ spec:
                 - --rate={{ .Values.mergeRepair.rate }}
                 - --limit={{ .Values.mergeRepair.limit }}
                 - --direction={{ .Values.mergeRepair.direction | default "auto" }}
+                - --exit-hold={{ .Values.mergeRepair.exitHoldSeconds }}s
                 {{- if .Values.mergeRepair.noPrefilter }}
                 - --no-prefilter
                 {{- end }}

@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -433,6 +435,44 @@ func TestRunEnumerationFailureSurfacesSinkError(t *testing.T) {
 	assert.Contains(t, err.Error(), "stdout closed", "a lost artifact must be visible, not just logged")
 }
 
+func TestRunTerminationSummarySurvivesAClosedSink(t *testing.T) {
+	// The two nets must be independent: a closed stdout (or unwritable --out)
+	// loses the contract tally, but the termination summary is exactly the
+	// recovery path for that case and must still be written — on both the
+	// enumeration-failure exit and the normal exit. The sink error stays the
+	// returned error either way.
+	termPath := filepath.Join(t.TempDir(), "termination-log")
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644))
+	closed := errWriter{err: errors.New("stdout closed")}
+
+	deps := repairDeps{client: &stubCDPClient{}, writer: &stubWriter{}, stdout: closed,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return nil, nil, errors.New("management walk failed")
+		}}
+	code, err := run(context.Background(), deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.Error(t, err)
+	assert.Equal(t, 1, code)
+	raw, rerr := os.ReadFile(termPath)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(raw), `"walk_complete":false`, "failure summary written despite the closed sink")
+
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644))
+	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+		return []cdp.MemberIdentity{lfid("alice")}, nil
+	}}
+	deps = repairDeps{client: client, writer: &stubWriter{}, stdout: closed,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+		}}
+	code, err = run(context.Background(), deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.Error(t, err)
+	assert.Equal(t, 1, code, "a lost contract tally is still a failed run")
+	assert.Contains(t, err.Error(), "stdout closed")
+	raw, rerr = os.ReadFile(termPath)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(raw), `"examined":1`, "completion summary written despite the closed sink")
+	assert.Contains(t, string(raw), `"walk_complete":true`)
+}
 func TestExitCode(t *testing.T) {
 	t.Run("clean run exits 0, including dry-run would-repairs", func(t *testing.T) {
 		out := tallyReport{}
@@ -670,6 +710,149 @@ func TestRunRejectsUnknownDirection(t *testing.T) {
 	code, err := run(context.Background(), repairDeps{}, repairOptions{ratePerMinute: 6000, dryRun: true, direction: "sideways"})
 	assert.Error(t, err)
 	assert.Equal(t, 2, code, "unknown -direction is a usage error like a bad -rate")
+}
+
+func TestRunWritesCountersOnlyTerminationSummary(t *testing.T) {
+	// The kubelet caps the termination message at 4096 bytes and it is the
+	// copy that outlives the log pipeline, so it must carry every counter and
+	// no per-row lists — even when the repairs array would be large.
+	ctx := context.Background()
+	population := make([]holderUser, 0, 40)
+	targets := map[string]string{}
+	for i := range 40 {
+		id := fmt.Sprintf("u%03d", i)
+		population = append(population, holderUser{UserID: "auth0|" + id, Username: id, EmailVerified: true, StoredUUID: "stale-" + id})
+		targets["fresh-"+id] = id
+	}
+	client := &stubCDPClient{
+		listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+			if strings.HasPrefix(memberID, "stale-") {
+				return nil, cdp.ErrMemberNotFound
+			}
+			return []cdp.MemberIdentity{lfid(targets[memberID])}, nil
+		},
+		resolveFn: func(_ context.Context, username, _ string) (cdp.ResolveResult, error) {
+			return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "fresh-" + username}, nil
+		},
+	}
+	termPath := filepath.Join(t.TempDir(), "termination-log")
+	require.NoError(t, os.WriteFile(termPath, nil, 0o644), "the kubelet pre-creates the file; its presence is the in-pod signal")
+	deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+		list: func(context.Context) ([]holderUser, []string, error) { return population, nil, nil }}
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.NoError(t, err)
+	require.Equal(t, 0, code)
+
+	raw, err := os.ReadFile(termPath)
+	require.NoError(t, err)
+	assert.Less(t, len(raw), 4096, "must fit the kubelet termination-message cap regardless of repair volume")
+	assert.Equal(t, 1, strings.Count(string(raw), "\n"), "one JSON line")
+	var summary map[string]any
+	require.NoError(t, json.Unmarshal(raw, &summary))
+	assert.NotContains(t, summary, "repairs", "per-row lists stay out of the summary")
+	assert.NotContains(t, string(raw), "auth0|", "no identifiers, so nothing to redact")
+	counters := summary["counters"].(map[string]any)
+	assert.EqualValues(t, 40, counters["examined"])
+	assert.EqualValues(t, 40, counters["repaired"])
+	assert.EqualValues(t, true, summary["run"].(map[string]any)["walk_complete"])
+	assert.EqualValues(t, 0, summary["unchecked"])
+	// Both cap flags travel with the summary: it is the recovery artifact, so
+	// a capped list must be distinguishable from an exact count for repairs
+	// and error samples alike.
+	assert.Contains(t, summary, "repairs_truncated")
+	assert.Contains(t, summary, "error_samples_truncated")
+}
+
+func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
+	// A missing path (local run without the kubelet mount) must be silent and
+	// must not turn a clean run into a failure; the stdout tally is the
+	// contract artifact.
+	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+		return []cdp.MemberIdentity{lfid("alice")}, nil // stored member alive and agrees
+	}}
+	code, err := run(context.Background(), repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+		}}, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: filepath.Join(t.TempDir(), "missing-dir", "termination-log")})
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+}
+
+func TestHoldBeforeExitBasics(t *testing.T) {
+	started := time.Now()
+	holdBeforeExit(nil, 0)
+	assert.Less(t, time.Since(started), 50*time.Millisecond, "zero hold returns immediately")
+
+	started = time.Now()
+	holdBeforeExit(nil, 80*time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(started), 80*time.Millisecond, "positive hold waits; nil registration only ever times out")
+}
+
+func TestTermSignalsCountsFromOneRegistration(t *testing.T) {
+	// Kubernetes sends exactly one SIGTERM per pod. The hold survives the first
+	// signal the process ever receives and ends on the second, and the count
+	// comes from the single process-wide registration — the same number
+	// whether the first signal truncated the walk or landed during the hold.
+	sendSIGINT := func(after time.Duration) {
+		go func() { time.Sleep(after); _ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) }()
+	}
+	waitCount := func(ts *termSignals, want int32) {
+		deadline := time.Now().Add(2 * time.Second)
+		for ts.count.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		require.GreaterOrEqual(t, ts.count.Load(), want, "signal delivery")
+	}
+
+	t.Run("first signal cancels the run and is absorbed by the hold", func(t *testing.T) {
+		ctx, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		assert.Error(t, ctx.Err(), "the first signal cancels the run context")
+		started := time.Now()
+		holdBeforeExit(ts, 200*time.Millisecond)
+		assert.GreaterOrEqual(t, time.Since(started), 200*time.Millisecond, "one signal so far: the hold runs to its end (truncated-walk path)")
+	})
+
+	t.Run("clean run: a signal during the hold is the first and is absorbed", func(t *testing.T) {
+		_, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		started := time.Now()
+		sendSIGINT(20 * time.Millisecond)
+		holdBeforeExit(ts, 250*time.Millisecond)
+		assert.GreaterOrEqual(t, time.Since(started), 250*time.Millisecond, "an eviction during a clean run's hold must not end it")
+		assert.EqualValues(t, 1, ts.count.Load())
+	})
+
+	t.Run("second signal ends the hold on either path", func(t *testing.T) {
+		_, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		started := time.Now()
+		sendSIGINT(30 * time.Millisecond)
+		holdBeforeExit(ts, time.Hour)
+		assert.Less(t, time.Since(started), 2*time.Second, "second signal (local Ctrl-C twice) must end the hold")
+	})
+
+	t.Run("run integration: cancelled ctx does not shorten the hold", func(t *testing.T) {
+		ctx, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		require.Error(t, ctx.Err())
+		client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+			return []cdp.MemberIdentity{lfid("alice")}, nil
+		}}
+		deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+			list: func(context.Context) ([]holderUser, []string, error) {
+				return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+			}}
+		started := time.Now()
+		_, _ = run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, exitHold: 150 * time.Millisecond, signals: ts})
+		assert.GreaterOrEqual(t, time.Since(started), 150*time.Millisecond, "truncated run still gets its full drain window")
+	})
 }
 
 func TestTallyJSONKeys(t *testing.T) {
