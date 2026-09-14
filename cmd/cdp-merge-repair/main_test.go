@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -670,6 +671,81 @@ func TestRunRejectsUnknownDirection(t *testing.T) {
 	code, err := run(context.Background(), repairDeps{}, repairOptions{ratePerMinute: 6000, dryRun: true, direction: "sideways"})
 	assert.Error(t, err)
 	assert.Equal(t, 2, code, "unknown -direction is a usage error like a bad -rate")
+}
+
+func TestRunWritesCountersOnlyTerminationSummary(t *testing.T) {
+	// The kubelet caps the termination message at 4096 bytes and it is the
+	// copy that outlives the log pipeline, so it must carry every counter and
+	// no per-row lists — even when the repairs array would be large.
+	ctx := context.Background()
+	population := make([]holderUser, 0, 40)
+	targets := map[string]string{}
+	for i := range 40 {
+		id := fmt.Sprintf("u%03d", i)
+		population = append(population, holderUser{UserID: "auth0|" + id, Username: id, EmailVerified: true, StoredUUID: "stale-" + id})
+		targets["fresh-"+id] = id
+	}
+	client := &stubCDPClient{
+		listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+			if strings.HasPrefix(memberID, "stale-") {
+				return nil, cdp.ErrMemberNotFound
+			}
+			return []cdp.MemberIdentity{lfid(targets[memberID])}, nil
+		},
+		resolveFn: func(_ context.Context, username, _ string) (cdp.ResolveResult, error) {
+			return cdp.ResolveResult{Outcome: cdp.OutcomeFound, MemberID: "fresh-" + username}, nil
+		},
+	}
+	termPath := filepath.Join(t.TempDir(), "termination-log")
+	deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+		list: func(context.Context) ([]holderUser, []string, error) { return population, nil, nil }}
+	code, err := run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: termPath})
+	require.NoError(t, err)
+	require.Equal(t, 0, code)
+
+	raw, err := os.ReadFile(termPath)
+	require.NoError(t, err)
+	assert.Less(t, len(raw), 4096, "must fit the kubelet termination-message cap regardless of repair volume")
+	assert.Equal(t, 1, strings.Count(string(raw), "\n"), "one JSON line")
+	var summary map[string]any
+	require.NoError(t, json.Unmarshal(raw, &summary))
+	assert.NotContains(t, summary, "repairs", "per-row lists stay out of the summary")
+	assert.NotContains(t, string(raw), "auth0|", "no identifiers, so nothing to redact")
+	counters := summary["counters"].(map[string]any)
+	assert.EqualValues(t, 40, counters["examined"])
+	assert.EqualValues(t, 40, counters["repaired"])
+	assert.EqualValues(t, true, summary["run"].(map[string]any)["walk_complete"])
+	assert.EqualValues(t, 0, summary["unchecked"])
+}
+
+func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
+	// An unwritable path (local run without the kubelet mount) must not turn
+	// a clean run into a failure; the stdout tally is the contract artifact.
+	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+		return []cdp.MemberIdentity{lfid("alice")}, nil // stored member alive and agrees
+	}}
+	code, err := run(context.Background(), repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+		list: func(context.Context) ([]holderUser, []string, error) {
+			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+		}}, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, terminationPath: filepath.Join(t.TempDir(), "missing-dir", "termination-log")})
+	require.NoError(t, err)
+	assert.Equal(t, 0, code)
+}
+
+func TestHoldBeforeExitIsInterruptible(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now()
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	holdBeforeExit(ctx, time.Hour)
+	assert.Less(t, time.Since(started), time.Second, "SIGTERM (ctx cancel) must cut the hold short")
+
+	started = time.Now()
+	holdBeforeExit(context.Background(), 0)
+	assert.Less(t, time.Since(started), 50*time.Millisecond, "zero hold returns immediately")
+
+	started = time.Now()
+	holdBeforeExit(context.Background(), 30*time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(started), 30*time.Millisecond, "positive hold actually waits")
 }
 
 func TestTallyJSONKeys(t *testing.T) {

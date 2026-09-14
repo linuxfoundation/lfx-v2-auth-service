@@ -283,6 +283,61 @@ type repairOptions struct {
 	// now supplies the clock for direction=auto only; nil means time.Now.
 	// Run timing (StartedAt/FinishedAt/DurationSeconds) always uses the real clock.
 	now func() time.Time
+	// terminationPath receives the counters-only summary; empty disables it.
+	terminationPath string
+	// exitHold is how long to linger after the tally is written; zero exits at once.
+	exitHold time.Duration
+}
+
+// defaultTerminationPath is the kubelet's default terminationMessagePath: a
+// bind mount, so it is writable under readOnlyRootFilesystem, and its
+// contents surface in pod.status.containerStatuses[].state.terminated.message.
+const defaultTerminationPath = "/dev/termination-log"
+
+// defaultExitHold gives the node's log shipper time to drain the last stdout
+// write before the container is finalized and its log file reaped.
+const defaultExitHold = 60 * time.Second
+
+// terminationSummary is the tally minus its per-row lists: the kubelet caps
+// the termination message at 4096 bytes, and the counters are what a
+// truncated-night readout needs.
+type terminationSummary struct {
+	Run                 any               `json:"run"`
+	Counters            mergerepair.Tally `json:"counters"`
+	Totals              any               `json:"totals"`
+	Unchecked           int               `json:"unchecked"`
+	DurationSeconds     float64           `json:"duration_seconds"`
+	RepairsTruncated    bool              `json:"repairs_truncated"`
+	EnumerationWarnings int               `json:"enumeration_warnings"`
+	ErrorSamples        int               `json:"error_samples"`
+}
+
+// writeTerminationSummary writes the counters-only summary as one JSON line.
+// Best effort by design: the stdout tally is the contract artifact; this is
+// the copy that outlives the log pipeline. No identifiers are included, so
+// no redaction question arises.
+func writeTerminationSummary(out tallyReport, path string) {
+	if path == "" {
+		return
+	}
+	summary := terminationSummary{
+		Run:                 out.Run,
+		Counters:            out.Counters,
+		Totals:              out.Totals,
+		Unchecked:           out.Unchecked,
+		DurationSeconds:     out.DurationSeconds,
+		RepairsTruncated:    out.RepairsTruncated,
+		EnumerationWarnings: len(out.EnumerationWarnings),
+		ErrorSamples:        len(out.ErrorSamples),
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		slog.Warn("merge-repair termination summary not encoded", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		slog.Warn("merge-repair termination summary not written", "path", path, "error", err)
+	}
 }
 
 // Walk directions. The walker enumerates the whole population ascending by
@@ -382,6 +437,8 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
 			return 1, errors.Join(err, werr)
 		}
+		writeTerminationSummary(out, opts.terminationPath)
+		holdBeforeExit(ctx, opts.exitHold)
 		return 1, err
 	}
 	// Reverse before the cut so desc --limit N examines the newest-updated N,
@@ -442,6 +499,12 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	if err := writeTally(out, opts.outPath, deps.stdout); err != nil {
 		return 1, err
 	}
+	// A second, log-pipeline-free copy: the counters-only summary goes to the
+	// kubelet termination message, which lands in the pod object (etcd) and
+	// survives container-log GC and node teardown — three nightly stdout
+	// tallies were lost at pod exit before this existed. Best effort: a
+	// missing path (local run) or a write error never fails the run.
+	writeTerminationSummary(out, opts.terminationPath)
 
 	slog.InfoContext(ctx, "merge-repair finished",
 		"mode", mode,
@@ -451,7 +514,23 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		"unchecked", out.Unchecked,
 	)
 
+	holdBeforeExit(ctx, opts.exitHold)
+
 	return exitCode(out), nil
+}
+
+// holdBeforeExit lingers after the tally is written so the node's log
+// shipper drains the final stdout burst while the pod still exists (and, in
+// the CronJob, still pins its node via do-not-disrupt). Interruptible: a
+// SIGTERM during the hold exits at once.
+func holdBeforeExit(ctx context.Context, hold time.Duration) {
+	if hold <= 0 {
+		return
+	}
+	select {
+	case <-time.After(hold):
+	case <-ctx.Done():
+	}
 }
 
 // exitCode maps a finished tally to the CLI contract: 0 is conclusive (a
@@ -586,6 +665,8 @@ func realMain() int {
 	noPrefilter := flag.Bool("no-prefilter", false, "resolve every holder; skip the stored-member pre-filter (audit mode)")
 	outPath := flag.String("out", "", "write the JSON tally here (default stdout)")
 	direction := flag.String("direction", directionAuto, "walk order: asc (oldest updated_at first), desc (newest first), or auto (alternates daily)")
+	exitHold := flag.Duration("exit-hold", defaultExitHold, "linger after the tally is written so the log shipper drains it (0 to exit at once)")
+	terminationPath := flag.String("termination-log", defaultTerminationPath, "also write a counters-only summary here (kubelet termination message; empty to disable)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -597,13 +678,15 @@ func realMain() int {
 		return 2
 	}
 	code, err := run(ctx, deps, repairOptions{
-		ratePerMinute: *ratePerMinute,
-		limit:         *limit,
-		dryRun:        *dryRun,
-		live:          *live,
-		noPrefilter:   *noPrefilter,
-		outPath:       *outPath,
-		direction:     *direction,
+		ratePerMinute:   *ratePerMinute,
+		limit:           *limit,
+		dryRun:          *dryRun,
+		live:            *live,
+		noPrefilter:     *noPrefilter,
+		outPath:         *outPath,
+		direction:       *direction,
+		exitHold:        *exitHold,
+		terminationPath: *terminationPath,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "merge-repair failed", "error", err)
