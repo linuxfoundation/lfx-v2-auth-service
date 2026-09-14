@@ -445,7 +445,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		if werr != nil {
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
 		}
-		holdBeforeExit(opts.exitHold)
+		holdBeforeExit(ctx, opts.exitHold)
 		if werr != nil {
 			return 1, errors.Join(err, werr)
 		}
@@ -527,7 +527,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		"unchecked", out.Unchecked,
 	)
 
-	holdBeforeExit(opts.exitHold)
+	holdBeforeExit(ctx, opts.exitHold)
 
 	if werr != nil {
 		return 1, werr
@@ -539,23 +539,45 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 // shipper drains the final stdout burst while the pod still exists (and, in
 // the CronJob, still pins its node via do-not-disrupt).
 //
-// It deliberately does NOT select on the run context: on the two paths where
-// the tally matters most — deadline kill and eviction — that context is
-// already cancelled by the SIGTERM that truncated the walk, and a hold
-// keyed on it would return instantly (exactly the 2026-09-11 shape). Instead
-// a fresh signal context is armed, so a *second* SIGINT/SIGTERM cuts the
-// hold short (local Ctrl-C twice still exits) while Kubernetes, which sends
-// exactly one SIGTERM, always gets the full hold — bounded by the pod's
-// terminationGracePeriodSeconds, which the chart sets above this value.
-func holdBeforeExit(hold time.Duration) {
+// Kubernetes sends exactly one SIGTERM per pod, so the rule is: the hold
+// survives the FIRST termination signal the process ever receives and ends
+// on the SECOND (local Ctrl-C twice still exits). Which signal is "first"
+// depends on how we got here:
+//
+//   - Truncated walk (deadline kill, eviction): the run context is already
+//     cancelled by the SIGTERM that stopped the walk. That was the first
+//     signal; the next one ends the hold. A hold keyed on the run context
+//     would return instantly here (the 2026-09-11 shape).
+//   - Normal completion: no signal has arrived. An eviction that lands during
+//     the hold is the first signal and MUST be absorbed — cutting the hold
+//     short would recreate the same teardown race on the good-run path.
+//
+// Signals are received on a raw channel so the count is explicit. The hold
+// is bounded by the pod's terminationGracePeriodSeconds, which the chart
+// sets above this value.
+func holdBeforeExit(runCtx context.Context, hold time.Duration) {
 	if hold <= 0 {
 		return
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	select {
-	case <-time.After(hold):
-	case <-ctx.Done():
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+
+	remaining := 2
+	if runCtx.Err() != nil {
+		remaining = 1 // the truncating signal was the first
+	}
+	deadline := time.After(hold)
+	for {
+		select {
+		case <-deadline:
+			return
+		case <-sigs:
+			remaining--
+			if remaining == 0 {
+				return
+			}
+		}
 	}
 }
 

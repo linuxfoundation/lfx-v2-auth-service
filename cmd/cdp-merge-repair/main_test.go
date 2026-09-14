@@ -773,12 +773,11 @@ func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
 	assert.Equal(t, 0, code)
 }
 
-func TestHoldBeforeExitIgnoresTheCancelledRunContext(t *testing.T) {
+func TestHoldBeforeExitSurvivesACancelledRunContext(t *testing.T) {
 	// The deadline-kill and eviction paths reach the hold with the run ctx
 	// already cancelled by the truncating SIGTERM. The hold must still run its
-	// full course there (that is when the tally matters most), so it keys on
-	// a fresh signal context, not the run ctx. Exercised via run(): a
-	// pre-cancelled ctx must not shorten the hold.
+	// full course there — that is when the tally matters most. Exercised via
+	// run(): a pre-cancelled ctx must not shorten the hold.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
@@ -793,24 +792,44 @@ func TestHoldBeforeExitIgnoresTheCancelledRunContext(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(started), 150*time.Millisecond, "a cancelled run ctx must not cut the hold short")
 
 	started = time.Now()
-	holdBeforeExit(0)
+	holdBeforeExit(context.Background(), 0)
 	assert.Less(t, time.Since(started), 50*time.Millisecond, "zero hold returns immediately")
 
 	started = time.Now()
-	holdBeforeExit(30 * time.Millisecond)
+	holdBeforeExit(context.Background(), 30*time.Millisecond)
 	assert.GreaterOrEqual(t, time.Since(started), 30*time.Millisecond, "positive hold actually waits")
 }
 
-func TestHoldBeforeExitCutShortByASecondSignal(t *testing.T) {
-	// Kubernetes sends exactly one SIGTERM, so in-cluster the hold always
-	// completes; a second signal (local Ctrl-C twice) must still exit at once.
+func TestHoldBeforeExitCountsSignals(t *testing.T) {
+	// Kubernetes sends exactly one SIGTERM per pod. The hold survives the first
+	// signal the process ever receives and ends on the second; which one is
+	// "first" depends on whether the run was already truncated.
+	sendSIGINT := func(after time.Duration) {
+		go func() { time.Sleep(after); _ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) }()
+	}
+
+	// Normal completion: no signal so far. One signal during the hold is an
+	// eviction's first SIGTERM and must be absorbed — the hold runs to its end.
 	started := time.Now()
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
-	}()
-	holdBeforeExit(time.Hour)
-	assert.Less(t, time.Since(started), 2*time.Second, "SIGINT during the hold must end it")
+	sendSIGINT(20 * time.Millisecond)
+	holdBeforeExit(context.Background(), 200*time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(started), 200*time.Millisecond, "first signal on a clean run must not end the hold")
+
+	// Normal completion, two signals: the second ends it (local Ctrl-C twice).
+	started = time.Now()
+	sendSIGINT(20 * time.Millisecond)
+	sendSIGINT(60 * time.Millisecond)
+	holdBeforeExit(context.Background(), time.Hour)
+	assert.Less(t, time.Since(started), 2*time.Second, "second signal on a clean run must end the hold")
+
+	// Truncated run: the cancelled ctx already consumed the first signal, so a
+	// single signal during the hold is the second and ends it.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	started = time.Now()
+	sendSIGINT(20 * time.Millisecond)
+	holdBeforeExit(cancelled, time.Hour)
+	assert.Less(t, time.Since(started), 2*time.Second, "one signal after a truncating signal must end the hold")
 }
 
 func TestTallyJSONKeys(t *testing.T) {
