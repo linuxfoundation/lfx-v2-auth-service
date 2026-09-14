@@ -120,11 +120,15 @@ To create a new release of the auth service:
    appVersion: "latest"  # Keep this as "latest"
    ```
 
-2. **After the pull request is merged**, create a GitHub release and choose the
-   option for GitHub to also tag the repository. The tag must follow the format
-   `v{version}` (e.g., `v0.2.0`). This tag does _not_ have to match the chart
-   version: it is the version for the project release, which will dynamically
-   update the `appVersion` in the released chart.
+2. **After the pull request is merged**, create and **publish** a GitHub release,
+   choosing the option for GitHub to also tag the repository. The tag must follow
+   the format `v{version}` (e.g., `v0.2.0`). This tag does _not_ have to match
+   the chart version: it is the version for the project release, which will
+   dynamically update the `appVersion` in the released chart.
+
+   > **Note:** the workflow is triggered by the GitHub Release _published_ event,
+   > not by a raw tag push. Pushing a tag without publishing a release will not
+   > trigger the build.
 
 3. **The GitHub Actions workflow will automatically**:
    - Build and publish the container images (auth-service)
@@ -140,8 +144,8 @@ To create a new release of the auth service:
 - The `appVersion` in `Chart.yaml` should always remain `"latest"` in the committed code.
 - During the release process, the `ko-build-tag.yaml` workflow automatically overrides the `appVersion` with the actual tag version (e.g., `v0.2.0` becomes `0.2.0`).
 - Only update the chart `version` field when making releases - this represents the Helm chart version.
-- The container image tags are automatically managed by the consolidated CI/CD pipeline using the git tag.
-- Both container images (auth-service) and the Helm chart are published together in a single workflow.
+- The container image tags are automatically managed by the consolidated CI/CD pipeline using the tag attached to the published GitHub Release.
+- Both container images (auth-service) and the Helm chart are published together in a single workflow, triggered by the GitHub Release published event.
 
 ## Development
 
