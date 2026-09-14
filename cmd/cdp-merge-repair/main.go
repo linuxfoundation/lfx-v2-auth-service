@@ -299,21 +299,28 @@ type repairOptions struct {
 const defaultTerminationPath = "/dev/termination-log"
 
 // defaultExitHold gives the node's log shipper time to drain the last stdout
-// write before the container is finalized and its log file reaped.
+// write before the container is finalized and its log file reaped. The chart
+// passes --exit-hold explicitly from mergeRepair.exitHoldSeconds and derives
+// terminationGracePeriodSeconds from the same value, so the two cannot drift.
 const defaultExitHold = 60 * time.Second
+
+// unsetExitHold is the --exit-hold flag's "not given" sentinel; the effective
+// default then follows the tally sink (see realMain).
+const unsetExitHold = -1
 
 // terminationSummary is the tally minus its per-row lists: the kubelet caps
 // the termination message at 4096 bytes, and the counters are what a
 // truncated-night readout needs.
 type terminationSummary struct {
-	Run                 any               `json:"run"`
-	Counters            mergerepair.Tally `json:"counters"`
-	Totals              any               `json:"totals"`
-	Unchecked           int               `json:"unchecked"`
-	DurationSeconds     float64           `json:"duration_seconds"`
-	RepairsTruncated    bool              `json:"repairs_truncated"`
-	EnumerationWarnings int               `json:"enumeration_warnings"`
-	ErrorSamples        int               `json:"error_samples"`
+	Run                   any               `json:"run"`
+	Counters              mergerepair.Tally `json:"counters"`
+	Totals                any               `json:"totals"`
+	Unchecked             int               `json:"unchecked"`
+	DurationSeconds       float64           `json:"duration_seconds"`
+	RepairsTruncated      bool              `json:"repairs_truncated"`
+	ErrorSamplesTruncated bool              `json:"error_samples_truncated"`
+	EnumerationWarnings   int               `json:"enumeration_warnings"`
+	ErrorSamples          int               `json:"error_samples"`
 }
 
 // writeTerminationSummary writes the counters-only summary as one JSON line.
@@ -330,14 +337,15 @@ func writeTerminationSummary(out tallyReport, path string) {
 		return
 	}
 	summary := terminationSummary{
-		Run:                 out.Run,
-		Counters:            out.Counters,
-		Totals:              out.Totals,
-		Unchecked:           out.Unchecked,
-		DurationSeconds:     out.DurationSeconds,
-		RepairsTruncated:    out.RepairsTruncated,
-		EnumerationWarnings: len(out.EnumerationWarnings),
-		ErrorSamples:        len(out.ErrorSamples),
+		Run:                   out.Run,
+		Counters:              out.Counters,
+		Totals:                out.Totals,
+		Unchecked:             out.Unchecked,
+		DurationSeconds:       out.DurationSeconds,
+		RepairsTruncated:      out.RepairsTruncated,
+		ErrorSamplesTruncated: out.ErrorSamplesTruncated,
+		EnumerationWarnings:   len(out.EnumerationWarnings),
+		ErrorSamples:          len(out.ErrorSamples),
 	}
 	encoded, err := json.Marshal(summary)
 	if err != nil {
@@ -754,16 +762,22 @@ func realMain() int {
 	direction := flag.String("direction", directionAuto, "walk order: asc (oldest updated_at first), desc (newest first), or auto (alternates daily)")
 	// The hold exists to protect the stdout->shipper path only, so its default
 	// follows the sink: 60s when stdout is the tally sink (the CronJob), none
-	// when --out names a file. An explicit --exit-hold overrides either.
-	exitHold := flag.Duration("exit-hold", -1, "linger after the tally is written so the log shipper drains it (default 60s with stdout, 0 with --out)")
+	// when --out names a file. An explicit --exit-hold overrides either; the
+	// unset sentinel is exactly -1, so any other negative value is a usage
+	// error rather than a silent fallback to the default.
+	exitHold := flag.Duration("exit-hold", unsetExitHold, "linger after the tally is written so the log shipper drains it (default 60s with stdout, 0 with --out)")
 	terminationPath := flag.String("termination-log", defaultTerminationPath, "also write a counters-only summary here (kubelet termination message; empty to disable)")
 	flag.Parse()
-	if *exitHold < 0 {
+	switch {
+	case *exitHold == unsetExitHold:
 		if *outPath == "" {
 			*exitHold = defaultExitHold
 		} else {
 			*exitHold = 0
 		}
+	case *exitHold < 0:
+		slog.Error("-exit-hold must be zero or positive", "got", *exitHold)
+		return 2
 	}
 
 	ctx, signals := newTermSignals(context.Background())

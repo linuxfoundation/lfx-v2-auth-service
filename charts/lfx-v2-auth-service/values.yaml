@@ -91,6 +91,11 @@ mergeRepair:
   # activeDeadlineSeconds must stay under 24h so runs cannot pile up; a repeat
   # walk is correct, only slow, so expiry simply yields to the next schedule.
   activeDeadlineSeconds: 82800
+  # exitHoldSeconds is how long the binary lingers after writing its tally so
+  # the node's log shipper drains it (three nightly tallies were lost at pod
+  # exit without it). The pod's terminationGracePeriodSeconds is derived from
+  # this value (+30s) so SIGKILL can never land inside the hold.
+  exitHoldSeconds: 60
   image:
     # repository is the merge-repair image published beside the server image
     # (same ko release, package-derived suffix).

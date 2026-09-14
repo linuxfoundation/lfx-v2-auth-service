@@ -756,6 +756,11 @@ func TestRunWritesCountersOnlyTerminationSummary(t *testing.T) {
 	assert.EqualValues(t, 40, counters["repaired"])
 	assert.EqualValues(t, true, summary["run"].(map[string]any)["walk_complete"])
 	assert.EqualValues(t, 0, summary["unchecked"])
+	// Both cap flags travel with the summary: it is the recovery artifact, so
+	// a capped list must be distinguishable from an exact count for repairs
+	// and error samples alike.
+	assert.Contains(t, summary, "repairs_truncated")
+	assert.Contains(t, summary, "error_samples_truncated")
 }
 
 func TestRunTerminationSummaryIsBestEffort(t *testing.T) {

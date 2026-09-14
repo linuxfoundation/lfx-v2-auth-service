@@ -48,11 +48,12 @@ spec:
         spec:
           restartPolicy: Never
           # On a deadline kill or eviction the binary writes its truncated
-          # tally and then holds ~60s (--exit-hold) so the log shipper drains
-          # it; the grace period must outlast that hold or SIGKILL lands
-          # first and the tally dies with the pod. Normal completion never
-          # receives SIGTERM, so this only matters on the truncated paths.
-          terminationGracePeriodSeconds: 90
+          # tally and then holds --exit-hold so the log shipper drains it; the
+          # grace period must outlast that hold or SIGKILL lands first and the
+          # tally dies with the pod. Derived from the same value as the flag
+          # below so the two cannot drift. Normal completion never receives
+          # SIGTERM, so this only matters on the truncated paths.
+          terminationGracePeriodSeconds: {{ add (int .Values.mergeRepair.exitHoldSeconds) 30 }}
           # The job talks to Auth0 and CDP only; it never uses a Kubernetes
           # token and gets none of the provisioning Lease RBAC.
           automountServiceAccountToken: false
@@ -87,6 +88,7 @@ spec:
                 - --rate={{ .Values.mergeRepair.rate }}
                 - --limit={{ .Values.mergeRepair.limit }}
                 - --direction={{ .Values.mergeRepair.direction | default "auto" }}
+                - --exit-hold={{ .Values.mergeRepair.exitHoldSeconds }}s
                 {{- if .Values.mergeRepair.noPrefilter }}
                 - --no-prefilter
                 {{- end }}
