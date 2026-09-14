@@ -446,6 +446,46 @@ func TestParseVerified(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name:  "audience in ExpectedAudiences allow-list",
+			token: tokenString,
+			opts: &ParseOptions{
+				VerifySignature:   true,
+				SigningKey:        publicKey,
+				ExpectedIssuer:    "https://test.auth0.com/",
+				ExpectedAudiences: []string{"https://other-api.example.org/", "https://test.auth0.com/api/v2/"},
+				RequireExpiration: true,
+				RequireSubject:    true,
+			},
+			expectError: false,
+		},
+		{
+			name:  "audience not in ExpectedAudiences allow-list",
+			token: tokenString,
+			opts: &ParseOptions{
+				VerifySignature:   true,
+				SigningKey:        publicKey,
+				ExpectedIssuer:    "https://test.auth0.com/",
+				ExpectedAudiences: []string{"https://other-api.example.org/", "https://another.example.org/"},
+				RequireExpiration: true,
+				RequireSubject:    true,
+			},
+			expectError: true,
+		},
+		{
+			name:  "ExpectedAudiences takes precedence over mismatched ExpectedAudience",
+			token: tokenString,
+			opts: &ParseOptions{
+				VerifySignature:   true,
+				SigningKey:        publicKey,
+				ExpectedIssuer:    "https://test.auth0.com/",
+				ExpectedAudience:  "https://wrong.auth0.com/api/v2/",
+				ExpectedAudiences: []string{"https://test.auth0.com/api/v2/"},
+				RequireExpiration: true,
+				RequireSubject:    true,
+			},
+			expectError: false,
+		},
+		{
 			name:  "expired token",
 			token: createExpiredToken(t, privateKey),
 			opts: &ParseOptions{
@@ -656,6 +696,80 @@ func TestLooksLikeJWT(t *testing.T) {
 			if cleanToken != tt.expectedToken {
 				t.Errorf("LooksLikeJWT() %s: cleanToken = %q, expected %q", tt.name, cleanToken, tt.expectedToken)
 			}
+		})
+	}
+}
+
+func TestParseVerifiedMultipleTokenAudiences(t *testing.T) {
+	ctx := context.Background()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	publicKey := &privateKey.PublicKey
+
+	// Auth0 access tokens commonly carry multiple audiences (API + /userinfo)
+	claims := jwt.MapClaims{
+		"sub": "test-user-123",
+		"iss": "https://test.auth0.com/",
+		"aud": []string{"https://lfx-api.example.org/", "https://test.auth0.com/userinfo"},
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := token.SignedString(privateKey)
+	require.NoError(t, err)
+
+	opts := &ParseOptions{
+		VerifySignature:   true,
+		SigningKey:        publicKey,
+		ExpectedIssuer:    "https://test.auth0.com/",
+		ExpectedAudience:  "https://test.auth0.com/userinfo", // matches the second audience
+		RequireExpiration: true,
+		RequireSubject:    true,
+	}
+
+	parsed, err := ParseVerified(ctx, tokenString, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "https://lfx-api.example.org/", parsed.Audience)
+	assert.Equal(t, []string{"https://lfx-api.example.org/", "https://test.auth0.com/userinfo"}, parsed.Audiences)
+}
+
+func TestClaimsHasAudience(t *testing.T) {
+	tests := []struct {
+		name     string
+		claims   *Claims
+		audience string
+		expected bool
+	}{
+		{
+			name:     "match in Audiences list",
+			claims:   &Claims{Audience: "a", Audiences: []string{"a", "b"}},
+			audience: "b",
+			expected: true,
+		},
+		{
+			name:     "no match",
+			claims:   &Claims{Audience: "a", Audiences: []string{"a", "b"}},
+			audience: "c",
+			expected: false,
+		},
+		{
+			name:     "fallback to single Audience field",
+			claims:   &Claims{Audience: "a"},
+			audience: "a",
+			expected: true,
+		},
+		{
+			name:     "empty claims",
+			claims:   &Claims{},
+			audience: "a",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.claims.HasAudience(tt.audience))
 		})
 	}
 }

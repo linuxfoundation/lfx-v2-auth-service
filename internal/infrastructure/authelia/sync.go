@@ -195,7 +195,9 @@ func (s *sync) syncUsers(ctx context.Context, storage internalStorageReaderWrite
 
 		var buf strings.Builder
 		encoder := yaml.NewEncoder(&buf)
-		defer encoder.Close()
+		defer func() {
+			_ = encoder.Close()
+		}()
 		if err := encoder.Encode(autheliaFormat); err != nil {
 			return errors.NewUnexpected("failed to marshal YAML", err)
 		}

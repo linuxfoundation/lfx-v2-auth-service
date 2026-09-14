@@ -4,9 +4,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -107,6 +109,9 @@ type mockUserServiceReader struct {
 	getUserFunc        func(ctx context.Context, user *model.User) (*model.User, error)
 	searchUserFunc     func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
 	metadataLookupFunc func(ctx context.Context, input string) (*model.User, error)
+	// capturedLookupScopes records the requiredScopes passed to the most recent
+	// MetadataLookup call, so tests can assert that write paths are scope-gated.
+	capturedLookupScopes []string
 }
 
 func (m *mockUserServiceReader) GetUser(ctx context.Context, user *model.User) (*model.User, error) {
@@ -124,6 +129,8 @@ func (m *mockUserServiceReader) SearchUser(ctx context.Context, user *model.User
 }
 
 func (m *mockUserServiceReader) MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error) {
+	m.capturedLookupScopes = requiredScopes
+
 	if m.metadataLookupFunc != nil {
 		return m.metadataLookupFunc(ctx, input)
 	}
@@ -299,6 +306,7 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 						PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 						TShirtSize:         converters.StringPtr("M"),
 						Bio:                converters.StringPtr("Senior engineer and mentor"),
+						Skills:             converters.StringPtr("Go, Python, Kubernetes"),
 						Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 						Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 					},
@@ -339,6 +347,11 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					}
 					if organizationDomain, exists := metadata["organization_domain"]; exists && organizationDomain != "techcorp.com" {
 						t.Errorf("Result metadata organization_domain incorrect: got %v, want techcorp.com", organizationDomain)
+					}
+					if skills, exists := metadata["skills"]; !exists {
+						t.Error("Result metadata skills is missing")
+					} else if skills != "Go, Python, Kubernetes" {
+						t.Errorf("Result metadata skills incorrect: got %v, want Go, Python, Kubernetes", skills)
 					}
 				} else {
 					t.Errorf("Data is not a map[string]interface{}, got %T", response.Data)
@@ -2227,6 +2240,7 @@ func compareUserMetadata(actual, expected *model.UserMetadata) bool {
 		compareStringPtr(actual.PhoneNumber, expected.PhoneNumber) &&
 		compareStringPtr(actual.TShirtSize, expected.TShirtSize) &&
 		compareStringPtr(actual.Bio, expected.Bio) &&
+		compareStringPtr(actual.Skills, expected.Skills) &&
 		compareStringPtr(actual.Zoneinfo, expected.Zoneinfo)
 }
 
@@ -2323,6 +2337,48 @@ func TestMessageHandlerOrchestrator_LinkIdentity(t *testing.T) {
 				t.Errorf("error = %q, want %q", response.Error, tt.expectError)
 			}
 		})
+	}
+}
+
+// TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated guards the read/write
+// split: the link lookup must request the identity-update scope, exactly like the
+// unlink path. Scope-gated verification is restricted to the Management API
+// audience, so without this a token verified via a broader allow-listed audience
+// (e.g. the LFX v2 API audience) would pass verification here and still be
+// forwarded to the Auth0 Management API as the caller's bearer.
+func TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated(t *testing.T) {
+	ctx := context.Background()
+
+	linkRequest := &model.LinkIdentity{}
+	linkRequest.User.AuthToken = "some-auth-token"
+	linkRequest.LinkWith.IdentityToken = "some-identity-token"
+	messageData, err := json.Marshal(linkRequest)
+	if err != nil {
+		t.Fatalf("failed to marshal link request: %v", err)
+	}
+
+	reader := &mockUserServiceReader{
+		metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+			return &model.User{UserID: "auth0|user123"}, nil
+		},
+	}
+
+	orchestrator := NewMessageHandlerOrchestrator(
+		WithIdentityLinkerForMessageHandler(&mockIdentityLinker{
+			validateLinkRequestFunc: func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+			linkIdentityFunc:        func(_ context.Context, _ *model.LinkIdentity) error { return nil },
+		}),
+		WithUserReaderForMessageHandler(reader),
+	)
+
+	if _, errLink := orchestrator.LinkIdentity(ctx, &mockTransportMessenger{data: messageData}); errLink != nil {
+		t.Fatalf("unexpected Go error: %v", errLink)
+	}
+
+	if len(reader.capturedLookupScopes) != 1 ||
+		reader.capturedLookupScopes[0] != constants.UserUpdateIdentityRequiredScope {
+		t.Errorf("MetadataLookup scopes = %v, want [%s]",
+			reader.capturedLookupScopes, constants.UserUpdateIdentityRequiredScope)
 	}
 }
 
@@ -3688,4 +3744,130 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 			t.Errorf("GetUser must be called with UserID=%s; got %q", userID, capturedUserID)
 		}
 	})
+}
+
+// TestGetUserByInput_ErrorLogLevel pins the observability contract this PR exists
+// for: expected client-caused outcomes must not surface as ERROR, while genuine
+// service faults still must. Levels follow the table in
+// .knowledge/v2/how-development/service-logging-and-observability.md.
+func TestGetUserByInput_ErrorLogLevel(t *testing.T) {
+	tests := []struct {
+		name          string
+		lookupErr     error
+		expectedLevel slog.Level
+	}{
+		{
+			name:          "not found is expected control flow",
+			lookupErr:     errors.NewNotFound("user not found"),
+			expectedLevel: slog.LevelInfo,
+		},
+		{
+			name:          "validation is expected control flow",
+			lookupErr:     errors.NewValidation("input is invalid"),
+			expectedLevel: slog.LevelInfo,
+		},
+		{
+			name:          "unauthorized stays visible for probing detection",
+			lookupErr:     errors.NewUnauthorized("bad credentials"),
+			expectedLevel: slog.LevelWarn,
+		},
+		{
+			name:          "conflict is caller-visible and recoverable",
+			lookupErr:     errors.NewConflict("already exists"),
+			expectedLevel: slog.LevelWarn,
+		},
+		{
+			name:          "unexpected is a service fault",
+			lookupErr:     errors.NewUnexpected("auth provider unreachable"),
+			expectedLevel: slog.LevelError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			orchestrator := &messageHandlerOrchestrator{
+				userReader: &mockUserServiceReader{
+					metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+						return nil, tt.lookupErr
+					},
+				},
+			}
+
+			_, err := orchestrator.getUserByInput(context.Background(), &mockTransportMessenger{data: []byte("auth0|123456789")})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			var gotLevel string
+			for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+				var record struct {
+					Level string `json:"level"`
+					Msg   string `json:"msg"`
+				}
+				if json.Unmarshal([]byte(line), &record) != nil {
+					continue
+				}
+				if strings.Contains(record.Msg, "could not resolve user metadata") {
+					gotLevel = record.Level
+				}
+			}
+
+			if gotLevel != tt.expectedLevel.String() {
+				t.Errorf("resolution failure logged at %q, want %q\nlogs:\n%s", gotLevel, tt.expectedLevel, buf.String())
+			}
+		})
+	}
+}
+
+func TestHasEmailDomainSuffix(t *testing.T) {
+	tests := []struct {
+		name         string
+		email        string
+		domainSuffix string
+		want         bool
+	}{
+		{
+			name:         "matches exact case",
+			email:        "jdoe@linux.com",
+			domainSuffix: "@linux.com",
+			want:         true,
+		},
+		{
+			name:         "matches with an uppercase suffix",
+			email:        "jdoe@linux.com",
+			domainSuffix: "@LINUX.COM",
+			want:         true,
+		},
+		{
+			name:         "matches with a whitespace-padded suffix",
+			email:        "jdoe@linux.com",
+			domainSuffix: "  @linux.com  ",
+			want:         true,
+		},
+		{
+			name:         "matches with an uppercase, whitespace-padded email",
+			email:        "  JDOE@LINUX.COM  ",
+			domainSuffix: "@linux.com",
+			want:         true,
+		},
+		{
+			name:         "does not match a different domain",
+			email:        "jdoe@example.com",
+			domainSuffix: "@linux.com",
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasEmailDomainSuffix(tt.email, tt.domainSuffix); got != tt.want {
+				t.Errorf("hasEmailDomainSuffix(%q, %q) = %v, want %v", tt.email, tt.domainSuffix, got, tt.want)
+			}
+		})
+	}
 }

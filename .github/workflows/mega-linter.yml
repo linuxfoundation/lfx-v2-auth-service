@@ -48,3 +48,5 @@ jobs:
           # zizmor's "artipacked" audit needs the GitHub API (to verify
           # SHA-pinned action tags), which requires GITHUB_TOKEN.
           ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
+          # Container uses GOTOOLCHAIN=local.
+          GOTOOLCHAIN: auto

@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -23,9 +24,15 @@ import (
 
 // NATSClient wraps the NATS connection and provides access control operations
 type NATSClient struct {
-	conn    *nats.Conn
-	config  Config
+	conn   *nats.Conn
+	config Config
+
+	// kvStore is guarded because buckets are no longer all opened during
+	// bootstrap: the provisioning consumer opens its own from a background
+	// goroutine, concurrently with any reader.
+	kvMu    sync.RWMutex
 	kvStore map[string]jetstream.KeyValue
+
 	timeout time.Duration
 }
 
@@ -75,6 +82,8 @@ func (c *NATSClient) KeyValueStore(ctx context.Context, bucketName string) error
 		return err
 	}
 
+	c.kvMu.Lock()
+	defer c.kvMu.Unlock()
 	if c.kvStore == nil {
 		c.kvStore = make(map[string]jetstream.KeyValue)
 	}
@@ -84,6 +93,8 @@ func (c *NATSClient) KeyValueStore(ctx context.Context, bucketName string) error
 
 // GetKVStore returns the KV store for a given bucket name
 func (c *NATSClient) GetKVStore(bucketName string) (jetstream.KeyValue, bool) {
+	c.kvMu.RLock()
+	defer c.kvMu.RUnlock()
 	if c.kvStore == nil {
 		return nil, false
 	}

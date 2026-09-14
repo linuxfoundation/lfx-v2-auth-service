@@ -26,6 +26,7 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 				Organization:       converters.StringPtr("ACME Corp"),
 				OrganizationDomain: converters.StringPtr("acme.com"),
 				Country:            converters.StringPtr("USA"),
+				Skills:             converters.StringPtr("Go, Python"),
 			},
 		},
 	}
@@ -36,7 +37,7 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 			Name:     converters.StringPtr("Jane Doe"), // Update
 			JobTitle: nil,                              // Should not change existing
 			City:     converters.StringPtr("New York"), // New field
-			// Organization, OrganizationDomain, and Country not specified - should be preserved
+			// Organization, OrganizationDomain, Country, and Skills not specified - should be preserved
 		},
 	}
 
@@ -76,6 +77,9 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	}
 	if result.UserMetadata.Country == nil || *result.UserMetadata.Country != "USA" {
 		t.Error("UpdateUser() should preserve Country when not specified in input")
+	}
+	if result.UserMetadata.Skills == nil || *result.UserMetadata.Skills != "Go, Python" {
+		t.Error("UpdateUser() should preserve Skills when not specified in input")
 	}
 
 	// Verify new field

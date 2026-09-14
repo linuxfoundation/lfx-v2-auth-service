@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -229,4 +230,103 @@ func TestDefaultConfig(t *testing.T) {
 	if !config.RetryBackoff {
 		t.Error("Expected default retry backoff to be true")
 	}
+}
+
+// TestTransportErrorDoesNotLeakURL pins the privacy fix at the sanitization
+// boundary. A transport failure renders the whole URL through url.Error, and
+// our paths carry an Auth0 sub, so SanitizeError is the boundary every log site
+// has to go through.
+func TestTransportErrorDoesNotLeakURL(t *testing.T) {
+	const sub = "auth0|68b0SECRETSUB"
+
+	client := NewClient(Config{Timeout: time.Second, MaxRetries: 0})
+
+	// Port 1 refuses immediately, which is the transport failure we care about.
+	_, err := client.Request(
+		context.Background(),
+		"GET",
+		"http://127.0.0.1:1/api/v2/users/"+url.PathEscape(sub)+"/identities",
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+
+	sanitized := SanitizeError(err)
+	for _, leak := range []string{sub, url.PathEscape(sub)} {
+		if strings.Contains(sanitized, leak) {
+			t.Errorf("sanitized error leaks %q: %s", leak, sanitized)
+		}
+	}
+
+	// Only the identifier segment is redacted: the host stays so the failing
+	// provider is still identifiable.
+	if !strings.Contains(sanitized, "127.0.0.1:1") {
+		t.Errorf("sanitized error dropped the host, which is needed to triage: %s", sanitized)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"absent", "", 0},
+		{"delta seconds", "30", 30 * time.Second},
+		{"zero seconds", "0", 0},
+		{"negative seconds", "-5", 0},
+		{"unparseable", "soon", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := make(http.Header)
+			if tt.header != "" {
+				header.Set("Retry-After", tt.header)
+			}
+
+			if got := ParseRetryAfter(header); got != tt.want {
+				t.Fatalf("ParseRetryAfter(%q) = %v, want %v", tt.header, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("http-date in the future", func(t *testing.T) {
+		header := make(http.Header)
+		header.Set("Retry-After", time.Now().Add(45*time.Second).UTC().Format(http.TimeFormat))
+
+		if got := ParseRetryAfter(header); got <= 0 {
+			t.Fatalf("ParseRetryAfter(http-date) = %v, want a positive wait", got)
+		}
+	})
+
+	t.Run("http-date already past", func(t *testing.T) {
+		header := make(http.Header)
+		header.Set("Retry-After", time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat))
+
+		if got := ParseRetryAfter(header); got != 0 {
+			t.Fatalf("ParseRetryAfter(past http-date) = %v, want 0", got)
+		}
+	})
+}
+
+func TestRetryAfterFromError(t *testing.T) {
+	t.Run("reads the header off a retryable error", func(t *testing.T) {
+		err := &RetryableError{
+			StatusCode: http.StatusTooManyRequests,
+			Headers:    http.Header{"Retry-After": []string{"12"}},
+		}
+
+		if got := RetryAfter(err); got != 12*time.Second {
+			t.Fatalf("RetryAfter() = %v, want 12s", got)
+		}
+	})
+
+	t.Run("an unrelated error names no wait", func(t *testing.T) {
+		if got := RetryAfter(io.EOF); got != 0 {
+			t.Fatalf("RetryAfter(io.EOF) = %v, want 0", got)
+		}
+	})
 }

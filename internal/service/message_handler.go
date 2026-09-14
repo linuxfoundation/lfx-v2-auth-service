@@ -16,6 +16,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/log"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
@@ -252,7 +253,7 @@ func (m *messageHandlerOrchestrator) getUserByInput(ctx context.Context, msg por
 
 	user, err := m.resolveUserFromAuthInput(ctx, input)
 	if err != nil {
-		slog.ErrorContext(ctx, "error getting user metadata",
+		slog.Log(ctx, log.LevelForError(err), "could not resolve user metadata for input",
 			"error", err,
 			"input", redaction.Redact(input),
 		)
@@ -267,10 +268,6 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 
 	userRetrieved, errGetUser := m.getUserByInput(ctx, msg)
 	if errGetUser != nil {
-		slog.ErrorContext(ctx, "error getting user metadata",
-			"error", errGetUser,
-			"input", redaction.Redact(string(msg.Data())),
-		)
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 
@@ -666,7 +663,7 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		return m.errorResponse(errValidateLinkRequest.Error()), nil
 	}
 
-	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken)
+	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, linkRequest.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
 	}
@@ -935,11 +932,17 @@ type addAliasRequest struct {
 	Domain string `json:"domain"`
 }
 
-// addAliasResponse is the reply for lfx.auth-service.add_alias
+// addAliasResponse is the reply for lfx.auth-service.add_alias on success.
+// Errors go through the shared errorResponse (UserDataResponse) instead.
 type addAliasResponse struct {
 	Success bool   `json:"success"`
 	Email   string `json:"email,omitempty"`
-	Error   string `json:"error,omitempty"`
+}
+
+// hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
+// "@linux.com"), case-insensitively and tolerant of surrounding whitespace.
+func hasEmailDomainSuffix(email, domainSuffix string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), strings.ToLower(strings.TrimSpace(domainSuffix)))
 }
 
 // AddAlias claims a system-managed alias on a caller-supplied domain (e.g.
@@ -1008,16 +1011,16 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 	// hold at most one alias per allowed domain. Cover all three surfaces:
 	// primary email, linked identities, and alternate emails.
 	domainSuffix := "@" + requestedDomain
-	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(fullUser.PrimaryEmail)), domainSuffix) {
+	if hasEmailDomainSuffix(fullUser.PrimaryEmail, domainSuffix) {
 		return m.errorResponse("already_claimed"), nil
 	}
 	for _, id := range fullUser.Identities {
-		if id.Connection == constants.EmailConnection && strings.HasSuffix(strings.ToLower(id.Email), domainSuffix) {
+		if id.Connection == constants.EmailConnection && hasEmailDomainSuffix(id.Email, domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}
 	for _, alt := range fullUser.AlternateEmails {
-		if strings.HasSuffix(strings.ToLower(alt.Email), domainSuffix) {
+		if hasEmailDomainSuffix(alt.Email, domainSuffix) {
 			return m.errorResponse("already_claimed"), nil
 		}
 	}

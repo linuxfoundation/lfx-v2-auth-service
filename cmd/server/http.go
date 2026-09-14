@@ -19,6 +19,7 @@ import (
 
 	authservice "github.com/linuxfoundation/lfx-v2-auth-service/gen/auth_service"
 	authserver "github.com/linuxfoundation/lfx-v2-auth-service/gen/http/auth_service/server"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/middleware"
 )
 
 // handleHTTPServer starts the HTTP server for health check endpoints
@@ -38,6 +39,10 @@ func handleHTTPServer(ctx context.Context, host string, authEndpoints *authservi
 	var mux goahttp.MiddlewareMuxer
 	{
 		mux = goahttp.NewMuxer()
+
+		// Register access logging middleware before any mounts so chi sees it
+		// for all routes.
+		mux.Use(middleware.AccessLogMiddleware())
 
 		// Register route-tagging middleware before any mounts so chi sees it
 		// for all routes. Reads RoutePattern after next.ServeHTTP because chi

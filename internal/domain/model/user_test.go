@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -161,6 +162,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 					TShirtSize:         converters.StringPtr("  M  "),
 					Bio:                converters.StringPtr("  Passionate engineer  "),
+					Skills:             converters.StringPtr("  Go,  Python , Python, kubernetes  "),
 					Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 					Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 				},
@@ -185,6 +187,7 @@ func TestUser_UserSanitize(t *testing.T) {
 					PhoneNumber:        converters.StringPtr("+1-555-123-4567"),
 					TShirtSize:         converters.StringPtr("M"),
 					Bio:                converters.StringPtr("Passionate engineer"),
+					Skills:             converters.StringPtr("Go, Python, kubernetes"),
 					Picture:            converters.StringPtr("https://example.com/pic.jpg"),
 					Zoneinfo:           converters.StringPtr("America/Los_Angeles"),
 				},
@@ -303,6 +306,7 @@ func TestUser_UserSanitize(t *testing.T) {
 			checkStringPtr("PhoneNumber", userCopy.UserMetadata.PhoneNumber, tt.expected.UserMetadata.PhoneNumber)
 			checkStringPtr("TShirtSize", userCopy.UserMetadata.TShirtSize, tt.expected.UserMetadata.TShirtSize)
 			checkStringPtr("Bio", userCopy.UserMetadata.Bio, tt.expected.UserMetadata.Bio)
+			checkStringPtr("Skills", userCopy.UserMetadata.Skills, tt.expected.UserMetadata.Skills)
 			checkStringPtr("Picture", userCopy.UserMetadata.Picture, tt.expected.UserMetadata.Picture)
 			checkStringPtr("Zoneinfo", userCopy.UserMetadata.Zoneinfo, tt.expected.UserMetadata.Zoneinfo)
 		})
@@ -326,6 +330,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			PhoneNumber:        converters.StringPtr("  +1-555-123-4567  "),
 			TShirtSize:         converters.StringPtr("  M  "),
 			Bio:                converters.StringPtr("  Passionate engineer  "),
+			Skills:             converters.StringPtr("  Go,  Python , Python, kubernetes  "),
 			Picture:            converters.StringPtr("  https://example.com/pic.jpg  "),
 			Zoneinfo:           converters.StringPtr("  America/Los_Angeles  "),
 		}
@@ -347,6 +352,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PhoneNumber":        "+1-555-123-4567",
 			"TShirtSize":         "M",
 			"Bio":                "Passionate engineer",
+			"Skills":             "Go, Python, kubernetes",
 			"Picture":            "https://example.com/pic.jpg",
 			"Zoneinfo":           "America/Los_Angeles",
 		}
@@ -366,6 +372,7 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 			"PhoneNumber":        metadata.PhoneNumber,
 			"TShirtSize":         metadata.TShirtSize,
 			"Bio":                metadata.Bio,
+			"Skills":             metadata.Skills,
 			"Picture":            metadata.Picture,
 			"Zoneinfo":           metadata.Zoneinfo,
 		}
@@ -442,6 +449,339 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 		if !utf8.ValidString(*metadata.Bio) {
 			t.Error("Bio is not valid UTF-8 after truncation")
+		}
+	})
+
+	t.Run("skills: trims whitespace and rejoins with comma-space", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("  Go , Python ,Kubernetes "),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, Python, Kubernetes" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, Python, Kubernetes")
+		}
+	})
+
+	t.Run("skills: drops empty items", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Go,, ,Python,"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, Python" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, Python")
+		}
+	})
+
+	t.Run("skills: all-empty input sanitizes to an empty value", func(t *testing.T) {
+		// Every parsed item sanitizes away here, exercising the branch that
+		// clears a user's stored skills to "" (the pointer stays non-nil,
+		// so this PATCHes the field to empty rather than leaving it alone).
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(" , ,, "),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "" {
+			t.Errorf("Skills = %v, want empty string", metadata.Skills)
+		}
+	})
+
+	t.Run("skills: dedupes case-insensitively keeping first casing", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Go, python, GO, PYTHON, Rust"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go, python, Rust" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Go, python, Rust")
+		}
+	})
+
+	t.Run("skills: dedupes Unicode case variants beyond simple lowercase", func(t *testing.T) {
+		// "Σ" (capital sigma), "σ" (lowercase sigma), and "ς" (final sigma) are
+		// all the same letter under Unicode case folding, but strings.ToLower
+		// leaves "ς" unchanged, so a naive lowercase comparison would treat it
+		// as a distinct value. Use case folding here to catch a regression.
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr("Σ, σ, ς, Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Σ, Go" {
+			t.Errorf("Skills = %v, want %q", metadata.Skills, "Σ, Go")
+		}
+	})
+
+	t.Run("skills: raw input beyond skillsMaxRawLength is discarded before splitting", func(t *testing.T) {
+		// Duplicates collapse to one entry, so a marker placed past the raw
+		// boundary would fit under skillsMaxLength — it must never be seen.
+		const repCount = 1001 // 1001 * len("dup,") = 4004 runes, crossing the 4000 boundary
+		raw := strings.Repeat("dup,", repCount) + "UNIQUE_MARKER"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup" {
+			t.Errorf("Skills = %v, want %q (marker beyond the raw-length boundary must be discarded)", metadata.Skills, "dup")
+		}
+	})
+
+	t.Run("skills: raw-length guard truncates on a rune boundary for multibyte input", func(t *testing.T) {
+		// "é" is a single rune but 2 bytes in UTF-8, so this exercises the
+		// guard's rune-boundary scan against a non-ASCII byte boundary.
+		const repCount = 2001 // 2001 * 2 runes ("é" + ",") = 4002 runes, crossing the 4000 boundary
+		raw := strings.Repeat("é,", repCount) + "UNIQUE_MARKER"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "é" {
+			t.Errorf("Skills = %v, want %q (marker beyond the raw-length boundary must be discarded)", metadata.Skills, "é")
+		}
+		if metadata.Skills != nil && !utf8.ValidString(*metadata.Skills) {
+			t.Error("Skills is not valid UTF-8 after raw-length truncation")
+		}
+	})
+
+	t.Run("skills: raw-length guard preserves content exactly at the boundary", func(t *testing.T) {
+		// The two prior raw-length tests use all-duplicate content, so they
+		// can't distinguish a correct 4000-rune cut from one that trims a
+		// rune early: both an at-cap and an off-by-one-early cut dedupe to
+		// the same "dup" result. "dup," is 4 runes; 999 repeats use exactly
+		// 3996 runes, leaving exactly 4 runes of budget for "ENDS" so the
+		// raw input lands at precisely skillsMaxRawLength runes with
+		// nothing to spare.
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "ENDS"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup, ENDS" {
+			t.Errorf("Skills = %v, want %q (content exactly at the raw-length boundary must survive untouched)", metadata.Skills, "dup, ENDS")
+		}
+	})
+
+	t.Run("skills: raw-length guard keeps the last item when the cut lands exactly on a delimiter", func(t *testing.T) {
+		// "dup," x999 (3996 runes) + "abcd" (4 runes) lands exactly at the
+		// skillsMaxRawLength boundary (4000 runes), with the very next rune
+		// being the comma that follows "abcd". That comma is the excluded
+		// (4001st) rune, so the kept 4000 runes already end on a complete
+		// item — "abcd" must survive, not be dropped by an unconditional
+		// back-off to the previous comma.
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "abcd" + "," + "extra_marker"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup, abcd" {
+			t.Errorf("Skills = %v, want %q (item ending exactly at the raw-length boundary must survive)", metadata.Skills, "dup, abcd")
+		}
+	})
+
+	t.Run("skills: raw-length guard discards the fragment when the cut lands inside the first item", func(t *testing.T) {
+		// A single item with no commas at all is longer than
+		// skillsMaxRawLength, so the cut lands mid-item with no prior comma
+		// to back off to. The partial fragment must be discarded entirely,
+		// not kept and later processed as a fabricated skill.
+		raw := strings.Repeat("x", skillsMaxRawLength+50)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "" {
+			t.Errorf("Skills = %v, want empty string (partial first-item fragment must not be kept)", metadata.Skills)
+		}
+	})
+
+	t.Run("skills: raw-length guard drops a mid-item fragment after a complete item", func(t *testing.T) {
+		// "dup," x999 = 3996 runes, so the kept 4000 runes end 4 runes into
+		// "PARTIAL_SKILL" ("PART"); that fragment is under skillsMaxLength, so
+		// only the back-off keeps it out. Without the back-off this would
+		// yield "dup, PART".
+		const repCount = 999
+		raw := strings.Repeat("dup,", repCount) + "PARTIAL_SKILL"
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(raw),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "dup" {
+			t.Errorf("Skills = %v, want %q (mid-item fragment must be dropped)", metadata.Skills, "dup")
+		}
+	})
+
+	t.Run("skills: caps item count at skillsMaxCount", func(t *testing.T) {
+		items := make([]string, skillsMaxCount+10)
+		for i := range items {
+			items[i] = fmt.Sprintf("skill%d", i)
+		}
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Join(items, ",")),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want capped value")
+		}
+		// Pin which items survive, not just how many: the scanner's
+		// first-50-unique-wins contract (user.go, len(cleaned) <
+		// skillsMaxCount) is only enforced by this loop condition, so an
+		// unrelated refactor (buffered split, map-backed set) could keep a
+		// different 50 items, or reorder them, and still pass a count-only
+		// check.
+		want := strings.Join(items[:skillsMaxCount], ", ")
+		if got := *metadata.Skills; got != want {
+			t.Errorf("Skills = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("skills: truncated to skillsMaxLength characters", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("a", skillsMaxLength+100)),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Skills)); got != skillsMaxLength {
+			t.Errorf("Skills length = %d, want %d", got, skillsMaxLength)
+		}
+	})
+
+	t.Run("skills: truncation landing on a separator boundary drops the dangling separator", func(t *testing.T) {
+		// Joined length is 1998 + len(", ") + len("Go") = 2002, so truncating
+		// to skillsMaxLength (2000) runes cuts exactly after the separator,
+		// which would otherwise leave a trailing ", " with "Go" dropped.
+		first := strings.Repeat("x", skillsMaxLength-2)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + "," + "Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		got := *metadata.Skills
+		if strings.HasSuffix(got, ", ") || strings.HasSuffix(got, ",") {
+			t.Errorf("Skills = %q, must not end with a dangling separator", got)
+		}
+		if got != first {
+			t.Errorf("Skills = %q, want %q", got, first)
+		}
+	})
+
+	t.Run("skills: truncation landing inside an item drops the whole item, not a fragment", func(t *testing.T) {
+		// Joined length is 1990 + len(", ") + len("Kubernetes") = 2002, so
+		// truncating to skillsMaxLength (2000) runes would land 8 runes
+		// into "Kubernetes" ("Kubernet"). That fragment must never be
+		// stored as a fabricated skill the user never entered.
+		first := strings.Repeat("x", skillsMaxLength-10)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + "," + "Kubernetes"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		got := *metadata.Skills
+		if strings.Contains(got, "Kubernet") {
+			t.Errorf("Skills = %q, must not contain a partial item fragment", got)
+		}
+		if got != first {
+			t.Errorf("Skills = %q, want %q", got, first)
+		}
+	})
+
+	t.Run("skills: a later item that fits whole survives even though an earlier oversized item was dropped", func(t *testing.T) {
+		// "x"*1996 fits alone (used=1996). "Rust" doesn't fit (1996+2+4=2002)
+		// and must be dropped whole, but the scan must continue rather than
+		// stop there: "Go" fits exactly (1996+2+2=2000) and must survive.
+		first := strings.Repeat("x", skillsMaxLength-4)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + ",Rust,Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		want := first + ", Go"
+		if metadata.Skills == nil || *metadata.Skills != want {
+			t.Errorf("Skills = %v, want %q (a later fitting item must not be dropped along with an earlier oversized one)", metadata.Skills, want)
+		}
+	})
+
+	t.Run("skills: an oversized first item is dropped whole, not stored as a fabricated fragment, when a later item fits", func(t *testing.T) {
+		// The first item alone exceeds skillsMaxLength (2001 > 2000), but a
+		// later item ("Go") fits on its own. The oversized item must be
+		// dropped whole rather than hard-truncated into a fragment the user
+		// never entered; "Go" must survive.
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("x", skillsMaxLength+1) + ",Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil || *metadata.Skills != "Go" {
+			t.Errorf("Skills = %v, want %q (oversized first item must be dropped whole, not truncated, when a later item fits)", metadata.Skills, "Go")
+		}
+	})
+
+	t.Run("skills: joined value landing exactly on skillsMaxLength survives whole", func(t *testing.T) {
+		// 1996 + len(", ") + len("Go") = 2000 exactly; using >= instead of >
+		// in the fit check would drop "Go" even though it fits precisely.
+		first := strings.Repeat("x", skillsMaxLength-4)
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(first + ",Go"),
+		}
+
+		metadata.userMetadataSanitize()
+
+		want := first + ", Go"
+		if metadata.Skills == nil || *metadata.Skills != want {
+			t.Errorf("Skills = %v, want a value of exactly %d runes ending in %q", metadata.Skills, skillsMaxLength, ", Go")
+		}
+	})
+
+	t.Run("multibyte skills is truncated on a rune boundary", func(t *testing.T) {
+		metadata := &UserMetadata{
+			Skills: converters.StringPtr(strings.Repeat("é", skillsMaxLength+50)),
+		}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Skills == nil {
+			t.Fatal("Skills = nil, want truncated value")
+		}
+		if got := len([]rune(*metadata.Skills)); got != skillsMaxLength {
+			t.Errorf("Skills rune length = %d, want %d", got, skillsMaxLength)
+		}
+		if !utf8.ValidString(*metadata.Skills) {
+			t.Error("Skills is not valid UTF-8 after truncation")
 		}
 	})
 }
@@ -1027,6 +1367,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
 				Bio:                converters.StringPtr("Engineer bio"),
+				Skills:             converters.StringPtr("Go, Python"),
 			},
 			expectedResult: true,
 			expectedFinal: &UserMetadata{
@@ -1046,6 +1387,24 @@ func TestUserMetadata_Patch(t *testing.T) {
 				PhoneNumber:        converters.StringPtr("+1-555-1234"),
 				TShirtSize:         converters.StringPtr("L"),
 				Bio:                converters.StringPtr("Engineer bio"),
+				Skills:             converters.StringPtr("Go, Python"),
+			},
+		},
+		{
+			name:           "update skills field",
+			original:       &UserMetadata{},
+			update:         &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+			expectedResult: true,
+			expectedFinal:  &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+		},
+		{
+			name:           "nil skills update preserves existing skills",
+			original:       &UserMetadata{Skills: converters.StringPtr("Go, Python")},
+			update:         &UserMetadata{Name: converters.StringPtr("John")},
+			expectedResult: true,
+			expectedFinal: &UserMetadata{
+				Name:   converters.StringPtr("John"),
+				Skills: converters.StringPtr("Go, Python"),
 			},
 		},
 		{
@@ -1151,6 +1510,9 @@ func TestUserMetadata_Patch(t *testing.T) {
 				if tt.original.Bio != nil {
 					originalCopy.Bio = converters.StringPtr(*tt.original.Bio)
 				}
+				if tt.original.Skills != nil {
+					originalCopy.Skills = converters.StringPtr(*tt.original.Skills)
+				}
 			}
 
 			result := originalCopy.Patch(tt.update)
@@ -1187,6 +1549,7 @@ func TestUserMetadata_Patch(t *testing.T) {
 			checkStringPtr("PhoneNumber", originalCopy.PhoneNumber, tt.expectedFinal.PhoneNumber)
 			checkStringPtr("TShirtSize", originalCopy.TShirtSize, tt.expectedFinal.TShirtSize)
 			checkStringPtr("Bio", originalCopy.Bio, tt.expectedFinal.Bio)
+			checkStringPtr("Skills", originalCopy.Skills, tt.expectedFinal.Skills)
 		})
 	}
 }

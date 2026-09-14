@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -29,6 +30,7 @@ type Claims struct {
 	NotBefore *time.Time     `json:"nbf,omitempty"`
 	Issuer    string         `json:"iss,omitempty"`
 	Audience  string         `json:"aud,omitempty"`
+	Audiences []string       `json:"-"` // All 'aud' values; Audience keeps the first for compatibility
 	Scope     string         `json:"scope,omitempty"`
 	Raw       map[string]any `json:"-"` // Raw claims for additional fields
 }
@@ -51,6 +53,9 @@ type ParseOptions struct {
 	ExpectedIssuer string
 	// ExpectedAudience validates the 'aud' claim matches this value
 	ExpectedAudience string
+	// ExpectedAudiences validates the 'aud' claim matches any of these values.
+	// When set, it takes precedence over ExpectedAudience.
+	ExpectedAudiences []string
 }
 
 // DefaultParseOptions returns sensible default options
@@ -116,7 +121,7 @@ func ParseUnverified(ctx context.Context, tokenString string, opts *ParseOptions
 	}
 
 	slog.DebugContext(ctx, "JWT parsed successfully",
-		"sub", claims.Subject,
+		"sub", redaction.Redact(claims.Subject),
 		"expires_at", claims.ExpiresAt,
 		"scope", claims.Scope)
 
@@ -163,8 +168,8 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 	}
 
 	// Validate audience if specified
-	if opts.ExpectedAudience != "" {
-		if err := validateAudience(claims, opts.ExpectedAudience); err != nil {
+	if expected := opts.expectedAudiences(); len(expected) > 0 {
+		if err := validateAudience(claims, expected); err != nil {
 			return nil, err
 		}
 	}
@@ -191,7 +196,7 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 	}
 
 	slog.DebugContext(ctx, "JWT parsed and verified successfully",
-		"sub", claims.Subject,
+		"sub", redaction.Redact(claims.Subject),
 		"issuer", claims.Issuer,
 		"audience", claims.Audience,
 		"expires_at", claims.ExpiresAt,
@@ -215,6 +220,7 @@ func extractClaimsFromJWT(token jwt.Token) (*Claims, error) {
 	audience := token.Audience()
 	if len(audience) > 0 {
 		claims.Audience = audience[0] // Take the first audience
+		claims.Audiences = audience
 	}
 
 	// Extract email from private claims
@@ -270,7 +276,7 @@ func ExtractSubject(ctx context.Context, tokenString string) (string, error) {
 		return "", errors.NewValidation("missing or invalid 'sub' claim in token")
 	}
 
-	slog.DebugContext(ctx, "extracted subject from JWT", "sub", claims.Subject)
+	slog.DebugContext(ctx, "extracted subject from JWT", "sub", redaction.Redact(claims.Subject))
 	return claims.Subject, nil
 }
 
@@ -291,7 +297,7 @@ func ExtractEmail(ctx context.Context, tokenString string) (string, error) {
 		return "", errors.NewValidation("missing or invalid 'email' claim in token")
 	}
 
-	slog.DebugContext(ctx, "extracted email from JWT", "email", claims.Email)
+	slog.DebugContext(ctx, "extracted email from JWT", "email", redaction.RedactEmail(claims.Email))
 	return claims.Email, nil
 }
 
@@ -346,17 +352,38 @@ func validateIssuer(claims *Claims, expectedIssuer string) error {
 	return nil
 }
 
-// validateAudience checks if the token audience matches the expected value
-func validateAudience(claims *Claims, expectedAudience string) error {
+// validateAudience checks if any token audience matches any expected value
+func validateAudience(claims *Claims, expectedAudiences []string) error {
 	if claims.Audience == "" {
 		return errors.NewValidation("missing 'aud' claim in token")
 	}
 
-	if claims.Audience != expectedAudience {
-		return errors.NewValidation("invalid audience")
+	for _, expected := range expectedAudiences {
+		if claims.HasAudience(expected) {
+			return nil
+		}
 	}
 
+	return errors.NewValidation("invalid audience")
+}
+
+// expectedAudiences returns the effective audience allow-list for validation
+func (o *ParseOptions) expectedAudiences() []string {
+	if len(o.ExpectedAudiences) > 0 {
+		return o.ExpectedAudiences
+	}
+	if o.ExpectedAudience != "" {
+		return []string{o.ExpectedAudience}
+	}
 	return nil
+}
+
+// HasAudience reports whether the token's 'aud' claim contains the given audience
+func (c *Claims) HasAudience(audience string) bool {
+	if slices.Contains(c.Audiences, audience) {
+		return true
+	}
+	return c.Audience != "" && c.Audience == audience
 }
 
 // GetClaim is a helper to extract a specific claim from the raw claims

@@ -5,20 +5,27 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/auth0"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/authelia"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/cdp"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/k8s"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/mock"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/infrastructure/nats"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service"
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/service/provisioning"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 )
@@ -177,6 +184,236 @@ func newUserReaderWriter(ctx context.Context) port.UserReaderWriter {
 	}
 }
 
+// provisioningAuth0Timeout bounds a single Auth0 Management API call made on
+// the consumer path. It matches httpclient.DefaultConfig.
+const provisioningAuth0Timeout = 30 * time.Second
+
+// provisioningBucketRetryWait spaces out retries while the offset bucket's
+// JetStream CR is still reconciling.
+const provisioningBucketRetryWait = 10 * time.Second
+
+// newProvisioningOrchestrator wires the CDP provisioning flow.
+//
+// It returns nil when the CDP configuration is absent, which leaves the
+// consumer unstarted rather than reading a stream it cannot act on.
+func newProvisioningOrchestrator(ctx context.Context) provisioning.Orchestrator {
+	cdpBaseURL := os.Getenv(constants.CDPBaseURLEnvKey)
+	cdpAudience := os.Getenv(constants.CDPAudienceEnvKey)
+	if cdpBaseURL == "" || cdpAudience == "" {
+		// Only reachable once the operator asked for the consumer, so this is
+		// a misconfiguration rather than the ordinary disabled state: the pod
+		// still goes Ready with provisioning silently off, and the log line is
+		// the only place that says so.
+		slog.ErrorContext(ctx, "the Auth0 events consumer is enabled but CDP is not configured, provisioning will not run",
+			"has_base_url", cdpBaseURL != "",
+			"has_audience", cdpAudience != "",
+		)
+		return nil
+	}
+
+	auth0Config, ok := newProvisioningAuth0Config(ctx)
+	if !ok {
+		return nil
+	}
+
+	cdpTokenManager, err := auth0.NewM2MTokenManagerForAudience(ctx, auth0Config, cdpAudience)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create CDP M2M token manager", "error", err)
+		return nil
+	}
+
+	cdpClient := cdp.NewClient(cdp.Config{
+		BaseURL:      strings.TrimSuffix(cdpBaseURL, "/"),
+		TokenManager: cdpTokenManager,
+	})
+
+	slog.DebugContext(ctx, "CDP provisioning initialized", "cdp_base_url", cdpBaseURL)
+
+	// Retries stay off because the shared client cannot replay a request body.
+	// The timeout is not optional though: the consumer processes one event at a
+	// time while holding the lease, so an Auth0 call that never returns stops
+	// the only reader of the stream, and the per-event attempt ceiling never
+	// fires because the attempt never ends.
+	metadataStore, err := auth0.NewCDPMetadataWriter(httpclient.Config{
+		Timeout:    provisioningAuth0Timeout,
+		MaxRetries: 0,
+	}, auth0Config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create the CDP metadata writer", "error", err)
+		return nil
+	}
+
+	return provisioning.NewOrchestrator(
+		provisioning.WithCDPClient(cdpClient),
+		provisioning.WithMetadataStore(metadataStore),
+	)
+}
+
+// newProvisioningAuth0Config resolves the Auth0 tenant and mints the
+// Management API token manager the provisioning paths share.
+//
+// The Management API and the CDP public API are different audiences, so each
+// gets its own token manager and its own cache.
+func newProvisioningAuth0Config(ctx context.Context) (auth0.Config, bool) {
+	auth0Tenant := os.Getenv(constants.Auth0TenantEnvKey)
+	auth0Domain := os.Getenv(constants.Auth0DomainEnvKey)
+	if auth0Domain == "" {
+		if auth0Tenant == "" {
+			slog.ErrorContext(ctx, "CDP provisioning needs an Auth0 tenant or domain, disabling it")
+			return auth0.Config{}, false
+		}
+		auth0Domain = fmt.Sprintf("%s.auth0.com", auth0Tenant)
+	}
+
+	config := auth0.Config{
+		Tenant: auth0Tenant,
+		Domain: auth0Domain,
+	}
+
+	tokenManager, err := auth0.NewM2MTokenManager(ctx, config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create Auth0 M2M token manager for provisioning", "error", err)
+		return auth0.Config{}, false
+	}
+	config.M2MTokenManager = tokenManager
+
+	return config, true
+}
+
+// startProvisioningConsumer reads the Auth0 events stream on one replica.
+//
+// The stream fans out rather than load balancing — every connection receives
+// every event — so the consumer runs under a lease and the replicas that do
+// not hold it stand by.
+func startProvisioningConsumer(ctx context.Context) {
+	if os.Getenv(constants.ProvisioningConsumerEnabledEnvKey) != "true" {
+		slog.InfoContext(ctx, "Auth0 events consumer is disabled")
+		return
+	}
+
+	orchestrator := newProvisioningOrchestrator(ctx)
+	if orchestrator == nil {
+		return
+	}
+
+	auth0Config, ok := newProvisioningAuth0Config(ctx)
+	if !ok {
+		return
+	}
+	// Production reaches Auth0 through a custom domain. The override exists
+	// because it is unconfirmed whether every custom domain serves
+	// /api/v2/events.
+	if host := os.Getenv(constants.Auth0EventsHostEnvKey); host != "" {
+		auth0Config.Domain = host
+	}
+
+	eventsClient, err := auth0.NewEventsClient(auth0.EventsConfig{}, auth0Config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create the Auth0 events client", "error", err)
+		return
+	}
+
+	namespace := k8s.PodNamespace()
+	if namespace == "" {
+		slog.ErrorContext(ctx, "cannot determine the pod namespace, not starting the consumer")
+		return
+	}
+
+	lease := k8s.LeaseConfig{
+		Name:      constants.LeaseNameProvisioningConsumer,
+		Namespace: namespace,
+		Identity:  k8s.PodIdentity(),
+	}
+
+	go func() {
+		// Opened here rather than during the NATS bootstrap: the bucket is
+		// created by a JetStream CR from this same release, so on a first
+		// install it can lag the pod. Failing that lookup at bootstrap would
+		// take down every unrelated subscription with it.
+		offsets, err := openProvisioningOffsetStore(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "gave up opening the provisioning offset bucket", "error", err)
+			return
+		}
+
+		consumer, err := provisioning.NewConsumer(
+			provisioning.WithEventsClient(eventsClient),
+			provisioning.WithProvisioner(orchestrator),
+			provisioning.WithOffsetStore(offsets),
+			provisioning.WithReplayWindow(provisioningReplayWindow(ctx)),
+		)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to create the Auth0 events consumer", "error", err)
+			return
+		}
+
+		if err := k8s.RunAsLeader(ctx, lease, consumer.Run); err != nil {
+			slog.ErrorContext(ctx, "the Auth0 events consumer stopped", "error", err)
+		}
+	}()
+}
+
+// provisioningCursorBucket is the offset bucket name the chart rendered.
+func provisioningCursorBucket() string {
+	if name := strings.TrimSpace(os.Getenv(constants.ProvisioningCursorBucketEnvKey)); name != "" {
+		return name
+	}
+	return constants.KVBucketNameProvisioningCursor
+}
+
+// openProvisioningOffsetStore opens the offset bucket, retrying until it exists
+// or ctx ends. Only the consumer waits; the rest of the service is unaffected.
+func openProvisioningOffsetStore(ctx context.Context) (provisioning.OffsetStore, error) {
+	bucket := provisioningCursorBucket()
+
+	for attempt := 1; ; attempt++ {
+		err := getNATSClient().KeyValueStore(ctx, bucket)
+		if err == nil {
+			if kv, found := getNATSClient().GetKVStore(bucket); found {
+				return provisioning.NewKVOffsetStore(kv)
+			}
+			err = fmt.Errorf("bucket %q opened but was not registered", bucket)
+		}
+
+		// A name NATS rejects is a typo in the chart, not a bucket that has not
+		// reconciled yet. Retrying it forever would leave the consumer dead
+		// behind a warning indistinguishable from the benign first-install case.
+		if errors.Is(err, jetstream.ErrInvalidBucketName) {
+			return nil, err
+		}
+
+		slog.WarnContext(ctx, "the provisioning offset bucket is not available yet, retrying",
+			"bucket", bucket,
+			"attempt", attempt,
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(provisioningBucketRetryWait):
+		}
+	}
+}
+
+// provisioningReplayWindow reads the configured replay window.
+func provisioningReplayWindow(ctx context.Context) time.Duration {
+	raw := os.Getenv(constants.ProvisioningReplayWindowEnvKey)
+	if raw == "" {
+		return constants.DefaultProvisioningReplayWindow
+	}
+
+	window, err := time.ParseDuration(raw)
+	if err != nil || window <= 0 {
+		slog.WarnContext(ctx, "invalid provisioning replay window, using the default",
+			"value", raw,
+			"default", constants.DefaultProvisioningReplayWindow,
+		)
+		return constants.DefaultProvisioningReplayWindow
+	}
+	return window
+}
+
 // QueueSubscriptions starts all NATS subscriptions with the provided dependencies
 func QueueSubscriptions(ctx context.Context) error {
 	slog.DebugContext(ctx, "starting NATS subscriptions")
@@ -259,6 +496,8 @@ func QueueSubscriptions(ctx context.Context) error {
 			return fmt.Errorf("failed to subscribe to subject %s: %w", subject, err)
 		}
 	}
+
+	startProvisioningConsumer(ctx)
 
 	slog.DebugContext(ctx, "NATS subscriptions started successfully")
 	return nil

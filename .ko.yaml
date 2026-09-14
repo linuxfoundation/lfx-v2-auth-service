@@ -7,3 +7,5 @@ builds:
       - -X=main.Version={{.Env.VERSION}}
       - -X=main.BuildTime={{.Env.BUILD_TIME}}
       - -X=main.GitCommit={{.Env.GIT_COMMIT}}
+  - id: merge-repair
+    dir: ./cmd/cdp-merge-repair

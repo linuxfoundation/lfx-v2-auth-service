@@ -41,3 +41,25 @@ spec:
   compression: {{ .Values.nats.authelia_email_otp_kv_bucket.compression }}
   ttl: {{ .Values.nats.authelia_email_otp_kv_bucket.ttl }}
 {{- end }}
+---
+# Holds one value: how far the consumer has read into the Auth0 events stream.
+# Losing it costs a replay bounded by PROVISIONING_REPLAY_WINDOW, not lost
+# users, so it is kept on uninstall but is not precious.
+{{- if and .Values.nats.provisioning_cursor_kv_bucket.creation .Values.provisioningConsumer.enabled }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.nats.provisioning_cursor_kv_bucket.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.nats.provisioning_cursor_kv_bucket.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.nats.provisioning_cursor_kv_bucket.name }}
+  history: {{ .Values.nats.provisioning_cursor_kv_bucket.history }}
+  storage: {{ .Values.nats.provisioning_cursor_kv_bucket.storage }}
+  maxValueSize: {{ .Values.nats.provisioning_cursor_kv_bucket.maxValueSize }}
+  maxBytes: {{ .Values.nats.provisioning_cursor_kv_bucket.maxBytes }}
+  compression: {{ .Values.nats.provisioning_cursor_kv_bucket.compression }}
+{{- end }}
