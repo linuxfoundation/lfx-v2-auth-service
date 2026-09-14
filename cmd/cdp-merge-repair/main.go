@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -287,6 +288,9 @@ type repairOptions struct {
 	terminationPath string
 	// exitHold is how long to linger after the tally is written; zero exits at once.
 	exitHold time.Duration
+	// signals is the process-wide termination-signal registration the hold
+	// consults; nil (tests) means the hold only ever times out.
+	signals *termSignals
 }
 
 // defaultTerminationPath is the kubelet's default terminationMessagePath: a
@@ -445,7 +449,7 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		if werr != nil {
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
 		}
-		holdBeforeExit(ctx, opts.exitHold)
+		holdBeforeExit(opts.signals, opts.exitHold)
 		if werr != nil {
 			return 1, errors.Join(err, werr)
 		}
@@ -527,12 +531,68 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		"unchecked", out.Unchecked,
 	)
 
-	holdBeforeExit(ctx, opts.exitHold)
+	holdBeforeExit(opts.signals, opts.exitHold)
 
 	if werr != nil {
 		return 1, werr
 	}
 	return exitCode(out), nil
+}
+
+// termSignals is the process's single registration for SIGINT/SIGTERM. One
+// goroutine drains the channel, counts every signal, and cancels the run
+// context on the first. Registering exactly once matters: signal.Notify
+// fans a signal out to every registered channel, so a second registration
+// (a fresh NotifyContext inside the hold) would count the same signal twice
+// or miss one that landed between the two registrations.
+type termSignals struct {
+	count  atomic.Int32
+	cancel context.CancelFunc
+	stop   func()
+}
+
+// newTermSignals arms the registration and returns the run context, which is
+// cancelled on the first termination signal.
+func newTermSignals(parent context.Context) (context.Context, *termSignals) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	ts := &termSignals{cancel: cancel}
+	done := make(chan struct{})
+	go func() {
+		for range ch {
+			if ts.count.Add(1) == 1 {
+				cancel()
+			}
+		}
+		close(done)
+	}()
+	ts.stop = func() {
+		signal.Stop(ch)
+		close(ch)
+		<-done
+		cancel()
+	}
+	return ctx, ts
+}
+
+// waitSecond blocks until a second termination signal has been counted or
+// the duration elapses. Nil-safe so tests can call the hold without a
+// registration.
+func (ts *termSignals) waitSecond(d time.Duration) {
+	deadline := time.After(d)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if ts != nil && ts.count.Load() >= 2 {
+			return
+		}
+		select {
+		case <-deadline:
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // holdBeforeExit lingers after the tally is written so the node's log
@@ -541,44 +601,23 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 //
 // Kubernetes sends exactly one SIGTERM per pod, so the rule is: the hold
 // survives the FIRST termination signal the process ever receives and ends
-// on the SECOND (local Ctrl-C twice still exits). Which signal is "first"
-// depends on how we got here:
+// on the SECOND (local Ctrl-C twice still exits). The count comes from the
+// single process-wide registration, so it is the same number on both paths:
 //
-//   - Truncated walk (deadline kill, eviction): the run context is already
-//     cancelled by the SIGTERM that stopped the walk. That was the first
-//     signal; the next one ends the hold. A hold keyed on the run context
-//     would return instantly here (the 2026-09-11 shape).
-//   - Normal completion: no signal has arrived. An eviction that lands during
-//     the hold is the first signal and MUST be absorbed — cutting the hold
-//     short would recreate the same teardown race on the good-run path.
+//   - Truncated walk (deadline kill, eviction): the truncating SIGTERM was
+//     signal #1; the next one ends the hold. A hold keyed on the cancelled
+//     run context would return instantly here (the 2026-09-11 shape).
+//   - Normal completion: no signal so far. An eviction that lands during the
+//     hold is signal #1 and is absorbed — cutting the hold short would
+//     recreate the same teardown race on the good-run path.
 //
-// Signals are received on a raw channel so the count is explicit. The hold
-// is bounded by the pod's terminationGracePeriodSeconds, which the chart
-// sets above this value.
-func holdBeforeExit(runCtx context.Context, hold time.Duration) {
+// Bounded by the pod's terminationGracePeriodSeconds, which the chart sets
+// above this value.
+func holdBeforeExit(ts *termSignals, hold time.Duration) {
 	if hold <= 0 {
 		return
 	}
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
-
-	remaining := 2
-	if runCtx.Err() != nil {
-		remaining = 1 // the truncating signal was the first
-	}
-	deadline := time.After(hold)
-	for {
-		select {
-		case <-deadline:
-			return
-		case <-sigs:
-			remaining--
-			if remaining == 0 {
-				return
-			}
-		}
-	}
+	ts.waitSecond(hold)
 }
 
 // exitCode maps a finished tally to the CLI contract: 0 is conclusive (a
@@ -727,8 +766,8 @@ func realMain() int {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, signals := newTermSignals(context.Background())
+	defer signals.stop()
 
 	deps, err := buildRepairDeps(ctx)
 	if err != nil {
@@ -745,6 +784,7 @@ func realMain() int {
 		direction:       *direction,
 		exitHold:        *exitHold,
 		terminationPath: *terminationPath,
+		signals:         signals,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "merge-repair failed", "error", err)

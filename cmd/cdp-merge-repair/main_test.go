@@ -773,63 +773,81 @@ func TestRunTerminationSummaryIsBestEffort(t *testing.T) {
 	assert.Equal(t, 0, code)
 }
 
-func TestHoldBeforeExitSurvivesACancelledRunContext(t *testing.T) {
-	// The deadline-kill and eviction paths reach the hold with the run ctx
-	// already cancelled by the truncating SIGTERM. The hold must still run its
-	// full course there — that is when the tally matters most. Exercised via
-	// run(): a pre-cancelled ctx must not shorten the hold.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
-		return []cdp.MemberIdentity{lfid("alice")}, nil
-	}}
-	deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
-		list: func(context.Context) ([]holderUser, []string, error) {
-			return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
-		}}
+func TestHoldBeforeExitBasics(t *testing.T) {
 	started := time.Now()
-	_, _ = run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, exitHold: 150 * time.Millisecond})
-	assert.GreaterOrEqual(t, time.Since(started), 150*time.Millisecond, "a cancelled run ctx must not cut the hold short")
-
-	started = time.Now()
-	holdBeforeExit(context.Background(), 0)
+	holdBeforeExit(nil, 0)
 	assert.Less(t, time.Since(started), 50*time.Millisecond, "zero hold returns immediately")
 
 	started = time.Now()
-	holdBeforeExit(context.Background(), 30*time.Millisecond)
-	assert.GreaterOrEqual(t, time.Since(started), 30*time.Millisecond, "positive hold actually waits")
+	holdBeforeExit(nil, 80*time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(started), 80*time.Millisecond, "positive hold waits; nil registration only ever times out")
 }
 
-func TestHoldBeforeExitCountsSignals(t *testing.T) {
+func TestTermSignalsCountsFromOneRegistration(t *testing.T) {
 	// Kubernetes sends exactly one SIGTERM per pod. The hold survives the first
-	// signal the process ever receives and ends on the second; which one is
-	// "first" depends on whether the run was already truncated.
+	// signal the process ever receives and ends on the second, and the count
+	// comes from the single process-wide registration — the same number
+	// whether the first signal truncated the walk or landed during the hold.
 	sendSIGINT := func(after time.Duration) {
 		go func() { time.Sleep(after); _ = syscall.Kill(syscall.Getpid(), syscall.SIGINT) }()
 	}
+	waitCount := func(ts *termSignals, want int32) {
+		deadline := time.Now().Add(2 * time.Second)
+		for ts.count.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		require.GreaterOrEqual(t, ts.count.Load(), want, "signal delivery")
+	}
 
-	// Normal completion: no signal so far. One signal during the hold is an
-	// eviction's first SIGTERM and must be absorbed — the hold runs to its end.
-	started := time.Now()
-	sendSIGINT(20 * time.Millisecond)
-	holdBeforeExit(context.Background(), 200*time.Millisecond)
-	assert.GreaterOrEqual(t, time.Since(started), 200*time.Millisecond, "first signal on a clean run must not end the hold")
+	t.Run("first signal cancels the run and is absorbed by the hold", func(t *testing.T) {
+		ctx, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		assert.Error(t, ctx.Err(), "the first signal cancels the run context")
+		started := time.Now()
+		holdBeforeExit(ts, 200*time.Millisecond)
+		assert.GreaterOrEqual(t, time.Since(started), 200*time.Millisecond, "one signal so far: the hold runs to its end (truncated-walk path)")
+	})
 
-	// Normal completion, two signals: the second ends it (local Ctrl-C twice).
-	started = time.Now()
-	sendSIGINT(20 * time.Millisecond)
-	sendSIGINT(60 * time.Millisecond)
-	holdBeforeExit(context.Background(), time.Hour)
-	assert.Less(t, time.Since(started), 2*time.Second, "second signal on a clean run must end the hold")
+	t.Run("clean run: a signal during the hold is the first and is absorbed", func(t *testing.T) {
+		_, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		started := time.Now()
+		sendSIGINT(20 * time.Millisecond)
+		holdBeforeExit(ts, 250*time.Millisecond)
+		assert.GreaterOrEqual(t, time.Since(started), 250*time.Millisecond, "an eviction during a clean run's hold must not end it")
+		assert.EqualValues(t, 1, ts.count.Load())
+	})
 
-	// Truncated run: the cancelled ctx already consumed the first signal, so a
-	// single signal during the hold is the second and ends it.
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	started = time.Now()
-	sendSIGINT(20 * time.Millisecond)
-	holdBeforeExit(cancelled, time.Hour)
-	assert.Less(t, time.Since(started), 2*time.Second, "one signal after a truncating signal must end the hold")
+	t.Run("second signal ends the hold on either path", func(t *testing.T) {
+		_, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		started := time.Now()
+		sendSIGINT(30 * time.Millisecond)
+		holdBeforeExit(ts, time.Hour)
+		assert.Less(t, time.Since(started), 2*time.Second, "second signal (local Ctrl-C twice) must end the hold")
+	})
+
+	t.Run("run integration: cancelled ctx does not shorten the hold", func(t *testing.T) {
+		ctx, ts := newTermSignals(context.Background())
+		defer ts.stop()
+		sendSIGINT(10 * time.Millisecond)
+		waitCount(ts, 1)
+		require.Error(t, ctx.Err())
+		client := &stubCDPClient{listFn: func(_ context.Context, _ string) ([]cdp.MemberIdentity, error) {
+			return []cdp.MemberIdentity{lfid("alice")}, nil
+		}}
+		deps := repairDeps{client: client, writer: &stubWriter{}, stdout: io.Discard,
+			list: func(context.Context) ([]holderUser, []string, error) {
+				return []holderUser{{UserID: "auth0|1", Username: "alice", EmailVerified: true, StoredUUID: "uuid-a"}}, nil, nil
+			}}
+		started := time.Now()
+		_, _ = run(ctx, deps, repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc, exitHold: 150 * time.Millisecond, signals: ts})
+		assert.GreaterOrEqual(t, time.Since(started), 150*time.Millisecond, "truncated run still gets its full drain window")
+	})
 }
 
 func TestTallyJSONKeys(t *testing.T) {
