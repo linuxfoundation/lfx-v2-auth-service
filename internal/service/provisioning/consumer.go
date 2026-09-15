@@ -133,11 +133,6 @@ func WithOffsetStore(store OffsetStore) ConsumerOption {
 	return func(c *Consumer) { c.offsets = store }
 }
 
-// WithEventTypes narrows the subscription.
-func WithEventTypes(types ...string) ConsumerOption {
-	return func(c *Consumer) { c.eventTypes = types }
-}
-
 // WithReplayWindow sets how far back the consumer starts with no usable offset.
 func WithReplayWindow(window time.Duration) ConsumerOption {
 	return func(c *Consumer) { c.replayWindow = window }
