@@ -119,7 +119,4 @@ tramp
 node_modules/
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log* 
-# IDE and agent tooling
-.claude/
-.cursor/
+yarn-error.log*
