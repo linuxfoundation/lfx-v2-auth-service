@@ -56,6 +56,7 @@ The service returns a structured reply with user metadata:
 ```json
 {
   "success": true,
+  "created_at": "2025-12-07T22:39:02Z",
   "data": {
     "name": "John Doe",
     "given_name": "John",
@@ -77,6 +78,13 @@ The service returns a structured reply with user metadata:
   }
 }
 ```
+
+`created_at` is the account's true join date - the earlier of the Auth0
+Management API user record's `created_at` and `ldap_created_at` fields - as a
+read-only, top-level sibling of `data`. It is derived, never stored, and is
+**only present on this read reply**, not on `user_metadata.update` (see
+below): omitted entirely (via `omitempty`) when neither source timestamp is
+present or parseable.
 
 **Error Reply (User Not Found):**
 ```json
@@ -217,4 +225,5 @@ nats request lfx.auth-service.user_metadata.update '{
 - `skills` accepts a comma-separated string and is normalized before storage: items are trimmed, empty items are dropped, and duplicates are removed via Unicode case folding (case-insensitive, so `"Go"` and `"go"` are treated as the same skill); when duplicates collide, the first occurrence's casing is kept
 - The raw `skills` input is capped at 4000 characters before it is split, and at most 50 unique, non-empty items are kept while splitting (empty segments and duplicates don't consume the quota); if the 4000-character cut lands inside an item, that whole item is dropped (never stored as a fragment), and if it lands inside the first item the value normalizes to empty — both caps apply before the final cap below
 - The final normalized value (items joined with `", "`) is capped at 2000 characters; each item is kept whole if it fits within that cap and dropped whole (not truncated) if it doesn't, so a later, shorter item still gets a chance to fit even if an earlier one was dropped for being too long — except when no item fits at all, in which case the first item is hard-truncated to 2000 characters since there would otherwise be nothing left to keep
+- Unlike `user_metadata.read`, this reply carries no `created_at`: the join date is derived and read-only, and is never accepted as input or echoed back on the update path
 

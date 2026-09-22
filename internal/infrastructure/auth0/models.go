@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
@@ -27,6 +29,14 @@ type Auth0User struct {
 	AlternateEmail []Auth0ProfileData `json:"alternate_email,omitempty"`
 	UserMetadata   *Auth0UserMetadata `json:"user_metadata"`
 	AppMetadata    *Auth0AppMetadata  `json:"app_metadata,omitempty"`
+	// CreatedAt is the account creation timestamp Auth0 assigns. Compared
+	// against LDAPCreatedAt in ToUser to derive the true join date; never
+	// written back (there is no corresponding field in userUpdateRequest).
+	CreatedAt string `json:"created_at,omitempty"`
+	// LDAPCreatedAt is the creation timestamp of the user's LDAP-migrated
+	// identity, when one exists. It can predate CreatedAt, in which case it
+	// is the true join date. See ToUser.
+	LDAPCreatedAt string `json:"ldap_created_at,omitempty"`
 }
 
 // Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.
@@ -168,7 +178,34 @@ func (u *Auth0User) ToUser() *model.User {
 		PrimaryEmail: u.Email,
 		Identities:   identities,
 		UserMetadata: meta,
+		CreatedAt:    earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
 	}
+}
+
+// earliestCreatedAt returns the earlier of createdAt and ldapCreatedAt as a
+// UTC RFC3339 string, skipping any value that is empty or fails to parse.
+// It returns nil when neither value parses - a derived, read-only join date
+// must never be backfilled with time.Now() or any other fabricated value.
+func earliestCreatedAt(createdAt, ldapCreatedAt string) *string {
+	var earliest *time.Time
+
+	for _, raw := range []string{createdAt, ldapCreatedAt} {
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			continue
+		}
+		if earliest == nil || parsed.Before(*earliest) {
+			earliest = &parsed
+		}
+	}
+
+	if earliest == nil {
+		return nil
+	}
+	return converters.StringPtr(earliest.UTC().Format(time.RFC3339))
 }
 
 // unknownAuth0Error is returned when the provider body carries no usable message,

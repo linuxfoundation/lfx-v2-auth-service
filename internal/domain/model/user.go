@@ -28,6 +28,11 @@ type User struct {
 	AlternateEmails []Email       `json:"alternate_emails,omitempty" yaml:"alternate_emails,omitempty"`
 	Identities      []Identity    `json:"identities,omitempty" yaml:"identities,omitempty"`
 	UserMetadata    *UserMetadata `json:"user_metadata,omitempty" yaml:"user_metadata,omitempty"`
+	// CreatedAt is the derived, read-only account join date (RFC3339, UTC).
+	// It is not part of UserMetadata: UserMetadata is PATCHed straight back
+	// to Auth0 and published on the user_profile.updated event, and this
+	// field must never be writable through either path.
+	CreatedAt *string `json:"created_at,omitempty" yaml:"created_at,omitempty"`
 }
 
 // UserMetadata represents the metadata of a user

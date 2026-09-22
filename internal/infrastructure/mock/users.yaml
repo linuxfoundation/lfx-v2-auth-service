@@ -7,6 +7,7 @@ users:
     sub: "auth0|zephyr001"
     username: "zephyr.stormwind"
     primary_email: "zephyr.stormwind@mockdomain.com"
+    created_at: "2024-03-15T10:00:00Z"
     user_metadata:
       picture: "https://api.dicebear.com/7.x/avataaars/svg?seed=zephyr"
       zoneinfo: "America/New_York"
@@ -43,6 +44,7 @@ users:
     sub: "auth0|aurora002"
     username: "aurora.moonbeam"
     primary_email: "aurora.moonbeam@fantasycorp.io"
+    created_at: "2024-03-15T10:00:00Z"
     user_metadata:
       picture: "https://api.dicebear.com/7.x/avataaars/svg?seed=aurora"
       zoneinfo: "Europe/London"
@@ -67,6 +69,7 @@ users:
     sub: "auth0|phoenix003"
     username: "phoenix.fireforge"
     primary_email: "phoenix.fireforge@legendarydev.net"
+    created_at: "2024-03-15T10:00:00Z"
     user_metadata:
       picture: "https://api.dicebear.com/7.x/avataaars/svg?seed=phoenix"
       zoneinfo: "America/Los_Angeles"

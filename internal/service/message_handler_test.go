@@ -185,14 +185,19 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 				// Simulate successful update with modifications
 				updatedUser := *user
 				updatedUser.Token = "updated-" + user.Token
+				// Even if the resolved user carries a join date, UpdateUser's
+				// reply must never surface created_at - that field is only
+				// populated on the GetUserMetadata success path.
+				updatedUser.CreatedAt = converters.StringPtr("2024-03-15T10:00:00Z")
 				return &updatedUser, nil
 			},
 			expectError: false,
 			validateResult: func(t *testing.T, result []byte) {
 				var response struct {
-					Success bool        `json:"success"`
-					Data    interface{} `json:"data"`
-					Error   string      `json:"error"`
+					Success   bool        `json:"success"`
+					Data      interface{} `json:"data"`
+					Error     string      `json:"error"`
+					CreatedAt string      `json:"created_at,omitempty"`
 				}
 				if err := json.Unmarshal(result, &response); err != nil {
 					t.Fatalf("Failed to unmarshal result: %v", err)
@@ -209,6 +214,12 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 					if name, exists := metadata["name"]; exists && name != "John Doe" {
 						t.Errorf("Expected name 'John Doe', got %v", name)
 					}
+				}
+				if response.CreatedAt != "" {
+					t.Errorf("Expected created_at to be absent from UpdateUser reply, got %q", response.CreatedAt)
+				}
+				if !bytes.Contains(result, []byte(`"data"`)) || bytes.Contains(result, []byte(`"created_at"`)) {
+					t.Errorf("Expected no created_at key on the wire, got: %s", result)
 				}
 			},
 		},
@@ -1776,6 +1787,7 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 		mockSearchUser     func(ctx context.Context, user *model.User, criteria string) (*model.User, error)
 		expectedError      bool
 		expectedData       *model.UserMetadata
+		expectedCreatedAt  string
 		description        string
 	}{
 		{
@@ -1804,6 +1816,7 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 						Name:     converters.StringPtr("John Doe"),
 						JobTitle: converters.StringPtr("Software Engineer"),
 					},
+					CreatedAt: converters.StringPtr("2024-03-15T10:00:00Z"),
 				}, nil
 			},
 			expectedError: false,
@@ -1811,7 +1824,8 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 				Name:     converters.StringPtr("John Doe"),
 				JobTitle: converters.StringPtr("Software Engineer"),
 			},
-			description: "Should use GetUser for canonical lookup and return user metadata",
+			expectedCreatedAt: "2024-03-15T10:00:00Z",
+			description:       "Should use GetUser for canonical lookup and return user metadata with created_at top-level",
 		},
 		{
 			name:  "search lookup success",
@@ -1917,6 +1931,32 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 			expectedData:  nil,
 			description:   "Should handle users with no metadata gracefully",
 		},
+		{
+			name:  "canonical lookup with nil created_at",
+			input: "auth0|123456789",
+			mockMetadataLookup: func(ctx context.Context, input string) (*model.User, error) {
+				return &model.User{
+					Sub:    "auth0|123456789",
+					UserID: "auth0|123456789",
+				}, nil
+			},
+			mockGetUser: func(ctx context.Context, user *model.User) (*model.User, error) {
+				return &model.User{
+					UserID:   "auth0|123456789",
+					Username: "john.doe",
+					UserMetadata: &model.UserMetadata{
+						Name: converters.StringPtr("John Doe"),
+					},
+					CreatedAt: nil,
+				}, nil
+			},
+			expectedError: false,
+			expectedData: &model.UserMetadata{
+				Name: converters.StringPtr("John Doe"),
+			},
+			expectedCreatedAt: "",
+			description:       "Should omit created_at from the reply when the source has no join date",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1989,6 +2029,11 @@ func TestMessageHandlerOrchestrator_GetUserMetadata(t *testing.T) {
 					if !compareUserMetadata(&actualMetadata, tt.expectedData) {
 						t.Errorf("Metadata mismatch:\nActual: %+v\nExpected: %+v", actualMetadata, *tt.expectedData)
 					}
+				}
+
+				// created_at is top-level on the envelope, a sibling of data
+				if userResponse.CreatedAt != tt.expectedCreatedAt {
+					t.Errorf("Expected created_at %q, got %q", tt.expectedCreatedAt, userResponse.CreatedAt)
 				}
 			}
 		})

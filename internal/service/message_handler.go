@@ -36,6 +36,10 @@ type UserDataResponse struct {
 	Message string `json:"message,omitempty"`
 	Data    any    `json:"data,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// CreatedAt is the derived, read-only account join date. It is populated
+	// only on the GetUserMetadata success reply; every other handler leaves
+	// it zero, and omitempty keeps those replies byte-identical to today.
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // messageHandlerOrchestrator orchestrates the message handling process
@@ -271,10 +275,16 @@ func (m *messageHandlerOrchestrator) GetUserMetadata(ctx context.Context, msg po
 		return m.errorResponse(errGetUser.Error()), nil
 	}
 
+	var createdAt string
+	if userRetrieved.CreatedAt != nil {
+		createdAt = *userRetrieved.CreatedAt
+	}
+
 	// Return success response with user metadata
 	response := UserDataResponse{
-		Success: true,
-		Data:    userRetrieved.UserMetadata,
+		Success:   true,
+		Data:      userRetrieved.UserMetadata,
+		CreatedAt: createdAt,
 	}
 
 	responseJSON, err := json.Marshal(response)
