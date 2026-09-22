@@ -242,6 +242,25 @@ func TestMessageHandlerOrchestrator_UpdateUser(t *testing.T) {
 			errorType:   "unexpected",
 		},
 		{
+			name: "client-supplied created_at is stripped before dispatch",
+			messageData: []byte(`{
+				"token": "test-token",
+				"username": "test-user",
+				"user_id": "user-123",
+				"primary_email": "test@example.com",
+				"created_at": "2099-01-01T00:00:00Z",
+				"user_metadata": {"name": "Test User"}
+			}`),
+			mockFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+				if user.CreatedAt != nil {
+					t.Errorf("Expected CreatedAt to be stripped before reaching the writer, got %q", *user.CreatedAt)
+				}
+				updatedUser := *user
+				return &updatedUser, nil
+			},
+			expectError: false,
+		},
+		{
 			name: "user service writer error",
 			messageData: func() []byte {
 				user := &model.User{

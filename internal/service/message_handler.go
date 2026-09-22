@@ -464,6 +464,12 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 		return responseJSON, nil
 	}
 
+	// CreatedAt is derived and read-only - it must never be settable through
+	// this generic update input. Clear whatever the caller supplied before
+	// this reaches a writer; some backends (e.g. mock, for a brand-new user)
+	// would otherwise store the object verbatim and let it stick.
+	user.CreatedAt = nil
+
 	// Sanitize user data first
 	user.UserSanitize()
 
