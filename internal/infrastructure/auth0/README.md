@@ -53,6 +53,30 @@ GET /api/v2/users?q=identities.user_id:{username} AND identities.connection:User
 - **Token Expiration**: JWT tokens are validated for expiration and freshness
 - **Auth0 Management API**: Uses Auth0's Management API for user data retrieval
 
+### Account Join Date (`created_at`)
+
+`GetUser` requests the full user record (no `fields=` filter), so Auth0
+already returns two top-level timestamps: `created_at` and, for accounts
+migrated from LDAP, `ldap_created_at`. The account's true join date is the
+**earlier** of the two - an LDAP-migrated account's real history predates the
+Auth0 record's own creation timestamp.
+
+This derivation lives in `Auth0User.ToUser()` (`models.go`), the single point
+where the raw Auth0 response is converted into the domain `model.User`, so
+every read path (JWT, canonical, and search lookups) picks it up uniformly.
+Each source timestamp is parsed as RFC3339 and skipped if empty or
+unparseable; the result is set on `model.User.CreatedAt` as a UTC RFC3339
+string, or left `nil` if neither value parses - it is never backfilled with
+`time.Now()` or any other fabricated value.
+
+`CreatedAt` is intentionally **not** a field on `model.UserMetadata`: that
+struct is PATCHed straight back to Auth0 on every profile update and is the
+payload of the `lfx.user_profile.updated` event, so a derived, read-only
+value placed there would risk being written back to Auth0 or leaking into
+that event. It is surfaced only as a top-level, read-only field on the
+`lfx.auth-service.user_metadata.read` NATS reply - see
+`docs/subjects/user_metadata.md`.
+
 ## Email Verification for Alternate Email Linking
 
 The Auth0 integration uses Auth0's Passwordless Authentication API to verify ownership of alternate email addresses through an OTP (One-Time Password) flow.
