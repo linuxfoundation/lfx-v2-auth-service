@@ -8,6 +8,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
+    tags.datadoghq.com/service: {{ .Chart.Name }}
   {{- with .Values.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -40,8 +41,9 @@ spec:
           annotations:
             {{- toYaml $annotations | nindent 12 }}
           labels:
-            app: {{ .Chart.Name }}-merge-repair
+            app: {{ .Chart.Name }}
             app.kubernetes.io/name: {{ .Chart.Name }}
+            tags.datadoghq.com/service: {{ .Chart.Name }}
             {{- with .Values.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
