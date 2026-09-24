@@ -41,7 +41,7 @@ spec:
           annotations:
             {{- toYaml $annotations | nindent 12 }}
           labels:
-            app: {{ .Chart.Name }}
+            app: {{ .Chart.Name }}-merge-repair
             app.kubernetes.io/name: {{ .Chart.Name }}
             tags.datadoghq.com/service: {{ .Chart.Name }}
             {{- with .Values.podLabels }}
