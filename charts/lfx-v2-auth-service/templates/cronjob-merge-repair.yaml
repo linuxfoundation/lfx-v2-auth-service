@@ -1,0 +1,119 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.mergeRepair.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Chart.Name }}-merge-repair
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Off-peak start; the walk itself overlaps the consumer most of the day by
+  # construction, so separation is by rate cap, not timing.
+  schedule: {{ .Values.mergeRepair.schedule | quote }}
+  # Pinned: without this the schedule runs in the kube-controller-manager's
+  # local time, and a non-UTC control plane would miss the off-peak window.
+  timeZone: {{ .Values.mergeRepair.timeZone | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # A repeat walk is correct (repaired holders are no-ops next run), only
+      # slow; so a failed run never retries in place and the next schedule
+      # covers it. Must stay under 24h so runs cannot pile up.
+      activeDeadlineSeconds: {{ .Values.mergeRepair.activeDeadlineSeconds }}
+      backoffLimit: 0
+      template:
+        metadata:
+          # The walk runs ~20h+; Karpenter consolidation evicted the first
+          # full run at 15h (2026-09-10). Job-specific on purpose: the
+          # Deployment must stay consolidatable, so this never goes in the
+          # shared podAnnotations. merge keeps the first argument on key
+          # clash, so a podAnnotations entry for the same key cannot
+          # override or duplicate it.
+          {{- $jobAnnotations := dict "karpenter.sh/do-not-disrupt" "true" }}
+          {{- $annotations := merge $jobAnnotations (default (dict) .Values.podAnnotations) }}
+          annotations:
+            {{- toYaml $annotations | nindent 12 }}
+          labels:
+            app: {{ .Chart.Name }}-merge-repair
+            app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          # On a deadline kill or eviction the binary writes its truncated
+          # tally and then holds --exit-hold so the log shipper drains it; the
+          # grace period must outlast that hold or SIGKILL lands first and the
+          # tally dies with the pod. Derived from the same value as the flag
+          # below so the two cannot drift. Normal completion never receives
+          # SIGTERM, so this only matters on the truncated paths.
+          terminationGracePeriodSeconds: {{ add (int .Values.mergeRepair.exitHoldSeconds) 30 }}
+          # The job talks to Auth0 and CDP only; it never uses a Kubernetes
+          # token and gets none of the provisioning Lease RBAC.
+          automountServiceAccountToken: false
+          containers:
+            # Named app like the Deployment: prod podAnnotations scope log
+            # collection to a container named app, and the tally on stdout
+            # (identifiers redacted) is the job's contract artifact when --out
+            # is unset. A counters-only summary also goes to the termination
+            # message below — it lives in the pod object, so it survives the
+            # container-log GC that lost three nightly stdout tallies.
+            - name: app
+              # mergeRepair.image.tag wins; otherwise the job tracks the
+              # deployment image tag (mutable "development" in dev, pinned
+              # release tags in staging/prod), then the chart AppVersion.
+              image: "{{ .Values.mergeRepair.image.repository }}:{{ .Values.mergeRepair.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+              # Explicit rather than the kubelet default so the binary's
+              # --termination-log default and this path cannot drift apart.
+              terminationMessagePath: /dev/termination-log
+              terminationMessagePolicy: File
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - --dry-run={{ .Values.mergeRepair.dryRun }}
+                {{- if not .Values.mergeRepair.dryRun }}
+                - --live
+                {{- end }}
+                - --rate={{ .Values.mergeRepair.rate }}
+                - --limit={{ .Values.mergeRepair.limit }}
+                - --direction={{ .Values.mergeRepair.direction | default "auto" }}
+                - --exit-hold={{ .Values.mergeRepair.exitHoldSeconds }}s
+                {{- if .Values.mergeRepair.noPrefilter }}
+                - --no-prefilter
+                {{- end }}
+              # Only what buildRepairDeps and the M2M token manager read; the
+              # rest of the service environment (profile client secret, NATS,
+              # SMTP, ...) is not this job's to hold.
+              {{- $allowed := list "AUTH0_TENANT" "AUTH0_DOMAIN" "AUTH0_AUDIENCE" "AUTH0_ORGANIZATION" "AUTH0_M2M_CLIENT_ID" "AUTH0_M2M_PRIVATE_BASE64_KEY" "CDP_BASE_URL" "CDP_AUDIENCE" }}
+              env:
+              {{- range $name, $config := .Values.app.environment }}
+              {{- if has $name $allowed }}
+              - name: {{ $name }}
+                {{- if $config.value }}
+                value: {{ $config.value | quote }}
+                {{- else if $config.valueFrom }}
+                valueFrom:
+                  {{- toYaml $config.valueFrom | nindent 18 }}
+                {{- end }}
+              {{- end }}
+              {{- end }}
+              {{- with .Values.mergeRepair.extraEnv }}
+              {{- toYaml . | nindent 14 }}
+              {{- end }}
+              {{- $res := .Values.mergeRepair.resources | default .Values.resources }}
+              {{- if $res }}
+              resources:
+                {{- toYaml $res | nindent 16 }}
+              {{- end }}
+{{- end }}

@@ -1,0 +1,342 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+# replicaCount is the number of replicas for the deployment
+replicaCount: 3
+
+# annotations are additional annotations applied to the Deployment itself.
+# Example:
+#   reloader.stakater.com/auto: "true"
+annotations: {}
+
+# podAnnotations are additional annotations applied to the pod template.
+# Example:
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port: "8080"
+podAnnotations: {}
+
+# podLabels are additional labels applied to the pod template.
+# Example:
+#   team: platform
+#   environment: production
+podLabels: {}
+
+# podDisruptionBudget configures a PodDisruptionBudget for the deployment.
+# Only one of minAvailable or maxUnavailable may be set (not both).
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  # maxUnavailable: 1
+
+# topologySpreadConstraints controls how pods are spread across nodes/zones.
+# Empty by default (no constraints). Example:
+#   - maxSkew: 1
+#     topologyKey: kubernetes.io/hostname
+#     whenUnsatisfiable: DoNotSchedule
+#     labelSelector:
+#       matchLabels:
+#         app: lfx-v2-auth-service
+topologySpreadConstraints: []
+
+image:
+  repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/server
+  # tag is the container image tag (overrides appVersion from Chart.yaml)
+  tag: ""
+  # pullPolicy is the image pull policy
+  pullPolicy: IfNotPresent
+
+# service is the configuration for the Kubernetes service
+service:
+  # port is the service port
+  port: 8080
+
+# provisioningConsumer reads the Auth0 events stream and provisions CDP members
+# for newly verified users. Opt-in, and it adds no inbound surface: the service
+# opens the connection to Auth0.
+#
+# The stream fans out rather than load balancing, so only the replica holding
+# the Lease reads it. The others stand by, and the RBAC below is what lets them
+# compete for it.
+provisioningConsumer:
+  enabled: false
+
+# mergeRepair runs the scheduled CDP UUID merge-repair job
+# (linuxfoundation/segment-web-scripts#43). Opt-in like provisioningConsumer: nothing is
+# scheduled unless enabled, and dryRun defaults to true so enabling the
+# schedule can never switch an environment to live writes.
+#
+# "Disjoint from the consumer" is rate-level, not time-level: a full walk
+# takes ~21h at the default cap, so the job overlaps the consumer most of
+# the day by construction. Separation is the uniform cap plus the off-peak
+# start, on the shared per-client CDP budget.
+mergeRepair:
+  enabled: false
+  # schedule is the off-peak start (UTC). The walk itself runs most of the day.
+  schedule: "30 2 * * *"
+  # timeZone pins the schedule above; the off-peak window is defined in UTC.
+  timeZone: "UTC"
+  dryRun: true
+  # rate is the CDP calls-per-minute ceiling; every resolve and identity
+  # read takes one slot.
+  rate: 50
+  # limit examines at most N holders (0 = all; canary path).
+  limit: 0
+  # noPrefilter resolves every holder instead of checking the stored member
+  # first (audit mode).
+  noPrefilter: false
+  # direction is the walk order: asc (oldest updated_at first), desc (newest
+  # first) or auto, which alternates daily so a deadline-truncated tail is
+  # never the same holders two nights running.
+  direction: auto
+  # activeDeadlineSeconds must stay under 24h so runs cannot pile up; a repeat
+  # walk is correct, only slow, so expiry simply yields to the next schedule.
+  activeDeadlineSeconds: 82800
+  # exitHoldSeconds is how long the binary lingers after writing its tally so
+  # the node's log shipper drains it (three nightly tallies were lost at pod
+  # exit without it). The pod's terminationGracePeriodSeconds is derived from
+  # this value (+30s) so SIGKILL can never land inside the hold.
+  exitHoldSeconds: 60
+  image:
+    # repository is the merge-repair image published beside the server image
+    # (same ko release, package-derived suffix).
+    repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/cdp-merge-repair
+    # tag pins the job image. Unset means the deployment image.tag, which
+    # itself falls back to appVersion from Chart.yaml.
+    tag: ""
+  # resources overrides the shared deployment resources for the job; unset
+  # means the shared block below.
+  resources: {}
+  # extraEnv adds environment to the job container only. The job receives an
+  # allowlist of app.environment (Auth0 M2M + CDP keys), never the whole
+  # service environment; anything else it needs goes here.
+  extraEnv: []
+
+# resources is the configuration for resource requests and limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nats:
+  # url is the URL of the NATS server
+  url: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+
+  ## ** IMPORTANT **
+  ## This should used for local development - it's disabled by default.
+  ## If you set the REPO_TYPE to authelia, it should be enabled -> creation: true
+  ##
+  # authelia_users_kv_bucket is the configuration for the KV bucket for storing authelia_users
+  authelia_users_kv_bucket:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing projects
+    name: authelia-users
+    # history is the number of history entries to keep for the KV bucket
+    history: 5
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 1048576  # 1MB (sufficient for user data)
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 10485760  # 10MB (sufficient for local dev testing)
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+
+  authelia_email_otp_kv_bucket:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing email OTP codes
+    name: authelia-email-otp
+    # history is the number of history entries to keep for the KV bucket
+    history: 1
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 1024  # 1KB (sufficient for OTP data)
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 524288  # 512KB (smaller for local dev)
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+    # ttl is the time-to-live for entries in the bucket (5 minutes for OTPs)
+    ttl: 5m
+
+  # provisioning_cursor_kv_bucket holds the Auth0 events stream position.
+  # Created only when provisioningConsumer.enabled is true.
+  provisioning_cursor_kv_bucket:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing the stream position.
+    # Rendered into PROVISIONING_CURSOR_BUCKET, so the bucket created here and
+    # the one the consumer opens cannot drift apart.
+    name: cdp-provisioning-cursor
+    # history is the number of history entries to keep for the KV bucket
+    history: 1
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 4096  # 4KB (one opaque offset string)
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 1048576  # 1MB (a single key, with room for history)
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: false
+
+# serviceAccount is the configuration for the Kubernetes service account
+## This will be used only if the USER_REPOSITORY_TYPE is authelia
+serviceAccount:
+  # create specifies whether a service account should be created
+  create: true
+  # name is the name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+  # annotations to add to the service account
+  annotations: {}
+  # automountServiceAccountToken is a boolean to determine if the service account token should be automatically mounted
+  automountServiceAccountToken: true
+
+
+# app is the configuration for the application
+app:
+  # use_oidc_contextualizer is a boolean to determine if the OIDC contextualizer should be used
+  use_oidc_contextualizer: true
+  # environment is the configuration for the application environment
+  environment:
+    # NATS Configuration
+    NATS_URL:
+      value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+    # Repository type for user management
+    # It can be authelia, auth0 or mock
+    # If not set, it will default to mock
+    USER_REPOSITORY_TYPE:
+      value: mock
+
+    # Auth0 Management API configuration
+    ## Optional when using mock or authelia repository type
+    AUTH0_TENANT:
+      value: null
+    AUTH0_DOMAIN:
+      value: null
+    # Auth0 M2M Authentication configuration
+    ## Required when using auth0 repository type
+    AUTH0_M2M_CLIENT_ID:
+      value: null
+    AUTH0_M2M_PRIVATE_BASE64_KEY:
+      value: null
+    AUTH0_AUDIENCE:
+      value: null
+    AUTH0_MANAGEMENT_AUDIENCE:
+      value: null
+    # Additional audience accepted for read-only JWT verification (user-facing
+    # LFX v2 API access tokens). Optional; leave unset to accept only the
+    # Management API audience.
+    AUTH0_LFX_V2_API_AUDIENCE:
+      value: null
+    # Auth0 LFX Profile Client configuration (Regular Web Application for passwordless flows)
+    ## Required when using passwordless email linking flow
+    AUTH0_LFX_PROFILE_CLIENT_ID:
+      value: null
+    AUTH0_LFX_PROFILE_CLIENT_SECRET:
+      value: null
+    # Auth0 LFX One Client configuration (user-facing SSR app)
+    ## Required for sending password reset links
+    AUTH0_LFX_ONE_CLIENT_ID:
+      value: null
+
+    # CDP provisioning configuration
+    ## Required when provisioningConsumer.enabled is true. Without both of
+    ## these the consumer does not start, rather than reading a stream it
+    ## cannot act on.
+    CDP_BASE_URL:
+      value: null
+    CDP_AUDIENCE:
+      value: null
+    # How far back the consumer restarts when it has no usable position: a
+    # cold start, or a position Auth0 has aged out. Auth0 does not publish its
+    # retention, so this is generous on purpose — re-reading is cheap because
+    # the gate skips anyone already provisioned. Defaults to 24h when unset.
+    PROVISIONING_REPLAY_WINDOW:
+      value: null
+    # Overrides the host the events stream is read from. Unset means
+    # AUTH0_DOMAIN, which in production is the tenant's custom domain.
+    AUTH0_EVENTS_HOST:
+      value: null
+    # The Lease identity has to be unique per pod, and the Lease itself is
+    # namespaced.
+    POD_NAME:
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    POD_NAMESPACE:
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+
+    # Authelia configuration
+    ## Required when using authelia repository type
+    AUTHELIA_CONFIGMAP_NAME:
+      value: authelia-users
+    AUTHELIA_CONFIGMAP_NAMESPACE:
+      value: lfx
+    AUTHELIA_DAEMONSET_NAME:
+      value: lfx-platform-authelia
+    AUTHELIA_SECRET_NAME:
+      value: authelia-users
+    AUTHELIA_OIDC_USERINFO_URL:
+      value: https://auth.k8s.orb.local/api/oidc/userinfo
+  # extraEnv allows injecting additional environment variables before
+  # other configurations
+  extraEnv: []
+  # otel is the configuration for OpenTelemetry tracing
+  otel:
+    # serviceName is the service name for OpenTelemetry resource identification
+    # (default: "lfx-v2-auth-service")
+    serviceName: ""
+    # serviceVersion is the service version for OpenTelemetry resource
+    # identification
+    # (default: build-time version from ldflags)
+    serviceVersion: ""
+    # protocol specifies the OTLP protocol: "grpc" or "http"
+    # (default: "grpc")
+    protocol: "grpc"
+    # endpoint is the OTLP collector endpoint
+    # For gRPC: typically "host:4317", for HTTP: typically "host:4318"
+    endpoint: ""
+    # insecure disables TLS for the OTLP connection
+    # Set to "true" for in-cluster communication without TLS
+    insecure: "false"
+    # tracesExporter specifies the traces exporter: "otlp" or "none"
+    # (default: "none")
+    tracesExporter: "none"
+    # tracesSampler specifies the OTEL_TRACES_SAMPLER type. Supported values:
+    # "always_on", "always_off", "traceidratio", "parentbased_always_on",
+    # "parentbased_always_off", "parentbased_traceidratio".
+    # When empty, the application defaults to parentbased_traceidratio.
+    tracesSampler: ""
+    # tracesSamplerArg specifies the OTEL_TRACES_SAMPLER_ARG (sampler ratio or parent_sampler_arg).
+    # Used by "traceidratio" and "parentbased_traceidratio" samplers (defaults to 1.0 if empty).
+    # (default: "")
+    tracesSamplerArg: ""
+    # metricsExporter specifies the metrics exporter: "otlp" or "none"
+    # (default: "none")
+    metricsExporter: "none"
+    # logsExporter specifies the logs exporter: "otlp" or "none"
+    # (default: "none")
+    logsExporter: "none"
+    # propagators specifies the propagators to use, comma-separated
+    # Supported values: "tracecontext", "baggage", "jaeger"
+    # (default: "tracecontext,baggage")
+    propagators: "tracecontext,baggage,jaeger"

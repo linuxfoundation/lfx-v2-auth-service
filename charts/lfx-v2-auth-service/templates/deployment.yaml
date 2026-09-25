@@ -1,0 +1,149 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app: {{ .Chart.Name }}
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if or (eq .Values.app.environment.USER_REPOSITORY_TYPE.value "authelia") .Values.provisioningConsumer.enabled }}
+      serviceAccountName: {{ .Chart.Name }}
+      {{- end }}
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+          {{- range $name, $config := .Values.app.environment }}
+          - name: {{ $name }}
+            {{- if $config.value }}
+            value: {{ $config.value | quote }}
+            {{- else if $config.valueFrom }}
+            valueFrom:
+              {{- toYaml $config.valueFrom | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.app.extraEnv }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+          # Derived rather than configured, so the reader can never be on while
+          # the Lease permissions it needs are off. Emitted after extraEnv
+          # because a duplicate name later in the list is the one the container
+          # gets, which would otherwise let extraEnv switch the consumer on
+          # with none of the RBAC, ServiceAccount or bucket it depends on.
+          - name: PROVISIONING_CONSUMER_ENABLED
+            value: {{ .Values.provisioningConsumer.enabled | quote }}
+          {{- if .Values.provisioningConsumer.enabled }}
+          - name: PROVISIONING_CURSOR_BUCKET
+            value: {{ .Values.nats.provisioning_cursor_kv_bucket.name | quote }}
+          {{- end }}
+          {{- $otelServiceName := .Values.app.otel.serviceName | toString | trim }}
+          {{- if ne $otelServiceName "" }}
+          - name: OTEL_SERVICE_NAME
+            value: {{ $otelServiceName | quote }}
+          {{- end }}
+          {{- $otelServiceVersion := .Values.app.otel.serviceVersion | toString | trim }}
+          {{- if ne $otelServiceVersion "" }}
+          - name: OTEL_SERVICE_VERSION
+            value: {{ $otelServiceVersion | quote }}
+          {{- end }}
+          {{- $otelEndpoint := .Values.app.otel.endpoint | toString | trim }}
+          {{- if ne $otelEndpoint "" }}
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: {{ $otelEndpoint | quote }}
+          {{- end }}
+          {{- $otelProtocol := .Values.app.otel.protocol | toString | trim }}
+          {{- if ne $otelProtocol "" }}
+          - name: OTEL_EXPORTER_OTLP_PROTOCOL
+            value: {{ $otelProtocol | quote }}
+          {{- end }}
+          {{- $otelInsecure := .Values.app.otel.insecure | toString | trim }}
+          {{- if ne $otelInsecure "" }}
+          - name: OTEL_EXPORTER_OTLP_INSECURE
+            value: {{ $otelInsecure | quote }}
+          {{- end }}
+          {{- $otelTracesExporter := .Values.app.otel.tracesExporter | toString | trim }}
+          {{- if ne $otelTracesExporter "" }}
+          - name: OTEL_TRACES_EXPORTER
+            value: {{ $otelTracesExporter | quote }}
+          {{- end }}
+          {{- $otelTracesSampler := .Values.app.otel.tracesSampler | toString | trim }}
+          {{- if ne $otelTracesSampler "" }}
+          - name: OTEL_TRACES_SAMPLER
+            value: {{ $otelTracesSampler | quote }}
+          {{- end }}
+          {{- $otelTracesSamplerArg := .Values.app.otel.tracesSamplerArg | toString | trim }}
+          {{- if ne $otelTracesSamplerArg "" }}
+          - name: OTEL_TRACES_SAMPLER_ARG
+            value: {{ $otelTracesSamplerArg | quote }}
+          {{- end }}
+          {{- $otelMetricsExporter := .Values.app.otel.metricsExporter | toString | trim }}
+          {{- if ne $otelMetricsExporter "" }}
+          - name: OTEL_METRICS_EXPORTER
+            value: {{ $otelMetricsExporter | quote }}
+          {{- end }}
+          {{- $otelLogsExporter := .Values.app.otel.logsExporter | toString | trim }}
+          {{- if ne $otelLogsExporter "" }}
+          - name: OTEL_LOGS_EXPORTER
+            value: {{ $otelLogsExporter | quote }}
+          {{- end }}
+          {{- $otelPropagators := .Values.app.otel.propagators | toString | trim }}
+          {{- if ne $otelPropagators "" }}
+          - name: OTEL_PROPAGATORS
+            value: {{ $otelPropagators | quote }}
+          {{- end }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: web
+          {{- if .Values.resources }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: web
+            failureThreshold: 3
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: web
+            failureThreshold: 1
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: web
+            failureThreshold: 30
+            periodSeconds: 1
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

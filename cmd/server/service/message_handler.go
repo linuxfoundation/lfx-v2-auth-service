@@ -1,0 +1,98 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"time"
+
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/log"
+)
+
+// MessageHandlerService handles NATS messages using the service layer
+type MessageHandlerService struct {
+	messageHandler port.MessageHandler
+}
+
+// HandleMessage routes NATS messages to appropriate handlers
+func (mhs *MessageHandlerService) HandleMessage(ctx context.Context, msg port.TransportMessenger) {
+	start := time.Now()
+	subject := msg.Subject()
+	ctx = log.AppendCtx(ctx, slog.String("subject", subject))
+
+	slog.DebugContext(ctx, "handling NATS message")
+
+	handlers := map[string]func(ctx context.Context, msg port.TransportMessenger) ([]byte, error){
+		// user read/write operations
+		constants.UserMetadataUpdateSubject:  mhs.messageHandler.UpdateUser,
+		constants.UserMetadataReadSubject:    mhs.messageHandler.GetUserMetadata,
+		constants.UserEmailReadSubject:       mhs.messageHandler.GetUserEmails,
+		constants.UserEmailSetPrimarySubject: mhs.messageHandler.SetPrimaryEmail,
+		// lookup operations
+		constants.UserEmailToUserSubject:   mhs.messageHandler.EmailToUsername,
+		constants.UserEmailToSubSubject:    mhs.messageHandler.EmailToSub,
+		constants.UserUsernameToSubSubject: mhs.messageHandler.UsernameToSub,
+		// email linking operations
+		constants.EmailLinkingSendVerificationSubject: mhs.messageHandler.StartEmailLinking,
+		constants.EmailLinkingVerifySubject:           mhs.messageHandler.VerifyEmailLinking,
+		// identity linking/unlinking/listing operations
+		constants.UserIdentityLinkSubject:   mhs.messageHandler.LinkIdentity,
+		constants.UserIdentityUnlinkSubject: mhs.messageHandler.UnlinkIdentity,
+		constants.UserIdentityListSubject:   mhs.messageHandler.ListIdentities,
+		// alias management
+		constants.UserAddAliasSubject: mhs.messageHandler.AddAlias,
+		// password management operations
+		constants.PasswordUpdateSubject:    mhs.messageHandler.ChangePassword,
+		constants.PasswordResetLinkSubject: mhs.messageHandler.SendResetPasswordLink,
+		// impersonation
+		constants.ImpersonationTokenExchangeSubject: mhs.messageHandler.ImpersonateUser,
+	}
+
+	handler, ok := handlers[subject]
+	if !ok {
+		slog.WarnContext(ctx, "unknown subject")
+		mhs.respondWithError(ctx, msg, "unknown subject")
+		return
+	}
+
+	response, errHandler := handler(ctx, msg)
+	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if errHandler != nil {
+		// Classify once here: the domain already logged this outcome at its proper
+		// level, so an unconditional error record would re-promote expected traffic.
+		slog.Log(ctx, log.LevelForError(errHandler), "message handling failed",
+			"error", errHandler,
+			"duration_ms", durationMs,
+		)
+		mhs.respondWithError(ctx, msg, errHandler.Error())
+		return
+	}
+
+	errRespond := msg.Respond(response)
+	durationMs = float64(time.Since(start).Microseconds()) / 1000.0
+	if errRespond != nil {
+		slog.ErrorContext(ctx, "error responding to NATS message", "error", errRespond, "duration_ms", durationMs)
+		return
+	}
+
+	slog.DebugContext(ctx, "responded to NATS message", "bytes", len(response), "duration_ms", durationMs)
+}
+
+func (mhs *MessageHandlerService) respondWithError(ctx context.Context, msg port.TransportMessenger, errorMsg string) {
+	payload, _ := json.Marshal(map[string]string{"error": errorMsg})
+	if err := msg.Respond(payload); err != nil {
+		slog.ErrorContext(ctx, "failed to send error response", "error", err)
+	}
+}
+
+// NewMessageHandlerService creates a new message handler service
+func NewMessageHandlerService(messageHandler port.MessageHandler) *MessageHandlerService {
+	return &MessageHandlerService{
+		messageHandler: messageHandler,
+	}
+}

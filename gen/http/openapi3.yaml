@@ -1,0 +1,13 @@
+openapi: 3.0.3
+info:
+    title: LFX v2 Auth Service
+    description: Authentication service providing NATS-based user management with health endpoints
+    version: "1.0"
+servers:
+    - url: http://localhost:80
+      description: Default server for auth
+paths: {}
+components: {}
+tags:
+    - name: auth-service
+      description: Auth service
