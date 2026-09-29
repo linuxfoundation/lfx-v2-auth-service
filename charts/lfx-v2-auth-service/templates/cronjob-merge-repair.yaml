@@ -7,7 +7,8 @@ metadata:
   name: {{ .Chart.Name }}-merge-repair
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    tags.datadoghq.com/service: {{ .Chart.Name }}
   {{- with .Values.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -39,9 +40,13 @@ spec:
           {{- $annotations := merge $jobAnnotations (default (dict) .Values.podAnnotations) }}
           annotations:
             {{- toYaml $annotations | nindent 12 }}
+          # `app` stays as the job name, because it is being used as an actual
+          # selector by the Service and PodDisruptionBudget.
+          # `app.kubernetes.io/name` is purely descriptive metadata
           labels:
             app: {{ .Chart.Name }}-merge-repair
-            app.kubernetes.io/name: {{ .Chart.Name }}-merge-repair
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            tags.datadoghq.com/service: {{ .Chart.Name }}
             {{- with .Values.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
