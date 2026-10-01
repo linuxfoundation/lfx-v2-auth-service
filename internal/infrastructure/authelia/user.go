@@ -161,7 +161,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	user := &model.User{}
 
 	// First, try to parse as Authelia token (starts with 'authelia')
-	if strings.HasPrefix(input, "authelia") {
+	if isAutheliaToken(input) {
 		// Handle Authelia token
 		userInfo, err := u.fetchOIDCUserInfo(ctx, input)
 		if err != nil {
@@ -370,23 +370,42 @@ func (a *userReaderWriter) LinkIdentity(ctx context.Context, request *model.Link
 		return errs.NewValidation("identity token is required")
 	}
 
+	if !isAutheliaToken(request.User.AuthToken) {
+		return errs.NewValidation("an Authelia auth token is required")
+	}
+
+	// The identity token submitted with link_with.identity_token is the
+	// short-lived ID token this service mints in VerifyAlternateEmail, signed
+	// with the service's own RSA key. We must verify the signature; otherwise
+	// any caller holding a valid auth_token can forge an unsigned (alg=none)
+	// JWT with arbitrary sub/email and link any identity to their account.
+	publicKey, err := jwt.GetDefaultTestPublicKey()
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to load identity-token verification key", "error", err)
+		return errs.NewUnexpected("failed to load identity-token verification key", err)
+	}
 	opts := &jwt.ParseOptions{
-		RequireExpiration: false,
+		VerifySignature:   true,
+		SigningKey:        publicKey,
+		RequireExpiration: true,
 		AllowBearerPrefix: true,
 		RequireSubject:    true,
 	}
-	claims, err := jwt.ParseUnverified(ctx, request.LinkWith.IdentityToken, opts)
+	claims, err := jwt.ParseVerified(ctx, request.LinkWith.IdentityToken, opts)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to parse identity token", "error", err)
+		slog.ErrorContext(ctx, "failed to verify identity token", "error", err)
 		return errs.NewValidation("invalid identity token")
 	}
 
-	sub := claims.Subject
-
-	if strings.HasPrefix(sub, "email|") {
-		return a.linkEmailIdentity(ctx, request, claims.Email)
+	// This service only mints email identity tokens ("email|<address>"), and the
+	// same key also signs access tokens, so anything else is rejected.
+	address, isEmailIdentity := strings.CutPrefix(claims.Subject, "email|")
+	if !isEmailIdentity || claims.Email == "" || !strings.EqualFold(address, claims.Email) {
+		slog.WarnContext(ctx, "identity token is not an email identity token")
+		return errs.NewValidation("invalid identity token")
 	}
-	return a.linkSocialIdentity(ctx, request, sub, claims.Email)
+
+	return a.linkEmailIdentity(ctx, request, claims.Email)
 }
 
 func (a *userReaderWriter) linkEmailIdentity(ctx context.Context, request *model.LinkIdentity, email string) error {
@@ -442,58 +461,6 @@ func (a *userReaderWriter) linkEmailIdentity(ctx context.Context, request *model
 	return nil
 }
 
-func (a *userReaderWriter) linkSocialIdentity(ctx context.Context, request *model.LinkIdentity, sub, email string) error {
-	parts := strings.SplitN(sub, "|", 2)
-	if len(parts) != 2 {
-		return errs.NewValidation("invalid social identity sub format")
-	}
-	provider, identityID := parts[0], parts[1]
-
-	user := &model.User{Sub: request.User.UserID}
-	key := a.storage.BuildLookupKey(ctx, "sub", user.BuildSubIndexKey(ctx))
-
-	existingUser, revision, err := a.storage.GetUserWithRevision(ctx, key)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to get user for linking social identity",
-			"user_id", redaction.Redact(request.User.UserID),
-			"error", err,
-		)
-		return err
-	}
-
-	for _, id := range existingUser.Identities {
-		if id.Provider == provider && id.IdentityID == identityID {
-			slog.InfoContext(ctx, "social identity already linked",
-				"user_id", redaction.Redact(request.User.UserID),
-				"provider", provider,
-			)
-			return nil
-		}
-	}
-
-	existingUser.Identities = append(existingUser.Identities, model.Identity{
-		Provider:   provider,
-		IdentityID: identityID,
-		Email:      email,
-		IsSocial:   true,
-	})
-
-	err = a.storage.UpdateUserWithRevision(ctx, existingUser, revision)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to update user with social identity",
-			"user_id", redaction.Redact(request.User.UserID),
-			"error", err,
-		)
-		return err
-	}
-
-	slog.InfoContext(ctx, "successfully linked social identity",
-		"user_id", redaction.Redact(request.User.UserID),
-		"provider", provider,
-	)
-	return nil
-}
-
 // UnlinkIdentity unlinks an identity from an Authelia-backed primary user.
 func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.UnlinkIdentity) error {
 	if request == nil {
@@ -504,6 +471,9 @@ func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	}
 	if request.Unlink.Provider == "" || request.Unlink.IdentityID == "" {
 		return errs.NewValidation("provider and identity_id are required")
+	}
+	if !isAutheliaToken(request.User.AuthToken) {
+		return errs.NewValidation("an Authelia auth token is required")
 	}
 
 	user := &model.User{Sub: request.User.UserID}
@@ -544,6 +514,13 @@ func (a *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 		"provider", request.Unlink.Provider,
 	)
 	return nil
+}
+
+// isAutheliaToken reports whether the input is an Authelia opaque token. Only
+// these are authenticated against the OIDC userinfo endpoint in MetadataLookup;
+// a UUID or username input is resolved to a user without any authentication.
+func isAutheliaToken(input string) bool {
+	return strings.HasPrefix(input, "authelia")
 }
 
 // ChangePassword is not supported for Authelia users.
