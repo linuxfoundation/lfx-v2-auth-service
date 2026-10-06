@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -283,6 +284,77 @@ type repairOptions struct {
 	// now supplies the clock for direction=auto only; nil means time.Now.
 	// Run timing (StartedAt/FinishedAt/DurationSeconds) always uses the real clock.
 	now func() time.Time
+	// terminationPath receives the counters-only summary; empty disables it.
+	terminationPath string
+	// exitHold is how long to linger after the tally is written; zero exits at once.
+	exitHold time.Duration
+	// signals is the process-wide termination-signal registration the hold
+	// consults; nil (tests) means the hold only ever times out.
+	signals *termSignals
+}
+
+// defaultTerminationPath is the kubelet's default terminationMessagePath: a
+// bind mount, so it is writable under readOnlyRootFilesystem, and its
+// contents surface in pod.status.containerStatuses[].state.terminated.message.
+const defaultTerminationPath = "/dev/termination-log"
+
+// defaultExitHold gives the node's log shipper time to drain the last stdout
+// write before the container is finalized and its log file reaped. The chart
+// passes --exit-hold explicitly from mergeRepair.exitHoldSeconds and derives
+// terminationGracePeriodSeconds from the same value, so the two cannot drift.
+const defaultExitHold = 60 * time.Second
+
+// unsetExitHold is the --exit-hold flag's "not given" sentinel; the effective
+// default then follows the tally sink (see realMain).
+const unsetExitHold = -1
+
+// terminationSummary is the tally minus its per-row lists: the kubelet caps
+// the termination message at 4096 bytes, and the counters are what a
+// truncated-night readout needs.
+type terminationSummary struct {
+	Run                   any               `json:"run"`
+	Counters              mergerepair.Tally `json:"counters"`
+	Totals                any               `json:"totals"`
+	Unchecked             int               `json:"unchecked"`
+	DurationSeconds       float64           `json:"duration_seconds"`
+	RepairsTruncated      bool              `json:"repairs_truncated"`
+	ErrorSamplesTruncated bool              `json:"error_samples_truncated"`
+	EnumerationWarnings   int               `json:"enumeration_warnings"`
+	ErrorSamples          int               `json:"error_samples"`
+}
+
+// writeTerminationSummary writes the counters-only summary as one JSON line.
+// Best effort by design: the stdout tally is the contract artifact; this is
+// the copy that outlives the log pipeline. No identifiers are included, so
+// no redaction question arises. The kubelet pre-creates the termination file
+// in every container, so "path exists" is the in-pod signal: a dev machine
+// (no such file) stays silent instead of warning on every local run.
+func writeTerminationSummary(out tallyReport, path string) {
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	summary := terminationSummary{
+		Run:                   out.Run,
+		Counters:              out.Counters,
+		Totals:                out.Totals,
+		Unchecked:             out.Unchecked,
+		DurationSeconds:       out.DurationSeconds,
+		RepairsTruncated:      out.RepairsTruncated,
+		ErrorSamplesTruncated: out.ErrorSamplesTruncated,
+		EnumerationWarnings:   len(out.EnumerationWarnings),
+		ErrorSamples:          len(out.ErrorSamples),
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		slog.Warn("merge-repair termination summary not encoded", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		slog.Warn("merge-repair termination summary not written", "path", path, "error", err)
+	}
 }
 
 // Walk directions. The walker enumerates the whole population ascending by
@@ -378,8 +450,15 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		out.Run.WalkComplete = false
 		out.DurationSeconds = time.Since(started).Seconds()
 		out.EnumerationWarnings = append(out.EnumerationWarnings, checkError{Message: errMessage(err)})
-		if werr := writeTally(out, opts.outPath, deps.stdout); werr != nil {
+		// Both nets, unconditionally: the termination summary must not depend
+		// on the stdout/--out sink succeeding, or a closed sink loses both.
+		werr := writeTally(out, opts.outPath, deps.stdout)
+		writeTerminationSummary(out, opts.terminationPath)
+		if werr != nil {
 			slog.WarnContext(ctx, "merge-repair failed to write the failure tally", "error", werr)
+		}
+		holdBeforeExit(opts.signals, opts.exitHold)
+		if werr != nil {
 			return 1, errors.Join(err, werr)
 		}
 		return 1, err
@@ -439,8 +518,17 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 	}
 	out.Totals.NoWrite = out.Counters.Examined - out.Totals.Touched
 
-	if err := writeTally(out, opts.outPath, deps.stdout); err != nil {
-		return 1, err
+	// Both nets, unconditionally. The counters-only summary goes to the
+	// kubelet termination message, which lands in the pod object (etcd) and
+	// survives container-log GC and node teardown — three nightly stdout
+	// tallies were lost at pod exit before this existed. It must not depend
+	// on the stdout/--out write succeeding: a closed sink would otherwise
+	// lose both artifacts. Best effort: a missing path or write error never
+	// fails the run.
+	werr := writeTally(out, opts.outPath, deps.stdout)
+	writeTerminationSummary(out, opts.terminationPath)
+	if werr != nil {
+		slog.WarnContext(ctx, "merge-repair failed to write the tally", "error", werr)
 	}
 
 	slog.InfoContext(ctx, "merge-repair finished",
@@ -451,7 +539,93 @@ func run(ctx context.Context, deps repairDeps, opts repairOptions) (int, error) 
 		"unchecked", out.Unchecked,
 	)
 
+	holdBeforeExit(opts.signals, opts.exitHold)
+
+	if werr != nil {
+		return 1, werr
+	}
 	return exitCode(out), nil
+}
+
+// termSignals is the process's single registration for SIGINT/SIGTERM. One
+// goroutine drains the channel, counts every signal, and cancels the run
+// context on the first. Registering exactly once matters: signal.Notify
+// fans a signal out to every registered channel, so a second registration
+// (a fresh NotifyContext inside the hold) would count the same signal twice
+// or miss one that landed between the two registrations.
+type termSignals struct {
+	count  atomic.Int32
+	cancel context.CancelFunc
+	stop   func()
+}
+
+// newTermSignals arms the registration and returns the run context, which is
+// cancelled on the first termination signal.
+func newTermSignals(parent context.Context) (context.Context, *termSignals) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	ts := &termSignals{cancel: cancel}
+	done := make(chan struct{})
+	go func() {
+		for range ch {
+			if ts.count.Add(1) == 1 {
+				cancel()
+			}
+		}
+		close(done)
+	}()
+	ts.stop = func() {
+		signal.Stop(ch)
+		close(ch)
+		<-done
+		cancel()
+	}
+	return ctx, ts
+}
+
+// waitSecond blocks until a second termination signal has been counted or
+// the duration elapses. Nil-safe so tests can call the hold without a
+// registration.
+func (ts *termSignals) waitSecond(d time.Duration) {
+	deadline := time.After(d)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if ts != nil && ts.count.Load() >= 2 {
+			return
+		}
+		select {
+		case <-deadline:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// holdBeforeExit lingers after the tally is written so the node's log
+// shipper drains the final stdout burst while the pod still exists (and, in
+// the CronJob, still pins its node via do-not-disrupt).
+//
+// Kubernetes sends exactly one SIGTERM per pod, so the rule is: the hold
+// survives the FIRST termination signal the process ever receives and ends
+// on the SECOND (local Ctrl-C twice still exits). The count comes from the
+// single process-wide registration, so it is the same number on both paths:
+//
+//   - Truncated walk (deadline kill, eviction): the truncating SIGTERM was
+//     signal #1; the next one ends the hold. A hold keyed on the cancelled
+//     run context would return instantly here (the 2026-09-11 shape).
+//   - Normal completion: no signal so far. An eviction that lands during the
+//     hold is signal #1 and is absorbed — cutting the hold short would
+//     recreate the same teardown race on the good-run path.
+//
+// Bounded by the pod's terminationGracePeriodSeconds, which the chart sets
+// above this value.
+func holdBeforeExit(ts *termSignals, hold time.Duration) {
+	if hold <= 0 {
+		return
+	}
+	ts.waitSecond(hold)
 }
 
 // exitCode maps a finished tally to the CLI contract: 0 is conclusive (a
@@ -586,10 +760,28 @@ func realMain() int {
 	noPrefilter := flag.Bool("no-prefilter", false, "resolve every holder; skip the stored-member pre-filter (audit mode)")
 	outPath := flag.String("out", "", "write the JSON tally here (default stdout)")
 	direction := flag.String("direction", directionAuto, "walk order: asc (oldest updated_at first), desc (newest first), or auto (alternates daily)")
+	// The hold exists to protect the stdout->shipper path only, so its default
+	// follows the sink: 60s when stdout is the tally sink (the CronJob), none
+	// when --out names a file. An explicit --exit-hold overrides either; the
+	// unset sentinel is exactly -1, so any other negative value is a usage
+	// error rather than a silent fallback to the default.
+	exitHold := flag.Duration("exit-hold", unsetExitHold, "linger after the tally is written so the log shipper drains it (default 60s with stdout, 0 with --out)")
+	terminationPath := flag.String("termination-log", defaultTerminationPath, "also write a counters-only summary here (kubelet termination message; empty to disable)")
 	flag.Parse()
+	switch {
+	case *exitHold == unsetExitHold:
+		if *outPath == "" {
+			*exitHold = defaultExitHold
+		} else {
+			*exitHold = 0
+		}
+	case *exitHold < 0:
+		slog.Error("-exit-hold must be zero or positive", "got", *exitHold)
+		return 2
+	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, signals := newTermSignals(context.Background())
+	defer signals.stop()
 
 	deps, err := buildRepairDeps(ctx)
 	if err != nil {
@@ -597,13 +789,16 @@ func realMain() int {
 		return 2
 	}
 	code, err := run(ctx, deps, repairOptions{
-		ratePerMinute: *ratePerMinute,
-		limit:         *limit,
-		dryRun:        *dryRun,
-		live:          *live,
-		noPrefilter:   *noPrefilter,
-		outPath:       *outPath,
-		direction:     *direction,
+		ratePerMinute:   *ratePerMinute,
+		limit:           *limit,
+		dryRun:          *dryRun,
+		live:            *live,
+		noPrefilter:     *noPrefilter,
+		outPath:         *outPath,
+		direction:       *direction,
+		exitHold:        *exitHold,
+		terminationPath: *terminationPath,
+		signals:         signals,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "merge-repair failed", "error", err)

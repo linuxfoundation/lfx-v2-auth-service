@@ -12,6 +12,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Chart.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
 rules:
 # `create` is needed once, for whichever replica gets there first.
 - apiGroups: ["coordination.k8s.io"]
@@ -29,6 +30,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Chart.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

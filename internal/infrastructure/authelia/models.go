@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 )
 
 // OIDCUserInfo represents the response from the OIDC userinfo endpoint
@@ -105,6 +106,14 @@ func (a *AutheliaUser) FromStorage(storage *AutheliaUserStorage) {
 	a.DisplayName = storage.DisplayName
 	a.CreatedAt = storage.CreatedAt
 	a.UpdatedAt = storage.UpdatedAt
+	// a.CreatedAt above sets the outer, Authelia-specific time.Time field,
+	// which shadows model.User.CreatedAt (the RFC3339 string that crosses
+	// the NATS boundary). Set the embedded one explicitly for parity with
+	// the Auth0 path; skip the zero value rather than surfacing a fabricated
+	// join date.
+	if !storage.CreatedAt.IsZero() {
+		a.User.CreatedAt = converters.StringPtr(storage.CreatedAt.UTC().Format(time.RFC3339))
+	}
 }
 
 // AutheliaUserYAML represents the YAML structure for Authelia users_database.yml

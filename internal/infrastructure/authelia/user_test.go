@@ -5,10 +5,16 @@ package authelia
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"testing"
+	"time"
 
+	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,6 +253,176 @@ func TestUserReaderWriter_MetadataLookup(t *testing.T) {
 				t.Errorf("MetadataLookup() returned nil user")
 				return
 			}
+		})
+	}
+}
+
+// TestUserReaderWriter_LinkIdentity_TokenVerification tests that LinkIdentity only
+// accepts email identity tokens signed by this service.
+func TestUserReaderWriter_LinkIdentity_TokenVerification(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		userSub     = "attacker-sub"
+		autheliaTok = "authelia_at_attacker"
+		victimEmail = "victim@example.com"
+	)
+	lookupKey := "sub:" + (&model.User{Sub: userSub}).BuildSubIndexKey(ctx)
+
+	mustToken := func(token string, err error) string {
+		t.Helper()
+		require.NoError(t, err)
+		return token
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	unsignedToken := enc([]byte(`{"alg":"none","typ":"JWT"}`)) + "." +
+		enc([]byte(`{"sub":"email|victim@example.com","email":"victim@example.com"}`)) + "."
+
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	wrongKeyToken := mustToken(jwt.Generate(&jwt.GeneratorOptions{
+		TokenType:     jwt.TokenTypeIdentity,
+		Email:         victimEmail,
+		Subject:       "email|" + victimEmail,
+		ExpiresIn:     time.Hour,
+		SigningMethod: jwa.RS256,
+		SigningKey:    otherKey,
+	}))
+
+	tests := []struct {
+		name          string
+		authToken     string
+		identityToken string
+		expectError   bool
+	}{
+		{
+			name:          "valid email identity token is linked",
+			authToken:     autheliaTok,
+			identityToken: mustToken(jwt.GenerateSimpleTestIdentityTokenWithSubject(victimEmail, "email|"+victimEmail, time.Hour)),
+		},
+		{
+			name:          "unsigned alg=none token is rejected",
+			authToken:     autheliaTok,
+			identityToken: unsignedToken,
+			expectError:   true,
+		},
+		{
+			name:          "token signed with another key is rejected",
+			authToken:     autheliaTok,
+			identityToken: wrongKeyToken,
+			expectError:   true,
+		},
+		{
+			name:          "token without expiration is rejected",
+			authToken:     autheliaTok,
+			identityToken: mustToken(jwt.GenerateSimpleTestIdentityTokenWithSubject(victimEmail, "email|"+victimEmail, 0)),
+			expectError:   true,
+		},
+		{
+			name:          "access token is rejected",
+			authToken:     autheliaTok,
+			identityToken: mustToken(jwt.GenerateSimpleTestAccessToken("email|"+victimEmail, time.Hour)),
+			expectError:   true,
+		},
+		{
+			name:          "social subject is rejected",
+			authToken:     autheliaTok,
+			identityToken: mustToken(jwt.GenerateSimpleTestIdentityTokenWithSubject(victimEmail, "google-oauth2|123", time.Hour)),
+			expectError:   true,
+		},
+		{
+			name:          "subject and email mismatch is rejected",
+			authToken:     autheliaTok,
+			identityToken: mustToken(jwt.GenerateSimpleTestIdentityTokenWithSubject("attacker@example.com", "email|"+victimEmail, time.Hour)),
+			expectError:   true,
+		},
+		{
+			name:          "non-Authelia auth token is rejected",
+			authToken:     "0b9f6a52-6c2c-4f0e-9a51-6c1f2d3e4a5b",
+			identityToken: mustToken(jwt.GenerateSimpleTestIdentityTokenWithSubject(victimEmail, "email|"+victimEmail, time.Hour)),
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := &mockStorageReaderWriter{
+				users: map[string]*AutheliaUser{
+					lookupKey: {User: &model.User{Username: lookupKey, Sub: userSub}},
+				},
+			}
+			rw := &userReaderWriter{storage: storage}
+
+			request := &model.LinkIdentity{}
+			request.User.UserID = userSub
+			request.User.AuthToken = tt.authToken
+			request.LinkWith.IdentityToken = tt.identityToken
+
+			err := rw.LinkIdentity(ctx, request)
+
+			stored := storage.users[lookupKey].AlternateEmails
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Empty(t, stored)
+				assert.Empty(t, storage.users[lookupKey].Identities)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, stored, 1)
+			assert.Equal(t, victimEmail, stored[0].Email)
+			assert.True(t, stored[0].Verified)
+		})
+	}
+}
+
+// TestUserReaderWriter_UnlinkIdentity_RequiresAutheliaToken tests that UnlinkIdentity
+// rejects requests whose user was not resolved from an Authelia token.
+func TestUserReaderWriter_UnlinkIdentity_RequiresAutheliaToken(t *testing.T) {
+	ctx := context.Background()
+
+	const userSub = "0b9f6a52-6c2c-4f0e-9a51-6c1f2d3e4a5b"
+	lookupKey := "sub:" + (&model.User{Sub: userSub}).BuildSubIndexKey(ctx)
+
+	tests := []struct {
+		name        string
+		authToken   string
+		expectError bool
+	}{
+		{name: "Authelia token is accepted", authToken: "authelia_at_owner"},
+		{name: "UUID is rejected", authToken: userSub, expectError: true},
+		{name: "username is rejected", authToken: "owner", expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := &mockStorageReaderWriter{
+				users: map[string]*AutheliaUser{
+					lookupKey: {User: &model.User{
+						Username:        lookupKey,
+						Sub:             userSub,
+						AlternateEmails: []model.Email{{Email: "alt@example.com", Verified: true}},
+					}},
+				},
+			}
+			rw := &userReaderWriter{storage: storage}
+
+			request := &model.UnlinkIdentity{}
+			request.User.UserID = userSub
+			request.User.AuthToken = tt.authToken
+			request.Unlink.Provider = "email"
+			request.Unlink.IdentityID = "alt@example.com"
+
+			err := rw.UnlinkIdentity(ctx, request)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Len(t, storage.users[lookupKey].AlternateEmails, 1)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Empty(t, storage.users[lookupKey].AlternateEmails)
 		})
 	}
 }

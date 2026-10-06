@@ -217,6 +217,95 @@ func TestAuth0User_ToUser(t *testing.T) {
 			},
 		},
 		{
+			name: "both set, ldap_created_at earlier",
+			auth0User: Auth0User{
+				UserID:        "auth0|kdgaikwad97",
+				CreatedAt:     "2025-12-07T22:39:03.768Z",
+				LDAPCreatedAt: "2025-12-07T22:39:02Z",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2025-12-07T22:39:02Z", *user.CreatedAt)
+			},
+		},
+		{
+			name: "both set, created_at earlier",
+			auth0User: Auth0User{
+				UserID:        "auth0|abc123",
+				CreatedAt:     "2020-01-01T00:00:00Z",
+				LDAPCreatedAt: "2025-12-07T22:39:02Z",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2020-01-01T00:00:00Z", *user.CreatedAt)
+			},
+		},
+		{
+			name: "only created_at set",
+			auth0User: Auth0User{
+				UserID:    "auth0|abc123",
+				CreatedAt: "2020-01-01T00:00:00Z",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2020-01-01T00:00:00Z", *user.CreatedAt)
+			},
+		},
+		{
+			name: "only ldap_created_at set",
+			auth0User: Auth0User{
+				UserID:        "auth0|abc123",
+				LDAPCreatedAt: "2020-01-01T00:00:00Z",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2020-01-01T00:00:00Z", *user.CreatedAt)
+			},
+		},
+		{
+			name: "neither set",
+			auth0User: Auth0User{
+				UserID: "auth0|abc123",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				assert.Nil(t, user.CreatedAt)
+			},
+		},
+		{
+			name: "created_at unparseable falls back to ldap_created_at",
+			auth0User: Auth0User{
+				UserID:        "auth0|abc123",
+				CreatedAt:     "not-a-timestamp",
+				LDAPCreatedAt: "2020-01-01T00:00:00Z",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2020-01-01T00:00:00Z", *user.CreatedAt)
+			},
+		},
+		{
+			name: "both unparseable yields nil",
+			auth0User: Auth0User{
+				UserID:        "auth0|abc123",
+				CreatedAt:     "not-a-timestamp",
+				LDAPCreatedAt: "also-not-a-timestamp",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				assert.Nil(t, user.CreatedAt)
+			},
+		},
+		{
+			name: "non-UTC offset is normalized to UTC",
+			auth0User: Auth0User{
+				UserID:    "auth0|abc123",
+				CreatedAt: "2020-01-01T00:00:00-05:00",
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.NotNil(t, user.CreatedAt)
+				assert.Equal(t, "2020-01-01T05:00:00Z", *user.CreatedAt)
+			},
+		},
+		{
 			name: "Connection field is populated on identities",
 			auth0User: Auth0User{
 				UserID: "auth0|abc123",
