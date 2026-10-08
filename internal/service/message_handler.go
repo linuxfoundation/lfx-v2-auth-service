@@ -587,12 +587,19 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 	// add_alias. Starting a passwordless flow for them would provision an
 	// email-connection user in the identity provider for an address the
 	// caller has not proven they own.
-	// The domain is taken from the parsed address so display-name or quoted
+	// The bare parsed address is used from here on so display-name or quoted
 	// forms accepted by IsValidEmail cannot slip past the check.
-	if parsed, errParse := mail.ParseAddress(alternateEmailInput); errParse == nil {
-		if at := strings.LastIndex(parsed.Address, "@"); at >= 0 && isAllowedAliasDomain(parsed.Address[at+1:]) {
-			return m.errorResponse("email domain is reserved for system-managed aliases"), nil
-		}
+	parsed, errParse := mail.ParseAddress(alternateEmailInput)
+	if errParse != nil {
+		return m.errorResponse("invalid email"), nil
+	}
+	alternateEmailInput = strings.ToLower(parsed.Address)
+	at := strings.LastIndex(alternateEmailInput, "@")
+	if at < 0 {
+		return m.errorResponse("invalid email"), nil
+	}
+	if isAllowedAliasDomain(alternateEmailInput[at+1:]) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
 	err := m.checkEmailExists(ctx, alternateEmailInput)

@@ -1478,13 +1478,15 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.T) {
 	ctx := context.Background()
 
-	const orphanStub = `[{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
-		`"identities":[{"connection":"email","provider":"email","user_id":"orphan1"}]}]`
+	const orphanRecord = `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+		`"identities":[{"connection":"email","provider":"email","user_id":"orphan1"}]}`
+	const orphanStub = `[` + orphanRecord + `]`
 
 	t.Run("orphaned unverified stub is deleted and the claim succeeds", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
 		ft.byEmailResp = orphanStub
+		ft.stubGetResp = orphanRecord
 		rw := newTestReaderWriter(ft)
 
 		stubID, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
@@ -1567,25 +1569,78 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
 	})
 
-	t.Run("delete guard refusal surfaces as an unexpected error and no retry", func(t *testing.T) {
+	changedBeforeDelete := []struct {
+		name  string
+		fresh string
+	}{
+		{
+			name: "verified",
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"email","provider":"email"}]}`,
+		},
+		{
+			name: "system-managed",
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+				`"app_metadata":{"system_managed":true},"identities":[{"connection":"email","provider":"email"}]}`,
+		},
+		{
+			name: "linked to another identity",
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+				`"identities":[{"connection":"email"},{"connection":"github"}]}`,
+		},
+	}
+	for _, tc := range changedBeforeDelete {
+		t.Run("stub that became "+tc.name+" before delete is not removed", func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+			ft.byEmailResp = orphanStub
+			ft.stubGetResp = tc.fresh
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			var validationErr apperrors.Validation
+			assert.NotErrorAs(t, err, &validationErr)
+			assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
+			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
+			assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+		})
+	}
+
+	t.Run("stub already gone before delete still retries the create", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
 		ft.byEmailResp = orphanStub
-		// The pre-flight GET shows a non-email identity, so the guard refuses.
-		ft.stubGetResp = `{"user_id":"email|orphan1","identities":[{"connection":"email"},{"connection":"github"}]}`
+		ft.stubGetStatus = http.StatusNotFound
 		rw := newTestReaderWriter(ft)
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
+		require.NoError(t, err)
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
-		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+		assert.Equal(t, 2, ft.countFor(http.MethodPost, "/api/v2/users"))
+	})
+
+	t.Run("orphan is selected among multiple users and matched case-insensitively", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = `[` +
+			`{"user_id":"auth0|db1","email":"alias@linux.com","email_verified":false,"identities":[{"connection":"Username-Password-Authentication"}]},` +
+			`{"user_id":"email|orphan2","email":"Alias@Linux.com","email_verified":false,"identities":[{"connection":"email","provider":"email"}]}]`
+		ft.stubGetResp = `{"user_id":"email|orphan2","email":"Alias@Linux.com","email_verified":false,` +
+			`"identities":[{"connection":"email","provider":"email"}]}`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan2"))
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/api/v2/users/auth0|db1"))
 	})
 
 	t.Run("second conflict after reconcile returns a validation error without looping", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.createStatus = http.StatusConflict
 		ft.byEmailResp = orphanStub
+		ft.stubGetResp = orphanRecord
 		rw := newTestReaderWriter(ft)
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
@@ -1601,8 +1656,9 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@example.org","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
-		ft.byEmailResp = `[{"user_id":"email|orphan1","email":"alice@gmail.com","email_verified":false,` +
-			`"identities":[{"connection":"email","provider":"email"}]}]`
+		ft.stubGetResp = `{"user_id":"email|orphan1","email":"alice@gmail.com","email_verified":false,` +
+			`"identities":[{"connection":"email","provider":"email"}]}`
+		ft.byEmailResp = `[` + ft.stubGetResp + `]`
 		rw := newTestReaderWriter(ft)
 
 		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@example.org")

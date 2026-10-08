@@ -721,23 +721,11 @@ func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email
 	}
 
 	for _, candidate := range users {
-		if !strings.EqualFold(strings.TrimSpace(candidate.Email), strings.TrimSpace(email)) {
-			continue
-		}
-		if candidate.EmailVerified {
-			continue
-		}
-		if candidate.AppMetadata != nil && candidate.AppMetadata.SystemManaged {
-			continue
-		}
-		if len(candidate.Identities) != 1 || candidate.Identities[0].Connection != constants.EmailConnection {
-			continue
-		}
-		if strings.TrimSpace(candidate.UserID) == "" {
+		if !isOrphanedEmailStub(&candidate, email) {
 			continue
 		}
 
-		if errDel := u.deleteEmailConnectionStub(ctx, candidate.UserID, m2mToken); errDel != nil {
+		if errDel := u.deleteOrphanedEmailStub(ctx, candidate.UserID, email, m2mToken); errDel != nil {
 			slog.ErrorContext(ctx, "failed to delete orphaned email stub user",
 				"error", errDel,
 				"stub_user_id", redaction.Redact(candidate.UserID),
@@ -753,6 +741,60 @@ func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email
 	}
 
 	return false, nil
+}
+
+// isOrphanedEmailStub reports whether user is a standalone, never-verified,
+// non-system-managed passwordless user whose root email is email.
+func isOrphanedEmailStub(user *Auth0User, email string) bool {
+	if user == nil || strings.TrimSpace(user.UserID) == "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Email), strings.TrimSpace(email)) {
+		return false
+	}
+	if user.EmailVerified {
+		return false
+	}
+	if user.AppMetadata != nil && user.AppMetadata.SystemManaged {
+		return false
+	}
+	return len(user.Identities) == 1 && user.Identities[0].Connection == constants.EmailConnection
+}
+
+// deleteOrphanedEmailStub deletes userID only if a fresh read still shows it as
+// an orphaned stub for email (see isOrphanedEmailStub), so a record that was
+// verified, linked or marked system-managed after the lookup is never removed.
+// A 404 on the pre-flight GET is treated as already-gone.
+func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, email, m2mToken string) error {
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify orphaned email stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			return nil
+		}
+		return errors.NewUnexpected("failed to verify orphaned email stub before delete", errGet)
+	}
+	if !isOrphanedEmailStub(&target, email) {
+		return errors.NewForbidden("refusing to delete user that is not an orphaned email stub")
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete orphaned email stub user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+	}
+	return nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration

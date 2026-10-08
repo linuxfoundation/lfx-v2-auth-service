@@ -3966,6 +3966,7 @@ func TestMessageHandlerOrchestrator_StartEmailLinking_AliasDomains(t *testing.T)
 		input         string
 		wantSuccess   bool
 		wantErrorText string
+		wantSent      string
 	}{
 		{
 			name:          "alias domain address is refused",
@@ -3990,6 +3991,19 @@ func TestMessageHandlerOrchestrator_StartEmailLinking_AliasDomains(t *testing.T)
 			aliasDomains:  "linux.com",
 			input:         "Jane <jane.doe@linux.com>",
 			wantErrorText: "email domain is reserved for system-managed aliases",
+		},
+		{
+			name:          "quoted local part on an alias domain is refused",
+			aliasDomains:  "linux.com",
+			input:         `"a@b"@linux.com`,
+			wantErrorText: "email domain is reserved for system-managed aliases",
+		},
+		{
+			name:         "display-name form sends the bare address",
+			aliasDomains: "linux.com",
+			input:        "Jane <Jane.Doe@Gmail.com>",
+			wantSuccess:  true,
+			wantSent:     "jane.doe@gmail.com",
 		},
 		{
 			name:         "non-alias domain proceeds",
@@ -4036,7 +4050,10 @@ func TestMessageHandlerOrchestrator_StartEmailLinking_AliasDomains(t *testing.T)
 			}
 			if tt.wantSuccess {
 				if len(emailHandler.sent) != 1 {
-					t.Errorf("expected exactly one verification send, got %d", len(emailHandler.sent))
+					t.Fatalf("expected exactly one verification send, got %d", len(emailHandler.sent))
+				}
+				if tt.wantSent != "" && emailHandler.sent[0] != tt.wantSent {
+					t.Errorf("sent to %q, want %q", emailHandler.sent[0], tt.wantSent)
 				}
 				return
 			}
