@@ -278,6 +278,9 @@ func TestParseRetryAfter(t *testing.T) {
 		{"zero seconds", "0", 0},
 		{"negative seconds", "-5", 0},
 		{"unparseable", "soon", 0},
+		{"at the ceiling", "300", MaxRetryAfter},
+		{"beyond the ceiling", "1000000000", MaxRetryAfter},
+		{"large enough to overflow a duration", "10000000000", MaxRetryAfter},
 	}
 
 	for _, tt := range tests {
@@ -299,6 +302,15 @@ func TestParseRetryAfter(t *testing.T) {
 
 		if got := ParseRetryAfter(header); got <= 0 {
 			t.Fatalf("ParseRetryAfter(http-date) = %v, want a positive wait", got)
+		}
+	})
+
+	t.Run("http-date far in the future is capped", func(t *testing.T) {
+		header := make(http.Header)
+		header.Set("Retry-After", time.Now().AddDate(50, 0, 0).UTC().Format(http.TimeFormat))
+
+		if got := ParseRetryAfter(header); got != MaxRetryAfter {
+			t.Fatalf("ParseRetryAfter(far-future http-date) = %v, want %v", got, MaxRetryAfter)
 		}
 	})
 
