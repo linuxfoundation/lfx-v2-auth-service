@@ -152,6 +152,11 @@ func TestRedactUUIDs(t *testing.T) {
 			input:    "/v1/members/0A1B2C3D-4E5F-6789-ABCD-EF0123456789/identities",
 			expected: "/v1/members/0A1****/identities",
 		},
+		{
+			name:     "uuid adjacent to word characters",
+			input:    "member_d6f4a060-f818-4fab-bf36-73032634fe7cx",
+			expected: "member_d6f****x",
+		},
 	}
 
 	for _, tt := range tests {
