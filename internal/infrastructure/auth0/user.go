@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -743,10 +744,22 @@ func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email
 	return false, nil
 }
 
+// orphanedEmailStubMinAge is how old an unverified passwordless user must be
+// before it is treated as abandoned. It is well beyond the passwordless OTP
+// lifetime, so a record created by a sign-up or link that may still be in
+// progress is not removed; a newer record keeps blocking the claim until it
+// ages out.
+const orphanedEmailStubMinAge = time.Hour
+
 // isOrphanedEmailStub reports whether user is a standalone, never-verified,
-// non-system-managed passwordless user whose root email is email.
+// non-system-managed passwordless user whose root email is email and which was
+// created at least orphanedEmailStubMinAge ago.
 func isOrphanedEmailStub(user *Auth0User, email string) bool {
 	if user == nil || strings.TrimSpace(user.UserID) == "" {
+		return false
+	}
+	createdAt, errParse := time.Parse(time.RFC3339, user.CreatedAt)
+	if errParse != nil || time.Since(createdAt) < orphanedEmailStubMinAge {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(user.Email), strings.TrimSpace(email)) {

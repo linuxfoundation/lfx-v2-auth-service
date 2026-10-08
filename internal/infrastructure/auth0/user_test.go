@@ -1478,7 +1478,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.T) {
 	ctx := context.Background()
 
-	const orphanRecord = `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+	const orphanRecord = `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 		`"identities":[{"connection":"email","provider":"email","user_id":"orphan1"}]}`
 	const orphanStub = `[` + orphanRecord + `]`
 
@@ -1509,27 +1509,27 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 	}{
 		{
 			name: "verified email user",
-			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":true,` +
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":true,` +
 				`"identities":[{"connection":"email","provider":"email"}]}]`,
 		},
 		{
 			name: "system-managed stub",
-			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":false,` +
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"app_metadata":{"system_managed":true},"identities":[{"connection":"email","provider":"email"}]}]`,
 		},
 		{
 			name: "user with linked identities",
-			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":false,` +
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"identities":[{"connection":"email","provider":"email"},{"connection":"github","provider":"github"}]}]`,
 		},
 		{
 			name: "non-email-connection user",
-			resp: `[{"user_id":"google-oauth2|u1","email":"alias@linux.com","email_verified":false,` +
+			resp: `[{"user_id":"google-oauth2|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"identities":[{"connection":"google-oauth2","provider":"google-oauth2"}]}]`,
 		},
 		{
 			name: "different root email",
-			resp: `[{"user_id":"email|u1","email":"other@linux.com","email_verified":false,` +
+			resp: `[{"user_id":"email|u1","email":"other@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"identities":[{"connection":"email","provider":"email"}]}]`,
 		},
 		{
@@ -1554,6 +1554,38 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		})
 	}
 
+	tooRecent := []struct {
+		name   string
+		record string
+	}{
+		{
+			name: "created within the minimum age",
+			record: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,"created_at":"` +
+				time.Now().UTC().Add(-5*time.Minute).Format(time.RFC3339) + `",` +
+				`"identities":[{"connection":"email","provider":"email"}]}`,
+		},
+		{
+			name: "missing created_at",
+			record: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+				`"identities":[{"connection":"email","provider":"email"}]}`,
+		},
+	}
+	for _, tc := range tooRecent {
+		t.Run("unverified stub is not deleted when "+tc.name, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.createStatus = http.StatusConflict
+			ft.byEmailResp = `[` + tc.record + `]`
+			ft.stubGetResp = tc.record
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "email already linked")
+			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
+			assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+		})
+	}
+
 	t.Run("lookup failure surfaces as an unexpected error", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.createStatus = http.StatusConflict
@@ -1575,17 +1607,17 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 	}{
 		{
 			name: "verified",
-			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":true,` +
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":true,` +
 				`"identities":[{"connection":"email","provider":"email"}]}`,
 		},
 		{
 			name: "system-managed",
-			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"app_metadata":{"system_managed":true},"identities":[{"connection":"email","provider":"email"}]}`,
 		},
 		{
 			name: "linked to another identity",
-			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"identities":[{"connection":"email"},{"connection":"github"}]}`,
 		},
 	}
@@ -1624,9 +1656,9 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
 		ft.byEmailResp = `[` +
-			`{"user_id":"auth0|db1","email":"alias@linux.com","email_verified":false,"identities":[{"connection":"Username-Password-Authentication"}]},` +
-			`{"user_id":"email|orphan2","email":"Alias@Linux.com","email_verified":false,"identities":[{"connection":"email","provider":"email"}]}]`
-		ft.stubGetResp = `{"user_id":"email|orphan2","email":"Alias@Linux.com","email_verified":false,` +
+			`{"user_id":"auth0|db1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,"identities":[{"connection":"Username-Password-Authentication"}]},` +
+			`{"user_id":"email|orphan2","email":"Alias@Linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,"identities":[{"connection":"email","provider":"email"}]}]`
+		ft.stubGetResp = `{"user_id":"email|orphan2","email":"Alias@Linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 			`"identities":[{"connection":"email","provider":"email"}]}`
 		rw := newTestReaderWriter(ft)
 
@@ -1652,11 +1684,11 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 	t.Run("set primary preserve path reconciles an orphaned stub of the old primary", func(t *testing.T) {
 		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
-			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
-			`{"connection":"email","provider":"email","profileData":{"email":"alice@example.org","email_verified":true}}]}`
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@example.org","created_at":"2020-01-01T00:00:00.000Z","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
-		ft.stubGetResp = `{"user_id":"email|orphan1","email":"alice@gmail.com","email_verified":false,` +
+		ft.stubGetResp = `{"user_id":"email|orphan1","email":"alice@gmail.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 			`"identities":[{"connection":"email","provider":"email"}]}`
 		ft.byEmailResp = `[` + ft.stubGetResp + `]`
 		rw := newTestReaderWriter(ft)

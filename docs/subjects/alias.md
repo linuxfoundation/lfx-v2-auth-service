@@ -58,7 +58,7 @@ The returned `email` is the canonical, lowercased form of the claimed alias.
 | `domain_not_allowed` | The requested `domain` is missing, empty, or not present in `ALLOWED_ALIAS_DOMAINS` |
 | `alias_invalid` | The alias is empty, too long (>64 chars), contains banned characters, or fails RFC 5322 canonicalisation |
 | `alias_reserved` | The alias matches a reserved name (built-in list or `AUTH0_ALIAS_RESERVED_EXTRA`) |
-| `alias_not_available` | The full `<alias>@<domain>` address is already claimed: linked to another user, verified, or system-managed (also returned on a race during claim). An orphaned, never-verified passwordless user for the address is removed and does not block the claim. |
+| `alias_not_available` | The full `<alias>@<domain>` address is already claimed: linked to another user, verified, or system-managed (also returned on a race during claim). An orphaned passwordless user for the address (never verified, unlinked, not system-managed, and created more than an hour ago) is removed and does not block the claim. |
 | `already_claimed` | The caller already has an alias on this domain as primary, linked identity, or alternate email |
 | `alias_service_unavailable` | The current backend does not support alias claims (e.g. Authelia) |
 | `auth_service_unavailable` | The user reader is not wired |

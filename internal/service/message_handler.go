@@ -587,13 +587,13 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 	// add_alias. Starting a passwordless flow for them would provision an
 	// email-connection user in the identity provider for an address the
 	// caller has not proven they own.
-	// The bare parsed address is used from here on so display-name or quoted
-	// forms accepted by IsValidEmail cannot slip past the check.
+	// Only a bare address is accepted: display-name or quoted forms accepted by
+	// IsValidEmail would otherwise let the checked domain differ from the
+	// string sent to the provider.
 	parsed, errParse := mail.ParseAddress(alternateEmailInput)
-	if errParse != nil {
+	if errParse != nil || !strings.EqualFold(parsed.Address, alternateEmailInput) {
 		return m.errorResponse("invalid email"), nil
 	}
-	alternateEmailInput = strings.ToLower(parsed.Address)
 	at := strings.LastIndex(alternateEmailInput, "@")
 	if at < 0 {
 		return m.errorResponse("invalid email"), nil
