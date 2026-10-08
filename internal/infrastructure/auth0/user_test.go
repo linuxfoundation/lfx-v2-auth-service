@@ -1107,7 +1107,7 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("old primary not linked is preserved before promote", func(t *testing.T) {
-		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":true,"identities":[` +
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		rw := newTestReaderWriter(ft)
@@ -1223,11 +1223,11 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		}, ft.methodPaths())
 	})
 
-	t.Run("old primary verified on the root but backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
+	t.Run("old primary backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
 		// A Google identity (verified or not) is never a primary-email candidate, so
 		// the old primary is materialized as a verified email identity regardless of
-		// Google's email_verified flag, as long as Auth0 reports it verified.
-		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","email_verified":true,"identities":[` +
+		// Google's email_verified flag.
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
@@ -1245,37 +1245,6 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		createBody, _ := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
 		assert.Contains(t, createBody, `"email":"alice@gmail.com"`)
 		assert.Contains(t, createBody, `"email_verified":true`)
-	})
-
-	t.Run("unverified old primary is not preserved as a verified email", func(t *testing.T) {
-		// The stub is created verified, so preserving an address nobody proved
-		// would mint a verified email identity for it.
-		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":false,"identities":[` +
-			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
-		ft := newFakeAuth0(testPrimaryUserID, getUser)
-		rw := newTestReaderWriter(ft)
-
-		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
-		require.NoError(t, err)
-
-		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified address")
-		assert.Equal(t, []string{
-			"GET /api/v2/users/auth0|test123",
-			"PATCH /api/v2/users/auth0|test123",
-		}, ft.methodPaths())
-	})
-
-	t.Run("unverified old primary backed by an unverified Google identity is not preserved", func(t *testing.T) {
-		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
-			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
-			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
-		ft := newFakeAuth0(testPrimaryUserID, getUser)
-		rw := newTestReaderWriter(ft)
-
-		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
-		require.NoError(t, err)
-
-		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified address")
 	})
 
 	t.Run("setting primary to the current primary skips preservation", func(t *testing.T) {
@@ -1317,7 +1286,7 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	})
 
 	t.Run("preservation failure aborts the switch and rolls back the stub", func(t *testing.T) {
-		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":true,"identities":[` +
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		ft.linkStatus = http.StatusInternalServerError // linking the preserved stub fails

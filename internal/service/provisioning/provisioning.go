@@ -279,15 +279,29 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 		}
 		if !cdpidentity.HoldsVerifiedLFID(held, username) {
 			// Resolve filters verified identities on both arms, so a member
-			// without this LFID verified matched on the email alone. That is
-			// not proof the member is this person: attaching would stamp this
-			// LFID as verified on someone else's profile and store it
-			// write-once.
-			slog.WarnContext(ctx, "CDP member matched only on email and does not hold this LFID, skipping provisioning",
+			// without this LFID verified matched on the email alone — unless
+			// the identities read is trailing the resolve, as on a replay
+			// after a create conflict. Asking again on the LFID arm alone
+			// tells the two apart: only that arm finding this same member
+			// proves it holds the LFID. Anything else is an email-only match,
+			// which is not proof the member is this person: attaching would
+			// stamp this LFID as verified on someone else's profile and store
+			// it write-once.
+			byLFID, errResolve := o.cdpClient.Resolve(ctx, username, "")
+			if errResolve != nil {
+				return "", Result{}, errResolve
+			}
+			if byLFID.Outcome != cdp.OutcomeFound || !strings.EqualFold(byLFID.MemberID, resolved.MemberID) {
+				slog.WarnContext(ctx, "CDP member matched only on email and does not hold this LFID, skipping provisioning",
+					"user_id", redaction.Redact(req.UserID),
+					"member_id", redaction.Redact(resolved.MemberID),
+				)
+				return "", skip(reasonMemberLacksOwnLFID), nil
+			}
+			slog.InfoContext(ctx, "CDP member resolves on this LFID but its identities do not show it yet",
 				"user_id", redaction.Redact(req.UserID),
 				"member_id", redaction.Redact(resolved.MemberID),
 			)
-			return "", skip(reasonMemberLacksOwnLFID), nil
 		}
 
 		attached, errAttach := o.cdpClient.AttachIdentity(ctx, resolved.MemberID, lfidIdentity(username))

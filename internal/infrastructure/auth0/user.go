@@ -763,21 +763,6 @@ func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	return false
 }
 
-// isPrimaryEmailProven reports whether email has been verified, either as the
-// root record's email (Auth0's root email_verified) or by a linked identity
-// whose provider reports it verified. Matching is case-insensitive.
-func isPrimaryEmailProven(user *model.User, email string) bool {
-	if user.PrimaryEmailVerified && strings.EqualFold(user.PrimaryEmail, email) {
-		return true
-	}
-	for _, id := range user.Identities {
-		if id.EmailVerified && strings.EqualFold(id.Email, email) {
-			return true
-		}
-	}
-	return false
-}
-
 // SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
 // The email must already be a verified linked identity on the user's account.
 func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
@@ -826,18 +811,9 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	// create+link it as a normal, user-removable verified email identity first.
 	// Done first so that any failure leaves the account unchanged rather than
 	// silently dropping the old primary.
-	//
-	// Only a proven address is preserved: the stub is created verified, so
-	// preserving an unverified primary would mint a verified email the user
-	// never proved — which a second switch could then promote back to the
-	// root as verified. An unverified old primary is simply dropped.
 	oldPrimary := fullUser.PrimaryEmail
 	if oldPrimary != "" && !strings.EqualFold(oldPrimary, email) && !hasSufficientPrimaryEmailIdentity(fullUser, oldPrimary) {
-		if !isPrimaryEmailProven(fullUser, oldPrimary) {
-			slog.InfoContext(ctx, "old primary email is unverified, not preserving it",
-				"user_id", redaction.Redact(userID),
-			)
-		} else if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {
+		if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {
 			slog.ErrorContext(ctx, "failed to preserve old primary email before switching",
 				"error", errPreserve,
 				"user_id", redaction.Redact(userID),

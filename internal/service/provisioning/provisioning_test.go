@@ -37,13 +37,15 @@ type mockCDPClient struct {
 	identitiesCalls int
 	attachedTo      string
 	resolvedLFID    string
+	resolvedEmails  []string
 
 	createdDisplayName string
 }
 
-func (m *mockCDPClient) Resolve(_ context.Context, lfid string, _ string) (cdp.ResolveResult, error) {
+func (m *mockCDPClient) Resolve(_ context.Context, lfid string, email string) (cdp.ResolveResult, error) {
 	m.resolveCalls++
 	m.resolvedLFID = lfid
+	m.resolvedEmails = append(m.resolvedEmails, email)
 	if m.resolveErr != nil {
 		return cdp.ResolveResult{}, m.resolveErr
 	}
@@ -85,6 +87,19 @@ func (m *mockCDPClient) AttachIdentity(_ context.Context, memberID string, _ cdp
 		return m.attachResult, nil
 	}
 	return cdp.AttachResult{Outcome: cdp.OutcomeFound}, nil
+}
+
+// failSecondResolve fails every resolve after the first.
+type failSecondResolve struct {
+	*mockCDPClient
+}
+
+func (f *failSecondResolve) Resolve(ctx context.Context, lfid string, email string) (cdp.ResolveResult, error) {
+	if f.resolveCalls >= 1 {
+		f.resolveCalls++
+		return cdp.ResolveResult{}, errs.NewUnexpected("cdp unavailable")
+	}
+	return f.mockCDPClient.Resolve(ctx, lfid, email)
 }
 
 // mockMetadataStore records the write it was asked to make and serves the
@@ -377,13 +392,21 @@ func TestProvisionFlow(t *testing.T) {
 		// and storing its id write-once would bind this account to somebody
 		// else's profile.
 		client := &mockCDPClient{
-			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"},
+				{Outcome: cdp.OutcomeNoMatch},
+			},
 			identities: []cdp.MemberIdentity{
 				{Value: "p@example.org", Platform: "github", Type: "email", Verified: true},
 				{Value: "psmith-gh", Platform: "github", Type: constants.CDPIdentityTypeUsername, Verified: true},
 			},
 		}
-		store := &mockMetadataStore{}
+		store := &mockMetadataStore{state: &port.UserProvisioningState{
+			EmailVerified:       true,
+			Email:               "p@example.org",
+			Username:            "psmith",
+			HasDatabaseIdentity: true,
+		}}
 
 		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
 
@@ -393,11 +416,83 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, client.attachCalls, "the LFID must not be attached to a member it was not resolved to")
 		assert.Zero(t, client.createCalls)
 		assert.Zero(t, store.calls, "no uuid is written")
+		assert.Equal(t, []string{"p@example.org", ""}, client.resolvedEmails, "the second resolve asks on the LFID arm alone")
+	})
+
+	t.Run("a member the LFID arm alone resolves elsewhere is still not adopted", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"},
+				{Outcome: cdp.OutcomeFound, MemberID: "MEM-2"},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberLacksOwnLFID, result.Reason)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls)
+	})
+
+	t.Run("a replay after a create conflict adopts the member once the LFID arm finds it", func(t *testing.T) {
+		// Attempt one: the create races, and the re-resolved member does not
+		// show the LFID yet, so the event is retried with nothing stored.
+		// Attempt two: resolve now finds that member, its identities still
+		// trail, but the LFID arm alone resolves to it — which proves it holds
+		// the LFID — so the replay provisions rather than ending in a skip.
+		store := &mockMetadataStore{}
+		first := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeFound, MemberID: "raced-1"},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+		}
+
+		_, err := newTestOrchestrator(first, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err, "the first attempt is retried")
+		assert.Zero(t, store.calls)
+
+		replay := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeFound, MemberID: "raced-1"},
+				{Outcome: cdp.OutcomeFound, MemberID: "RACED-1"},
+			},
+		}
+
+		result, err := newTestOrchestrator(replay, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeProvisioned, result.Outcome)
+		assert.Equal(t, 1, replay.attachCalls)
+		assert.Equal(t, "raced-1", store.written.UUID)
+	})
+
+	t.Run("an LFID-arm resolve failure is retried, not skipped", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+		}
+		store := &mockMetadataStore{}
+		// Fail only the second resolve: the first must succeed to reach it.
+		failing := &failSecondResolve{mockCDPClient: client}
+
+		_, err := NewOrchestrator(WithCDPClient(failing), WithMetadataStore(store)).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls)
 	})
 
 	t.Run("a member holding no identities at all is not adopted", func(t *testing.T) {
 		client := &mockCDPClient{
-			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"},
+				{Outcome: cdp.OutcomeNoMatch},
+			},
 		}
 		store := &mockMetadataStore{}
 
@@ -414,7 +509,10 @@ func TestProvisionFlow(t *testing.T) {
 		// Resolve consults verified identities only, so a member whose copy of
 		// this LFID is unverified still matched on the email alone.
 		client := &mockCDPClient{
-			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"},
+				{Outcome: cdp.OutcomeNoMatch},
+			},
 			identities: []cdp.MemberIdentity{
 				{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
 			},

@@ -173,13 +173,12 @@ func (u *Auth0User) ToUser() *model.User {
 	}
 
 	return &model.User{
-		UserID:               u.UserID,
-		Username:             u.Username,
-		PrimaryEmail:         u.Email,
-		PrimaryEmailVerified: u.EmailVerified,
-		Identities:           identities,
-		UserMetadata:         meta,
-		CreatedAt:            earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
+		UserID:       u.UserID,
+		Username:     u.Username,
+		PrimaryEmail: u.Email,
+		Identities:   identities,
+		UserMetadata: meta,
+		CreatedAt:    earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
 	}
 }
 
