@@ -18,6 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	apperrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1003,9 +1004,14 @@ type fakeAuth0Transport struct {
 	stubGetResp   string // body for GET of the rollback stub
 	createStatus  int    // status for POST /api/v2/users
 	createResp    string // body for POST /api/v2/users
-	linkStatus    int    // status for POST /api/v2/users/{id}/identities
-	patchStatus   int    // status for PATCH /api/v2/users/{id}
-	calls         []recordedCall
+	// createStatuses, when non-empty, is consumed one entry per POST
+	// /api/v2/users call before falling back to createStatus.
+	createStatuses []int
+	byEmailStatus  int    // status for GET /api/v2/users-by-email
+	byEmailResp    string // body for GET /api/v2/users-by-email
+	linkStatus     int    // status for POST /api/v2/users/{id}/identities
+	patchStatus    int    // status for PATCH /api/v2/users/{id}
+	calls          []recordedCall
 }
 
 func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
@@ -1018,6 +1024,8 @@ func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
 		createResp:    `{"user_id":"email|stub123"}`,
 		linkStatus:    http.StatusCreated,
 		patchStatus:   http.StatusOK,
+		byEmailStatus: http.StatusOK,
+		byEmailResp:   "[]",
 	}
 }
 
@@ -1037,11 +1045,16 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 	switch {
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		body = f.getUserResp
+	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users-by-email":
+		status, body = f.byEmailStatus, f.byEmailResp
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		// GET of any other user id is the rollback stub verification.
 		status, body = f.stubGetStatus, f.stubGetResp
 	case req.Method == http.MethodPost && req.URL.Path == "/api/v2/users":
 		status, body = f.createStatus, f.createResp
+		if len(f.createStatuses) > 0 {
+			status, f.createStatuses = f.createStatuses[0], f.createStatuses[1:]
+		}
 	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/identities"):
 		status, body = f.linkStatus, "[]"
 	case req.Method == http.MethodPatch && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
@@ -1459,6 +1472,143 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 			"GET /api/v2/users/email|stub123",
 			"DELETE /api/v2/users/email|stub123",
 		}, ft.methodPaths())
+	})
+}
+
+func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.T) {
+	ctx := context.Background()
+
+	const orphanStub = `[{"user_id":"email|orphan1","email":"alias@linux.com","email_verified":false,` +
+		`"identities":[{"connection":"email","provider":"email","user_id":"orphan1"}]}]`
+
+	t.Run("orphaned unverified stub is deleted and the claim succeeds", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = orphanStub
+		rw := newTestReaderWriter(ft)
+
+		stubID, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, "email|stub123", stubID)
+
+		assert.Equal(t, []string{
+			"POST /api/v2/users",
+			"GET /api/v2/users-by-email",
+			"GET /api/v2/users/email|orphan1",
+			"DELETE /api/v2/users/email|orphan1",
+			"POST /api/v2/users",
+			"POST /api/v2/users/auth0|test123/identities",
+		}, ft.methodPaths())
+	})
+
+	genuineClaims := []struct {
+		name string
+		resp string
+	}{
+		{
+			name: "verified email user",
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"email","provider":"email"}]}]`,
+		},
+		{
+			name: "system-managed stub",
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":false,` +
+				`"app_metadata":{"system_managed":true},"identities":[{"connection":"email","provider":"email"}]}]`,
+		},
+		{
+			name: "user with linked identities",
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","email_verified":false,` +
+				`"identities":[{"connection":"email","provider":"email"},{"connection":"github","provider":"github"}]}]`,
+		},
+		{
+			name: "non-email-connection user",
+			resp: `[{"user_id":"google-oauth2|u1","email":"alias@linux.com","email_verified":false,` +
+				`"identities":[{"connection":"google-oauth2","provider":"google-oauth2"}]}]`,
+		},
+		{
+			name: "different root email",
+			resp: `[{"user_id":"email|u1","email":"other@linux.com","email_verified":false,` +
+				`"identities":[{"connection":"email","provider":"email"}]}]`,
+		},
+		{
+			name: "no users found",
+			resp: `[]`,
+		},
+	}
+	for _, tc := range genuineClaims {
+		t.Run("genuine claim is not deleted: "+tc.name, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.createStatus = http.StatusConflict
+			ft.byEmailResp = tc.resp
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			var validationErr apperrors.Validation
+			assert.ErrorAs(t, err, &validationErr)
+			assert.Contains(t, err.Error(), "email already linked")
+			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""), "no user may be deleted")
+			assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"), "create must not be retried")
+		})
+	}
+
+	t.Run("lookup failure surfaces as an unexpected error", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatus = http.StatusConflict
+		ft.byEmailStatus = http.StatusInternalServerError
+		ft.byEmailResp = `{"error":"boom"}`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		var validationErr apperrors.Validation
+		assert.NotErrorAs(t, err, &validationErr, "infra failure must not look like a claim conflict")
+		assert.Contains(t, err.Error(), "failed to look up existing email stub user")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
+	})
+
+	t.Run("delete guard refusal surfaces as an unexpected error and no retry", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = orphanStub
+		// The pre-flight GET shows a non-email identity, so the guard refuses.
+		ft.stubGetResp = `{"user_id":"email|orphan1","identities":[{"connection":"email"},{"connection":"github"}]}`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
+		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+	})
+
+	t.Run("second conflict after reconcile returns a validation error without looping", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatus = http.StatusConflict
+		ft.byEmailResp = orphanStub
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "email already linked")
+		assert.Equal(t, 2, ft.countFor(http.MethodPost, "/api/v2/users"))
+		assert.Equal(t, 1, ft.countFor(http.MethodGet, "/api/v2/users-by-email"))
+	})
+
+	t.Run("set primary preserve path reconciles an orphaned stub of the old primary", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@example.org","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = `[{"user_id":"email|orphan1","email":"alice@gmail.com","email_verified":false,` +
+			`"identities":[{"connection":"email","provider":"email"}]}]`
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@example.org")
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))
+		assert.Equal(t, 1, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
 	})
 }
 

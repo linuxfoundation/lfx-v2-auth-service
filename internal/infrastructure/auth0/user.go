@@ -595,6 +595,19 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 
 	var stubUser Auth0User
 	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
+	if errCreate != nil && statusCode == http.StatusConflict {
+		// An existing email-connection user only counts as a claim when it is
+		// verified, linked, or system-managed. An orphaned, never-verified
+		// passwordless user is removed and the create is retried once.
+		reconciled, errReconcile := u.reconcileOrphanedEmailStub(ctx, email, m2mToken)
+		if errReconcile != nil {
+			return "", errReconcile
+		}
+		if reconciled {
+			stubUser = Auth0User{}
+			statusCode, errCreate = apiCreate.Call(ctx, &stubUser)
+		}
+	}
 	if errCreate != nil {
 		if statusCode == http.StatusConflict {
 			slog.InfoContext(ctx, "email stub user already exists in Auth0",
@@ -678,6 +691,68 @@ func (u *userReaderWriter) rollbackEmailStub(ctx context.Context, userID, m2mTok
 		return u.deleteSystemManagedUser(ctx, userID, m2mToken)
 	}
 	return u.deleteEmailConnectionStub(ctx, userID, m2mToken)
+}
+
+// reconcileOrphanedEmailStub looks up the users holding email and deletes an
+// orphaned passwordless stub: a standalone user whose only identity is on the
+// email connection, whose email was never verified, and which is not
+// system-managed. Such a record is left behind by a passwordless flow that was
+// started but never completed, so it does not represent a claim on the address.
+// It returns true when a stub was removed (the caller may retry the create)
+// and false when the existing record is a genuine claim. Lookup or delete
+// failures are returned as unexpected errors.
+func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email, m2mToken string) (bool, error) {
+	apiSearch := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users-by-email?email=%s", u.config.Domain, url.QueryEscape(strings.ToLower(strings.TrimSpace(email))))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("look up existing email stub user"),
+	)
+
+	var users []Auth0User
+	if statusCode, errSearch := apiSearch.Call(ctx, &users); errSearch != nil {
+		slog.ErrorContext(ctx, "failed to look up existing email stub user",
+			"error", errSearch,
+			"status_code", statusCode,
+			"email", redaction.RedactEmail(email),
+		)
+		return false, errors.NewUnexpected("failed to look up existing email stub user", errSearch)
+	}
+
+	for _, candidate := range users {
+		if !strings.EqualFold(strings.TrimSpace(candidate.Email), strings.TrimSpace(email)) {
+			continue
+		}
+		if candidate.EmailVerified {
+			continue
+		}
+		if candidate.AppMetadata != nil && candidate.AppMetadata.SystemManaged {
+			continue
+		}
+		if len(candidate.Identities) != 1 || candidate.Identities[0].Connection != constants.EmailConnection {
+			continue
+		}
+		if strings.TrimSpace(candidate.UserID) == "" {
+			continue
+		}
+
+		if errDel := u.deleteEmailConnectionStub(ctx, candidate.UserID, m2mToken); errDel != nil {
+			slog.ErrorContext(ctx, "failed to delete orphaned email stub user",
+				"error", errDel,
+				"stub_user_id", redaction.Redact(candidate.UserID),
+			)
+			return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+		}
+
+		slog.InfoContext(ctx, "deleted orphaned unverified email stub user",
+			"stub_user_id", redaction.Redact(candidate.UserID),
+			"email", redaction.RedactEmail(email),
+		)
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
