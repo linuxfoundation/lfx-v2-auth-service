@@ -133,6 +133,13 @@ func newTestOrchestrator(client *mockCDPClient, store *mockMetadataStore) Orches
 
 func boolPtr(v bool) *bool { return &v }
 
+// ownLFID is a member identity set holding the test user's own LFID.
+func ownLFID() []cdp.MemberIdentity {
+	return []cdp.MemberIdentity{
+		{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername, Verified: true},
+	}
+}
+
 // verifiedRequest is an eligible user: verified, database-connection, no UUID.
 func verifiedRequest() Request {
 	return Request{
@@ -322,7 +329,10 @@ func TestProvisionFlow(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("an existing member is attached and written back", func(t *testing.T) {
-		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}}}
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			identities:     ownLFID(),
+		}
 		store := &mockMetadataStore{}
 
 		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
@@ -361,6 +371,45 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls, "no uuid is written, so a later run can retry once CDP is fixed")
 	})
 
+	t.Run("a member matched only on the email is not attached to or stored", func(t *testing.T) {
+		// A member without this LFID can only have matched on the email arm.
+		// That proves nothing about who owns it, so stamping this LFID on it
+		// and storing its id write-once would bind this account to somebody
+		// else's profile.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			identities: []cdp.MemberIdentity{
+				{Value: "p@example.org", Platform: "github", Type: "email", Verified: true},
+				{Value: "psmith-gh", Platform: "github", Type: constants.CDPIdentityTypeUsername, Verified: true},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err, "a skip is a final answer, not a retry")
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberLacksOwnLFID, result.Reason)
+		assert.Zero(t, client.attachCalls, "the LFID must not be attached to a member it was not resolved to")
+		assert.Zero(t, client.createCalls)
+		assert.Zero(t, store.calls, "no uuid is written")
+	})
+
+	t.Run("a member holding no identities at all is not adopted", func(t *testing.T) {
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberLacksOwnLFID, result.Reason)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls)
+	})
+
 	t.Run("the user's own LFID on the member does not block the attach", func(t *testing.T) {
 		// Re-delivery is at-least-once, so the identity may already be there.
 		client := &mockCDPClient{
@@ -387,6 +436,7 @@ func TestProvisionFlow(t *testing.T) {
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict},
+			identities:     ownLFID(),
 		}
 		store := &mockMetadataStore{}
 
@@ -407,7 +457,7 @@ func TestProvisionFlow(t *testing.T) {
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
 			identitiesByMember: map[string][]cdp.MemberIdentity{
-				"MEM-1": {},
+				"MEM-1": ownLFID(),
 				"MEM-2": {{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername}},
 			},
 		}
@@ -428,7 +478,7 @@ func TestProvisionFlow(t *testing.T) {
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
 			identitiesByMember: map[string][]cdp.MemberIdentity{
-				"MEM-1": {},
+				"MEM-1": ownLFID(),
 				"MEM-2": {},
 			},
 		}
@@ -447,7 +497,7 @@ func TestProvisionFlow(t *testing.T) {
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
 			identitiesByMember: map[string][]cdp.MemberIdentity{
-				"MEM-1": {},
+				"MEM-1": ownLFID(),
 				"MEM-2": {
 					{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
 					{Value: "someoneelse", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
@@ -471,7 +521,7 @@ func TestProvisionFlow(t *testing.T) {
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
 			identitiesByMember: map[string][]cdp.MemberIdentity{
-				"MEM-1": {},
+				"MEM-1": ownLFID(),
 			},
 			identitiesErr: errs.NewUnexpected("cdp unavailable"),
 		}
@@ -531,6 +581,7 @@ func TestProvisionFlow(t *testing.T) {
 				{Outcome: cdp.OutcomeFound, MemberID: "raced-1"},
 			},
 			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+			identities:   ownLFID(),
 		}
 		store := &mockMetadataStore{}
 
@@ -540,6 +591,29 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Equal(t, OutcomeProvisioned, result.Outcome)
 		assert.Equal(t, 2, client.resolveCalls)
 		assert.Equal(t, "raced-1", store.written.UUID)
+	})
+
+	t.Run("a create conflict never stores a re-resolved member lacking the LFID", func(t *testing.T) {
+		// The re-resolve can match on the email alone. Without the LFID on
+		// the member nothing proves it is this user's, so it is retried
+		// rather than stored.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{
+				{Outcome: cdp.OutcomeNoMatch},
+				{Outcome: cdp.OutcomeFound, MemberID: "email-only-1"},
+			},
+			createResult: cdp.CreateResult{Outcome: cdp.OutcomeConflict},
+			identities: []cdp.MemberIdentity{
+				{Value: "p@example.org", Platform: "github", Type: "email", Verified: true},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.Error(t, err, "the event must be retried, not completed")
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls, "nothing may be written for a member that does not hold the LFID")
 	})
 
 	t.Run("a create conflict re-resolve skips a member holding another LFID", func(t *testing.T) {
@@ -719,17 +793,24 @@ func TestProvisionFlow(t *testing.T) {
 	t.Run("a write-once rejection ends the event rather than retrying it", func(t *testing.T) {
 		// Another writer got there first. The end state is correct, so replaying
 		// would just repeat the same rejection.
-		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}}}
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}},
+			identities:     ownLFID(),
+		}
 		store := &mockMetadataStore{err: errs.NewConflict("cdp_uuid is write-once")}
 
 		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
 
 		require.NoError(t, err)
 		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonAlreadyProvisioned, result.Reason)
 	})
 
 	t.Run("an unexpected write failure is retryable", func(t *testing.T) {
-		client := &mockCDPClient{resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}}}
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "mem-1"}},
+			identities:     ownLFID(),
+		}
 		store := &mockMetadataStore{err: errs.NewUnexpected("auth0 down")}
 
 		_, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())

@@ -33,6 +33,9 @@ type User struct {
 	// to Auth0 and published on the user_profile.updated event, and this
 	// field must never be writable through either path.
 	CreatedAt *string `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	// PrimaryEmailVerified is the provider's verification flag for
+	// PrimaryEmail. Internal only: it is never serialized into a reply.
+	PrimaryEmailVerified bool `json:"-" yaml:"-"`
 }
 
 // UserMetadata represents the metadata of a user
