@@ -1009,6 +1009,7 @@ type fakeAuth0Transport struct {
 	createStatuses []int
 	byEmailStatus  int    // status for GET /api/v2/users-by-email
 	byEmailResp    string // body for GET /api/v2/users-by-email
+	deleteStatus   int    // status for DELETE /api/v2/users/{id}; 0 means 204
 	linkStatus     int    // status for POST /api/v2/users/{id}/identities
 	patchStatus    int    // status for PATCH /api/v2/users/{id}
 	calls          []recordedCall
@@ -1061,6 +1062,9 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		status, body = f.patchStatus, "{}"
 	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		status, body = http.StatusNoContent, ""
+		if f.deleteStatus != 0 {
+			status, body = f.deleteStatus, `{"error":"delete failed"}`
+		}
 	default:
 		status, body = http.StatusNotFound, `{"error":"unexpected test route"}`
 	}
@@ -1638,6 +1642,23 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
 		})
 	}
+
+	t.Run("failed delete surfaces as an unexpected error and the create is not retried", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = orphanStub
+		ft.stubGetResp = orphanRecord
+		ft.deleteStatus = http.StatusInternalServerError
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		var validationErr apperrors.Validation
+		assert.NotErrorAs(t, err, &validationErr)
+		assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))
+		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+	})
 
 	t.Run("stub already gone before delete still retries the create", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
