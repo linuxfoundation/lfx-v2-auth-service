@@ -5,14 +5,55 @@ package mock
 
 import (
 	"context"
+	stderrors "errors"
 	"strings"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	jwtpkg "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 )
+
+// TestUserReaderWriter_MetadataLookup_ScopeGatedRejected verifies that the mock,
+// which cannot verify tokens, never authorizes a write (scope-gated) lookup.
+func TestUserReaderWriter_MetadataLookup_ScopeGatedRejected(t *testing.T) {
+	ctx := context.Background()
+	writer := &userWriter{}
+	unverifiedJWT := createTestJWT(t, "auth0|123456789")
+
+	for name, input := range map[string]string{
+		"unverified JWT": unverifiedJWT,
+		"bare sub":       "auth0|123456789",
+		"username":       "john.doe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input, constants.UserUpdateIdentityRequiredScope)
+			if user != nil {
+				t.Errorf("MetadataLookup() returned user %+v, expected nil", user)
+			}
+			var unauthorized errors.Unauthorized
+			if !stderrors.As(err, &unauthorized) {
+				t.Errorf("MetadataLookup() error = %v, expected Unauthorized", err)
+			}
+		})
+	}
+
+	t.Run("read lookup without scopes still resolves the JWT sub", func(t *testing.T) {
+		user, err := writer.MetadataLookup(ctx, unverifiedJWT)
+		if err != nil {
+			t.Fatalf("MetadataLookup() unexpected error: %v", err)
+		}
+		if user.UserID != "auth0|123456789" {
+			t.Errorf("MetadataLookup() UserID = %q, expected %q", user.UserID, "auth0|123456789")
+		}
+		if user.Token != "" {
+			t.Errorf("MetadataLookup() Token = %q, expected empty", user.Token)
+		}
+	})
+}
 
 // TestUserReaderWriter_MetadataLookup tests the MetadataLookup method for Mock implementation
 func TestUserReaderWriter_MetadataLookup(t *testing.T) {

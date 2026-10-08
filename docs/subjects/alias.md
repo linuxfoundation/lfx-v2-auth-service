@@ -135,7 +135,7 @@ nats request lfx.auth-service.add_alias \
 | Provider | Support |
 |----------|---------|
 | Auth0    | Full — creates a system-managed stub on the `email` connection, links it, and rolls back on link failure |
-| Mock     | Simulated — appends an `email`-connection identity and enforces the same unlink guard |
+| Mock     | Refused — the mock cannot verify tokens, so it rejects `add_alias` requests |
 | Authelia | Not supported — returns `alias service unavailable` |
 
 ### Environment Configuration

@@ -613,6 +613,14 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 		return nil, errors.NewValidation("input is required")
 	}
 
+	// Scope-gated lookups authorize writes. The mock parses JWTs without
+	// verifying their signature or scopes, so it can never prove who the caller
+	// is and must not authorize a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "mock: scope-gated metadata lookup rejected: token verification is not supported")
+		return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
+	}
+
 	user := &model.User{}
 
 	// First, try to parse as JWT token to extract the sub
@@ -622,10 +630,8 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 			slog.WarnContext(ctx, "mock: failed to parse JWT, treating as regular input", "error", err)
 			// If JWT parsing fails, fall back to regular input processing
 		} else {
-			// Successfully extracted sub from JWT. Carry the token so write
-			// handlers, which require a token-established principal, accept it.
+			// Successfully extracted sub from JWT
 			input = sub
-			user.Token = cleanToken
 			slog.InfoContext(ctx, "mock: extracted sub from JWT", "sub", sub)
 		}
 	}

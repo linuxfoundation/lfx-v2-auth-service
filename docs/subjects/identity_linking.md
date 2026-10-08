@@ -67,7 +67,7 @@ Retrieves all identities linked to the authenticated user's account.
 |---|---|
 | **Auth0** | Fetched live from the Auth0 Management API on each call |
 | **Authelia** | Read from the NATS KV user bucket; populated when `user_identity.link` is called |
-| **Mock** | Pre-seeded via `users.yaml` or added at runtime via `user_identity.link` |
+| **Mock** | Pre-seeded via `users.yaml`; `user_identity.link` is refused because the mock cannot verify tokens |
 
 ### Example using NATS CLI
 
