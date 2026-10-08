@@ -14,6 +14,9 @@ import (
 // jwtPattern matches JWT tokens (three base64url segments separated by dots)
 var jwtPattern = regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)
 
+// uuidPattern matches UUID-shaped tokens (e.g. CDP member ids) in any case.
+var uuidPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+
 // Redact redacts sensitive information for logging and output purposes.
 // Shows the first 3 characters when the string has more than 5 characters,
 // otherwise shows asterisks for shorter strings.
@@ -56,6 +59,12 @@ func Redact(sensitive string) string {
 // Useful for sanitizing request/response bodies before logging.
 func RedactJWTs(s string) string {
 	return jwtPattern.ReplaceAllString(s, "[REDACTED]")
+}
+
+// RedactUUIDs replaces any UUID-shaped tokens in the input string with their
+// Redact form, for free text such as upstream error messages.
+func RedactUUIDs(s string) string {
+	return uuidPattern.ReplaceAllStringFunc(s, Redact)
 }
 
 // RedactEmail redacts email addresses for logging and output purposes.
