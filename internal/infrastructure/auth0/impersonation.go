@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,10 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
+// canImpersonateClaim is the custom claim an LFX V2 access token must carry,
+// set to boolean true, for its bearer to be allowed to impersonate other users.
+const canImpersonateClaim = "http://lfx.dev/claims/can_impersonate"
+
 // impersonationFlow performs Auth0 Custom Token Exchange for LFX impersonation.
 type impersonationFlow struct {
 	clientID   string
@@ -34,7 +39,11 @@ type impersonationFlow struct {
 	// lfxV2Audience is the LFX V2 API identifier used as both subject_token_type
 	// and audience in the Custom Token Exchange request.
 	lfxV2Audience string
-	httpClient    *httpclient.Client
+	// subjectTokenVerifier verifies the caller-supplied subject_token against the
+	// tenant JWKS, issuer and the LFX V2 API audience before the service lends
+	// its M2M client assertion to the exchange.
+	subjectTokenVerifier *JWTVerificationConfig
+	httpClient           *httpclient.Client
 }
 
 type cteResponse struct {
@@ -74,6 +83,13 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 		return nil, errors.NewUnexpected("failed to parse private key", err)
 	}
 
+	httpClient := httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second})
+
+	jwtConfig, err := NewJWTVerificationConfig(ctx, domain, httpClient)
+	if err != nil {
+		return nil, errors.NewUnexpected("failed to create subject token verification config", err)
+	}
+
 	slog.DebugContext(ctx, "impersonation flow initialized",
 		"client_id", clientID,
 		"domain", domain,
@@ -85,14 +101,78 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 		privateKey:    rsaKey,
 		domain:        domain,
 		lfxV2Audience: lfxV2Audience,
-		httpClient:    httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second}),
+		// Only LFX V2 API tokens are valid subject tokens: the exchange declares
+		// subject_token_type as the LFX V2 audience, so Management API tokens
+		// (accepted elsewhere via audienceAllowList) are deliberately excluded.
+		subjectTokenVerifier: &JWTVerificationConfig{
+			PublicKey:         jwtConfig.PublicKey,
+			ExpectedIssuer:    jwtConfig.ExpectedIssuer,
+			ExpectedAudiences: []string{lfxV2Audience},
+			JWKSURL:           jwtConfig.JWKSURL,
+		},
+		httpClient: httpClient,
 	}, nil
+}
+
+// authorizeSubjectToken verifies that subjectToken is a genuine, unexpired LFX
+// V2 access token issued by this tenant and that its bearer is permitted to
+// impersonate. It fails closed if the verifier is not fully configured.
+func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectToken string) error {
+	v := f.subjectTokenVerifier
+	if v == nil || v.PublicKey == nil || strings.TrimSpace(v.ExpectedIssuer) == "" ||
+		len(v.ExpectedAudiences) == 0 || slices.Contains(v.ExpectedAudiences, "") {
+		return errors.NewUnexpected("subject token verification is not configured")
+	}
+
+	// The token is forwarded to Auth0 as-is, so accept only the compact JWS form
+	// the verifier sees unchanged (no Bearer prefix or JSON serialization).
+	if !isCompactJWS(subjectToken) {
+		return errors.NewUnauthorized("invalid subject_token")
+	}
+
+	// JWTVerify logs the specific failure; the reply stays generic.
+	claims, err := v.JWTVerify(ctx, subjectToken)
+	if err != nil {
+		return errors.NewUnauthorized("invalid subject_token")
+	}
+
+	canImpersonate, _ := claims.GetClaim(canImpersonateClaim)
+	if allowed, ok := canImpersonate.(bool); !ok || !allowed {
+		slog.WarnContext(ctx, "impersonation denied: subject token lacks impersonation permission",
+			"sub", redaction.Redact(claims.Subject),
+		)
+		return errors.NewForbidden("subject_token is not authorized to impersonate")
+	}
+
+	return nil
+}
+
+// isCompactJWS reports whether token is three base64url segments joined by dots.
+func isCompactJWS(token string) bool {
+	if strings.Count(token, ".") != 2 {
+		return false
+	}
+	for _, r := range token {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ImpersonateUser exchanges subjectToken (a valid LFX V2 access token belonging
 // to an authorized impersonator) for a new LFX V2 access token representing
-// targetUser (email or username).
+// targetUser (email or username). The subject token is verified and its
+// impersonation permission checked before the service's client credentials are
+// used; an unauthorized request never reaches the token endpoint.
 func (f *impersonationFlow) ImpersonateUser(ctx context.Context, subjectToken, targetUser string) (string, error) {
+	if err := f.authorizeSubjectToken(ctx, subjectToken); err != nil {
+		return "", err
+	}
+
 	slog.DebugContext(ctx, "performing impersonation token exchange",
 		"target_user", redaction.RedactEmail(targetUser),
 	)
