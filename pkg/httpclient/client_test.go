@@ -281,6 +281,8 @@ func TestParseRetryAfter(t *testing.T) {
 		{"at the ceiling", "300", MaxRetryAfter},
 		{"beyond the ceiling", "1000000000", MaxRetryAfter},
 		{"large enough to overflow a duration", "10000000000", MaxRetryAfter},
+		{"too large for an int", "99999999999999999999", MaxRetryAfter},
+		{"too negative for an int", "-99999999999999999999", 0},
 	}
 
 	for _, tt := range tests {

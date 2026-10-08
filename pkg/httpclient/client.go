@@ -101,6 +101,9 @@ func ParseRetryAfter(header http.Header) time.Duration {
 			return MaxRetryAfter
 		}
 		return time.Duration(seconds) * time.Second
+	} else if stderrors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+		// Too large even for an int, so further out than the ceiling.
+		return MaxRetryAfter
 	}
 	if deadline, err := http.ParseTime(raw); err == nil {
 		if wait := time.Until(deadline); wait > 0 {
