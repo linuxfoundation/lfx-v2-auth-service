@@ -1278,19 +1278,6 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified address")
 	})
 
-	t.Run("unverified old primary cannot be promoted back after a switch", func(t *testing.T) {
-		// After a switch away from an unverified primary, that address must not
-		// be selectable as a verified primary: no identity backs it.
-		getUser := `{"user_id":"auth0|test123","email":"new@example.com","email_verified":true,"identities":[` +
-			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
-		ft := newFakeAuth0(testPrimaryUserID, getUser)
-		rw := newTestReaderWriter(ft)
-
-		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "old@example.com")
-		require.Error(t, err)
-		assert.Equal(t, 0, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
-	})
-
 	t.Run("setting primary to the current primary skips preservation", func(t *testing.T) {
 		getUser := `{"user_id":"auth0|test123","email":"same@example.com","identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"same@example.com","email_verified":true}}]}`

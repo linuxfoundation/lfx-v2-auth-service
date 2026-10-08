@@ -410,12 +410,32 @@ func TestProvisionFlow(t *testing.T) {
 		assert.Zero(t, store.calls)
 	})
 
+	t.Run("an unverified carry of the user's own LFID is not proof of ownership", func(t *testing.T) {
+		// Resolve consults verified identities only, so a member whose copy of
+		// this LFID is unverified still matched on the email alone.
+		client := &mockCDPClient{
+			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
+			identities: []cdp.MemberIdentity{
+				{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+			},
+		}
+		store := &mockMetadataStore{}
+
+		result, err := newTestOrchestrator(client, store).Provision(ctx, verifiedRequest())
+
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSkipped, result.Outcome)
+		assert.Equal(t, reasonMemberLacksOwnLFID, result.Reason)
+		assert.Zero(t, client.attachCalls)
+		assert.Zero(t, store.calls)
+	})
+
 	t.Run("the user's own LFID on the member does not block the attach", func(t *testing.T) {
 		// Re-delivery is at-least-once, so the identity may already be there.
 		client := &mockCDPClient{
 			resolveResults: []cdp.ResolveResult{{Outcome: cdp.OutcomeFound, MemberID: "MEM-1"}},
 			identities: []cdp.MemberIdentity{
-				{Value: "PSmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername},
+				{Value: "PSmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername, Verified: true},
 				{Value: "psmith@example.org", Platform: constants.LFIDPlatform, Type: "email"},
 				{Value: "someoneelse", Platform: "github", Type: constants.CDPIdentityTypeUsername},
 			},
@@ -458,7 +478,7 @@ func TestProvisionFlow(t *testing.T) {
 			attachResult:   cdp.AttachResult{Outcome: cdp.OutcomeConflict, ConflictMemberID: "MEM-2"},
 			identitiesByMember: map[string][]cdp.MemberIdentity{
 				"MEM-1": ownLFID(),
-				"MEM-2": {{Value: "psmith", Platform: constants.LFIDPlatform, Type: constants.CDPIdentityTypeUsername}},
+				"MEM-2": ownLFID(),
 			},
 		}
 		store := &mockMetadataStore{}

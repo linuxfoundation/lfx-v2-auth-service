@@ -98,9 +98,10 @@ const (
 	reasonLFIDOnAnotherMember = "cdp-lfid-on-another-member"
 
 	// reasonMemberLacksOwnLFID marks a resolve match that does not hold this
-	// user's LFID, so it can only have matched on the email arm. An email
-	// match alone proves nothing about who owns the member — the same rule
-	// merge-repair applies to a repair target — so it is never adopted.
+	// user's LFID as a verified identity, so it can only have matched on the
+	// email arm. An email match alone proves nothing about who owns the
+	// member — the same verified-own-LFID rule merge-repair applies to a
+	// repair target — so it is never adopted.
 	reasonMemberLacksOwnLFID = "cdp-member-lacks-own-lfid"
 )
 
@@ -276,11 +277,12 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
 		}
-		if !cdpidentity.HoldsLFID(held, username) {
+		if !cdpidentity.HoldsVerifiedLFID(held, username) {
 			// Resolve filters verified identities on both arms, so a member
-			// without this LFID matched on the email alone. That is not proof
-			// the member is this person: attaching would stamp this LFID as
-			// verified on someone else's profile and store it write-once.
+			// without this LFID verified matched on the email alone. That is
+			// not proof the member is this person: attaching would stamp this
+			// LFID as verified on someone else's profile and store it
+			// write-once.
 			slog.WarnContext(ctx, "CDP member matched only on email and does not hold this LFID, skipping provisioning",
 				"user_id", redaction.Redact(req.UserID),
 				"member_id", redaction.Redact(resolved.MemberID),
@@ -392,7 +394,7 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
 		}
-		if !cdpidentity.HoldsLFID(held, username) {
+		if !cdpidentity.HoldsVerifiedLFID(held, username) {
 			// The 409 says the identity is attached somewhere, and a
 			// single-member re-resolve should be the member holding it. One
 			// that does not hold it matched on the email alone, which is not
@@ -453,7 +455,7 @@ func (o *orchestrator) adoptConflictMember(
 		return "", skip(reasonLFIDOnAnotherMember), nil
 	}
 
-	if !cdpidentity.HoldsLFID(held, username) {
+	if !cdpidentity.HoldsVerifiedLFID(held, username) {
 		// It was named as the holder of this LFID and does not hold it, so the
 		// two answers disagree and neither is worth making permanent.
 		slog.WarnContext(ctx, "the conflicting CDP member does not hold this LFID, skipping provisioning",
