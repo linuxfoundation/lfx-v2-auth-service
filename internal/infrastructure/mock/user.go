@@ -622,8 +622,10 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 			slog.WarnContext(ctx, "mock: failed to parse JWT, treating as regular input", "error", err)
 			// If JWT parsing fails, fall back to regular input processing
 		} else {
-			// Successfully extracted sub from JWT
+			// Successfully extracted sub from JWT. Carry the token so write
+			// handlers, which require a token-established principal, accept it.
 			input = sub
+			user.Token = cleanToken
 			slog.InfoContext(ctx, "mock: extracted sub from JWT", "sub", sub)
 		}
 	}
