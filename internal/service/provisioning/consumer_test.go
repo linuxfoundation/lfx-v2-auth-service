@@ -362,6 +362,31 @@ func TestConsumerRunRateLimit(t *testing.T) {
 		assert.Zero(t, offsets.clears, "a rate limit is not a reason to discard the position")
 	})
 
+	t.Run("an oversized Retry-After is capped and the consumer reconnects", func(t *testing.T) {
+		// The hint is upstream input. Honouring it verbatim would park the only
+		// stream reader, still holding the Lease, for as long as it asked.
+		events := &mockEventsClient{
+			errs: []error{errs.NewRateLimited("CDP resolve was rate limited", 1000*time.Hour)},
+		}
+		offsets := &mockOffsetStore{offset: "o1"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+		consumer.maxRateLimitWait = 5 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		go func() {
+			for len(events.subscribeCalls()) < 2 && ctx.Err() == nil {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		consumer.Run(ctx)
+
+		calls := events.subscribeCalls()
+		require.GreaterOrEqual(t, len(calls), 2, "the consumer must reconnect within the capped wait")
+		assert.Equal(t, "o1", calls[1].From)
+	})
+
 	t.Run("repeated rate limits do not exhaust the barren-offset guard", func(t *testing.T) {
 		// A 429 is answered before Auth0 ever looks at the offset, so a run of
 		// them delivers nothing and looks exactly like a poisoned cursor. They
