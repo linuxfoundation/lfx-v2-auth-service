@@ -747,8 +747,36 @@ func TestUserWriter_SetPrimaryEmail(t *testing.T) {
 	})
 }
 
+// TestUserWriter_UpdateUser_Rejected verifies that the mock, which cannot
+// verify tokens, refuses user updates and leaves the store untouched.
+func TestUserWriter_UpdateUser_Rejected(t *testing.T) {
+	ctx := context.Background()
+
+	existing := &model.User{
+		UserID:       "auth0|u1",
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Jane Doe")},
+	}
+	writer := &userWriter{users: map[string]*model.User{"auth0|u1": existing}}
+
+	updated, err := writer.UpdateUser(ctx, &model.User{
+		Token:        "unverified-token",
+		UserID:       "auth0|u1",
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
+	})
+	if updated != nil {
+		t.Errorf("UpdateUser() returned user %+v, expected nil", updated)
+	}
+	var unauthorized errors.Unauthorized
+	if !stderrors.As(err, &unauthorized) {
+		t.Errorf("UpdateUser() error = %v, expected Unauthorized", err)
+	}
+	if *writer.users["auth0|u1"].UserMetadata.Name != "Jane Doe" {
+		t.Error("UpdateUser() must not modify the stored user")
+	}
+}
+
 // TestUserWriter_UpdateUser_Skills verifies that the mock adapter's manual
-// PATCH-semantics field list (UpdateUser) picks up the Skills field: both in
+// PATCH-semantics field list (applyUpdate) picks up the Skills field: both in
 // the returned user and in what ends up persisted in the in-memory store.
 func TestUserWriter_UpdateUser_Skills(t *testing.T) {
 	ctx := context.Background()
@@ -763,7 +791,7 @@ func TestUserWriter_UpdateUser_Skills(t *testing.T) {
 		},
 	}}
 
-	updated, err := writer.UpdateUser(ctx, &model.User{
+	updated, err := writer.applyUpdate(ctx, &model.User{
 		UserID: "auth0|u1",
 		UserMetadata: &model.UserMetadata{
 			Skills: converters.StringPtr("Rust, Kubernetes"),

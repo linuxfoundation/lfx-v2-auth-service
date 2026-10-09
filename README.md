@@ -92,7 +92,7 @@ The Auth0 integration can be configured using environment variables:
 
 - `USER_REPOSITORY_TYPE`: Set to `"auth0"` to use Auth0 integration, or `"mock"` for local development
   - **If not set, defaults to `"mock"`**
-  - The mock backend cannot verify tokens, so it refuses requests that change a user's account (for example setting the primary email, adding an alias, password changes, and identity linking)
+  - The mock backend cannot verify tokens, so it refuses requests that change a user's account (for example updating user metadata, setting the primary email, adding an alias, password changes, and identity linking)
 - `AUTH0_TENANT`: Auth0 tenant name (e.g., `"linuxfoundation"`, `"linuxfoundation-staging"`, `"linuxfoundation-dev"`)
   - **Required when using Auth0 repository type**
 - `AUTH0_DOMAIN`: Auth0 domain for Management API calls (e.g., `"sso.linuxfoundation.org"`)

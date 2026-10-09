@@ -114,8 +114,16 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	return result, nil
 }
 
-// UpdateUser applies the provided changes to a mock user record.
+// UpdateUser refuses user_metadata.update requests. The mock cannot verify
+// the caller's token, so it must never let a caller change an account.
 func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
+	slog.WarnContext(ctx, "mock: user update rejected: token verification is not supported")
+	return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
+}
+
+// applyUpdate applies the provided changes to a mock user record with
+// PATCH semantics.
+func (u *userWriter) applyUpdate(ctx context.Context, user *model.User) (*model.User, error) {
 	slog.InfoContext(ctx, "mock: updating user", "user", user)
 
 	// For mock implementation, we'll use user_id, sub, username, or primary email as key
