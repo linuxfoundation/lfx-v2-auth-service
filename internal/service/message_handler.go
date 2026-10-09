@@ -140,8 +140,9 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 const errUnverifiedPrincipal = "a valid JWT token is required"
 
 // isVerifiedPrincipal reports whether the user returned by a scope-gated
-// MetadataLookup was established from the caller's token (signature-verified
-// in the production backends). A bare sub or username leaves Token empty and
+// MetadataLookup was established from the caller's token, which the backend
+// verified (a signed JWT for Auth0, the OIDC userinfo endpoint for Authelia).
+// A bare sub or username leaves Token empty and
 // must never authorize a write performed with service credentials.
 func isVerifiedPrincipal(user *model.User) bool {
 	return user != nil && strings.TrimSpace(user.UserID) != "" && strings.TrimSpace(user.Token) != ""
