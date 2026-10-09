@@ -1758,6 +1758,28 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))
 		assert.Equal(t, 1, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
 	})
+
+	t.Run("set primary never reconciles an unverified old primary", func(t *testing.T) {
+		// Neither the root email nor any identity proves ownership of the old
+		// primary, so it must not be preserved: no create, no stub lookup, no
+		// delete, and no verified identity minted for it, even though an aged
+		// orphan holding that address would otherwise qualify for cleanup.
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","email_verified":false,"identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@example.org","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.stubGetResp = orphanRecord
+		ft.byEmailResp = orphanStub
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@example.org")
+		require.NoError(t, err)
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified old primary")
+		assert.Equal(t, 0, ft.countFor(http.MethodGet, "/api/v2/users-by-email"), "reconciliation must not run")
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""), "no user may be deleted")
+		assert.Equal(t, 1, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
+	})
 }
 
 func TestUserReaderWriter_DeleteSystemManagedUser(t *testing.T) {
