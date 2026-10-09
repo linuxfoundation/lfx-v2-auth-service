@@ -5,6 +5,8 @@ package auth0
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -246,6 +248,14 @@ func TestImpersonateUser_RejectsUnauthorizedSubjectTokens(t *testing.T) {
 	tenantPubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: tenantPubDER})
 	algConfused := signToken(t, jwt.SigningMethodHS256, tenantPubPEM, testTenantKID, subjectClaims(nil))
 	valid := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+	// RS256 signature by the tenant key under a header claiming another alg.
+	mislabeled := jwt.NewWithClaims(jwt.SigningMethodRS256, subjectClaims(nil))
+	mislabeled.Header["kid"] = testTenantKID
+	mislabeled.Header["alg"] = "PS256"
+	mislabeledToken, err := mislabeled.SignedString(tenantKey)
+	if err != nil {
+		t.Fatalf("failed to sign mislabeled token: %v", err)
+	}
 
 	tests := []struct {
 		name          string
@@ -258,6 +268,7 @@ func TestImpersonateUser_RejectsUnauthorizedSubjectTokens(t *testing.T) {
 		{name: "HS256 keyed with tenant public key", token: algConfused},
 		{name: "Bearer prefixed", token: "Bearer " + valid},
 		{name: "JSON serialized", token: `{"payload":"` + valid + `"}`},
+		{name: "header alg not RS256", token: mislabeledToken},
 		{name: "missing kid", token: signRS256(t, tenantKey, "", subjectClaims(nil))},
 		{name: "unknown kid", token: signRS256(t, attackerKey, "attacker-key", subjectClaims(nil))},
 		{name: "forged with foreign key under tenant kid", token: signRS256(t, attackerKey, testTenantKID, subjectClaims(nil))},
@@ -417,11 +428,160 @@ func TestImpersonateUser_StaleSigningKeysFailClosed(t *testing.T) {
 	clock.advance(jwksTTL)
 
 	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
-	if _, err := flow.ImpersonateUser(ctx, token, "victim@example.com"); err == nil {
-		t.Fatal("expected rejection when cached keys are stale and JWKS is unreachable")
+	var unavailable errors.ServiceUnavailable
+	if _, err := flow.ImpersonateUser(ctx, token, "victim@example.com"); !stderrors.As(err, &unavailable) {
+		t.Fatalf("expected service unavailable when cached keys are stale and JWKS is unreachable, got %v", err)
+	}
+	if fa.jwksFetches() != 2 {
+		t.Errorf("expected a refetch attempt for the stale set, got %d fetches", fa.jwksFetches())
 	}
 	if fa.calls() != 0 {
 		t.Errorf("expected no token endpoint call, got %d", fa.calls())
+	}
+}
+
+func TestImpersonateUser_EarlyRefreshSurvivesFailedFetch(t *testing.T) {
+	tenantKey := generateKey(t)
+	fa := &fakeAuth0{}
+	fa.publish(t, map[string]*rsa.PrivateKey{testTenantKID: tenantKey})
+	clock := newTestClock()
+	flow := newTestImpersonationFlow(t, fa, clock)
+	ctx := context.Background()
+	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+	// The refresh attempted after jwksRefreshAfter fails, but the cached keys
+	// are still within jwksTTL and keep verifying.
+	fa.setJWKSStatus(http.StatusInternalServerError)
+	clock.advance(jwksRefreshAfter)
+	if _, err := flow.ImpersonateUser(ctx, token, "victim@example.com"); err != nil {
+		t.Fatalf("expected cached keys to keep verifying before jwksTTL, got %v", err)
+	}
+	if fa.jwksFetches() != 2 {
+		t.Errorf("expected an early refresh attempt, got %d fetches", fa.jwksFetches())
+	}
+
+	// A later retry succeeds and renews the cache past the original jwksTTL.
+	fa.setJWKSStatus(http.StatusOK)
+	clock.advance(jwksMinRefreshInterval)
+	if _, err := flow.ImpersonateUser(ctx, token, "victim@example.com"); err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	clock.advance(jwksTTL - jwksRefreshAfter)
+	if _, err := flow.ImpersonateUser(ctx, token, "victim@example.com"); err != nil {
+		t.Fatalf("expected renewed keys to verify past the original TTL, got %v", err)
+	}
+}
+
+func TestImpersonateUser_RemovedSigningKeyStopsVerifying(t *testing.T) {
+	oldKey := generateKey(t)
+	newKey := generateKey(t)
+	fa := &fakeAuth0{}
+	fa.publish(t, map[string]*rsa.PrivateKey{"old": oldKey, "new": newKey})
+	clock := newTestClock()
+	flow := newTestImpersonationFlow(t, fa, clock)
+	ctx := context.Background()
+
+	// Auth0 drops the old key; once the cache refreshes it no longer verifies.
+	fa.publish(t, map[string]*rsa.PrivateKey{"new": newKey})
+	clock.advance(jwksRefreshAfter)
+
+	if _, err := flow.ImpersonateUser(ctx, signRS256(t, oldKey, "old", subjectClaims(nil)), "victim@example.com"); err == nil {
+		t.Fatal("expected token signed by a removed key to be rejected")
+	}
+	if _, err := flow.ImpersonateUser(ctx, signRS256(t, newKey, "new", subjectClaims(nil)), "victim@example.com"); err != nil {
+		t.Fatalf("expected token signed by the remaining key to be accepted: %v", err)
+	}
+	if fa.calls() != 1 {
+		t.Errorf("expected one token endpoint call, got %d", fa.calls())
+	}
+}
+
+func TestImpersonateUser_ConcurrentRequests(t *testing.T) {
+	tenantKey := generateKey(t)
+	attackerKey := generateKey(t)
+	fa := &fakeAuth0{}
+	fa.publish(t, map[string]*rsa.PrivateKey{testTenantKID: tenantKey})
+	clock := newTestClock()
+	flow := newTestImpersonationFlow(t, fa, clock)
+	valid := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+	forged := signRS256(t, attackerKey, "unknown", subjectClaims(nil))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := flow.ImpersonateUser(context.Background(), valid, "victim@example.com"); err != nil {
+				t.Errorf("expected valid token to be accepted: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := flow.ImpersonateUser(context.Background(), forged, "victim@example.com"); err == nil {
+				t.Error("expected forged token to be rejected")
+			}
+		}()
+	}
+	wg.Wait()
+
+	if fa.jwksFetches() != 1 {
+		t.Errorf("expected no refetch within the minimum interval, got %d fetches", fa.jwksFetches())
+	}
+	if fa.calls() != 20 {
+		t.Errorf("expected 20 token endpoint calls, got %d", fa.calls())
+	}
+}
+
+func TestRSASigningKey(t *testing.T) {
+	rsaKey := generateKey(t)
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate EC key: %v", err)
+	}
+
+	build := func(raw any, set map[string]any) jwk.Key {
+		t.Helper()
+		key, err := jwk.FromRaw(raw)
+		if err != nil {
+			t.Fatalf("failed to build JWK: %v", err)
+		}
+		for k, v := range set {
+			if err := key.Set(k, v); err != nil {
+				t.Fatalf("failed to set %s: %v", k, err)
+			}
+		}
+		return key
+	}
+
+	tests := []struct {
+		name    string
+		key     jwk.Key
+		wantErr bool
+	}{
+		{name: "RSA signing key", key: build(&rsaKey.PublicKey, map[string]any{jwk.KeyUsageKey: jwk.ForSignature, jwk.AlgorithmKey: jwa.RS256})},
+		{name: "RSA key without use or alg", key: build(&rsaKey.PublicKey, nil)},
+		{name: "encryption key", wantErr: true, key: build(&rsaKey.PublicKey, map[string]any{jwk.KeyUsageKey: jwk.ForEncryption})},
+		{name: "RS512 key", wantErr: true, key: build(&rsaKey.PublicKey, map[string]any{jwk.AlgorithmKey: jwa.RS512})},
+		{name: "PS256 key", wantErr: true, key: build(&rsaKey.PublicKey, map[string]any{jwk.AlgorithmKey: jwa.PS256})},
+		{name: "EC key", wantErr: true, key: build(&ecKey.PublicKey, nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub, err := rsaSigningKey(tt.key)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected key to be rejected")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected key to be accepted: %v", err)
+			}
+			if !pub.Equal(&rsaKey.PublicKey) {
+				t.Error("returned key does not match")
+			}
+		})
 	}
 }
 

@@ -35,9 +35,12 @@ import (
 const canImpersonateClaim = "http://lfx.dev/claims/can_impersonate"
 
 const (
-	// jwksTTL bounds how long fetched signing keys are trusted before they are
-	// refetched, so keys removed from the tenant JWKS stop verifying tokens.
+	// jwksTTL bounds how long fetched signing keys are trusted, so keys removed
+	// from the tenant JWKS stop verifying tokens.
 	jwksTTL = time.Hour
+	// jwksRefreshAfter is when a refetch is first attempted, leaving retries
+	// before jwksTTL so a single failed fetch does not interrupt impersonation.
+	jwksRefreshAfter = 45 * time.Minute
 	// jwksMinRefreshInterval limits JWKS fetches triggered by unknown key IDs or
 	// failed fetches, so arbitrary tokens cannot drive request volume to Auth0.
 	jwksMinRefreshInterval = time.Minute
@@ -98,7 +101,7 @@ func (k *subjectTokenKeys) key(ctx context.Context, kid string) (*rsa.PublicKey,
 	defer k.mu.Unlock()
 
 	now := k.now()
-	if k.isFreshLocked(now) {
+	if k.isFreshLocked(now) && now.Sub(k.fetchedAt) < jwksRefreshAfter {
 		if key, ok := k.set.LookupKeyID(kid); ok {
 			return rsaSigningKey(key)
 		}
@@ -126,6 +129,9 @@ func (k *subjectTokenKeys) isFreshLocked(now time.Time) bool {
 func (k *subjectTokenKeys) attemptRefreshLocked(ctx context.Context, now time.Time) {
 	k.lastAttempt = now
 
+	// The fetch serves every later request, so a caller's cancellation must not
+	// abort it; the HTTP client's own timeout still bounds it.
+	ctx = context.WithoutCancel(ctx)
 	resp, err := k.httpClient.Do(ctx, httpclient.Request{Method: http.MethodGet, URL: k.jwksURL})
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
@@ -242,8 +248,9 @@ func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectTo
 	if err != nil || len(msg.Signatures()) != 1 {
 		return errors.NewUnauthorized("invalid subject_token")
 	}
-	kid := msg.Signatures()[0].ProtectedHeaders().KeyID()
-	if kid == "" {
+	headers := msg.Signatures()[0].ProtectedHeaders()
+	kid := headers.KeyID()
+	if kid == "" || headers.Algorithm() != jwa.RS256 {
 		return errors.NewUnauthorized("invalid subject_token")
 	}
 
