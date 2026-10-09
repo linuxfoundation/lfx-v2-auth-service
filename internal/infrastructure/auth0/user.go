@@ -775,7 +775,15 @@ func isOrphanedEmailStub(user *Auth0User, email string) bool {
 	if user.AppMetadata != nil && user.AppMetadata.SystemManaged {
 		return false
 	}
-	return len(user.Identities) == 1 && user.Identities[0].Connection == constants.EmailConnection
+	if len(user.Identities) != 1 || user.Identities[0].Connection != constants.EmailConnection {
+		return false
+	}
+	// The identity's own verification flag can be set even when the root flag
+	// is not; either one means the address was proven and is a genuine claim.
+	if pd := user.Identities[0].ProfileData; pd != nil && pd.EmailVerified {
+		return false
+	}
+	return true
 }
 
 // deleteOrphanedEmailStub deletes userID only if a fresh read still shows it as

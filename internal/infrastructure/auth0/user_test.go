@@ -1561,6 +1561,11 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 				`"app_metadata":{"system_managed":true},"identities":[{"connection":"email","provider":"email"}]}]`,
 		},
 		{
+			name: "identity-verified email user",
+			resp: `[{"user_id":"email|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
+				`"identities":[{"connection":"email","provider":"email","profileData":{"email":"alias@linux.com","email_verified":true}}]}]`,
+		},
+		{
 			name: "user with linked identities",
 			resp: `[{"user_id":"email|u1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
 				`"identities":[{"connection":"email","provider":"email"},{"connection":"github","provider":"github"}]}]`,
@@ -1652,6 +1657,11 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			name: "verified",
 			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":true,` +
 				`"identities":[{"connection":"email","provider":"email"}]}`,
+		},
+		{
+			name: "identity-verified",
+			fresh: `{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,` +
+				`"identities":[{"connection":"email","provider":"email","profileData":{"email":"alias@linux.com","email_verified":true}}]}`,
 		},
 		{
 			name: "system-managed",
