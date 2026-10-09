@@ -101,8 +101,6 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	}
 }
 
-// TestUserReaderWriter_GetUser_Identities tests that GetUser correctly returns the identities
-// stored in the backing store without any transformation.
 // newUserInfoTestWriter returns a userReaderWriter whose OIDC userinfo
 // endpoint answers for the given bearer tokens and rejects any other token.
 func newUserInfoTestWriter(t *testing.T, storage *mockStorageReaderWriter, tokens map[string]OIDCUserInfo) *userReaderWriter {
@@ -156,21 +154,30 @@ func TestUserWriter_UpdateUser_RequiresVerifiedIdentity(t *testing.T) {
 		})
 	}
 
-	t.Run("caller-supplied username is ignored in favour of the token identity", func(t *testing.T) {
+	t.Run("caller-supplied identity is ignored in favour of the token identity", func(t *testing.T) {
 		storage := newStorage()
 		rw := newUserInfoTestWriter(t, storage, tokens)
-		result, err := rw.UpdateUser(ctx, &model.User{
+		input := &model.User{
 			Token:        "authelia_at_attacker",
+			UserID:       "victim-sub",
+			Sub:          "victim-sub",
 			Username:     "victim",
 			UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
-		})
+		}
+		result, err := rw.UpdateUser(ctx, input)
 		require.NoError(t, err)
 		assert.Equal(t, "attacker", result.Username)
+		// The handler publishes input.UserID downstream, so it must carry the
+		// verified identity rather than the caller-supplied one.
+		assert.Equal(t, "attacker-sub", input.UserID)
+		assert.Equal(t, "attacker-sub", input.Sub)
 		assert.Equal(t, "Victim", *storage.users["victim"].UserMetadata.Name)
 		assert.Equal(t, "Mallory", *storage.users["attacker"].UserMetadata.Name)
 	})
 }
 
+// TestUserReaderWriter_GetUser_Identities tests that GetUser correctly returns the identities
+// stored in the backing store without any transformation.
 func TestUserReaderWriter_GetUser_Identities(t *testing.T) {
 	ctx := context.Background()
 

@@ -210,6 +210,7 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	if userInfo == nil || strings.TrimSpace(userInfo.Sub) == "" || strings.TrimSpace(userInfo.PreferredUsername) == "" {
 		return nil, errs.NewUnauthorized("a valid token is required")
 	}
+	user.UserID = userInfo.Sub
 	user.Sub = userInfo.Sub
 	user.Username = userInfo.PreferredUsername
 	slog.DebugContext(ctx, "resolved user from OIDC userinfo",
