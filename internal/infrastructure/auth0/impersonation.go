@@ -14,12 +14,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/lestrrat-go/jwx/v2/jwa"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -31,6 +34,15 @@ import (
 // set to boolean true, for its bearer to be allowed to impersonate other users.
 const canImpersonateClaim = "http://lfx.dev/claims/can_impersonate"
 
+const (
+	// jwksTTL bounds how long fetched signing keys are trusted before they are
+	// refetched, so keys removed from the tenant JWKS stop verifying tokens.
+	jwksTTL = time.Hour
+	// jwksMinRefreshInterval limits JWKS fetches triggered by unknown key IDs or
+	// failed fetches, so arbitrary tokens cannot drive request volume to Auth0.
+	jwksMinRefreshInterval = time.Minute
+)
+
 // impersonationFlow performs Auth0 Custom Token Exchange for LFX impersonation.
 type impersonationFlow struct {
 	clientID   string
@@ -39,11 +51,118 @@ type impersonationFlow struct {
 	// lfxV2Audience is the LFX V2 API identifier used as both subject_token_type
 	// and audience in the Custom Token Exchange request.
 	lfxV2Audience string
-	// subjectTokenVerifier verifies the caller-supplied subject_token against the
-	// tenant JWKS, issuer and the LFX V2 API audience before the service lends
-	// its M2M client assertion to the exchange.
-	subjectTokenVerifier *JWTVerificationConfig
-	httpClient           *httpclient.Client
+	// issuer is the expected 'iss' of subject tokens (https://<domain>/).
+	issuer string
+	// subjectKeys supplies the tenant signing keys used to verify the
+	// caller-supplied subject_token before the service lends its M2M client
+	// assertion to the exchange.
+	subjectKeys *subjectTokenKeys
+	httpClient  *httpclient.Client
+}
+
+// subjectTokenKeys caches the tenant JWKS and selects verification keys by key
+// ID, refetching when the cache is stale or a token names an unknown key so
+// Auth0 signing key rotation does not require a restart.
+type subjectTokenKeys struct {
+	jwksURL    string
+	httpClient *httpclient.Client
+	now        func() time.Time
+
+	mu          sync.Mutex
+	set         jwk.Set
+	fetchedAt   time.Time
+	lastAttempt time.Time
+}
+
+func newSubjectTokenKeys(domain string, httpClient *httpclient.Client) *subjectTokenKeys {
+	return &subjectTokenKeys{
+		jwksURL:    "https://" + domain + "/.well-known/jwks.json",
+		httpClient: httpClient,
+		now:        time.Now,
+	}
+}
+
+// prefetch loads the JWKS ahead of the first request. A failure is logged and
+// retried on demand, so a transient outage at startup does not disable
+// impersonation for the life of the process.
+func (k *subjectTokenKeys) prefetch(ctx context.Context) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.attemptRefreshLocked(ctx, k.now())
+}
+
+// key returns the RSA signing key published under kid. It fails closed when no
+// JWKS fetched within jwksTTL is available.
+func (k *subjectTokenKeys) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	now := k.now()
+	if k.isFreshLocked(now) {
+		if key, ok := k.set.LookupKeyID(kid); ok {
+			return rsaSigningKey(key)
+		}
+	}
+
+	if k.lastAttempt.IsZero() || now.Sub(k.lastAttempt) >= jwksMinRefreshInterval {
+		k.attemptRefreshLocked(ctx, now)
+	}
+
+	if !k.isFreshLocked(now) {
+		return nil, errors.NewServiceUnavailable("impersonation signing keys are unavailable")
+	}
+	key, ok := k.set.LookupKeyID(kid)
+	if !ok {
+		return nil, errors.NewUnauthorized("invalid subject_token")
+	}
+	return rsaSigningKey(key)
+}
+
+func (k *subjectTokenKeys) isFreshLocked(now time.Time) bool {
+	return k.set != nil && now.Sub(k.fetchedAt) < jwksTTL
+}
+
+// attemptRefreshLocked fetches the JWKS, keeping the cached set on failure.
+func (k *subjectTokenKeys) attemptRefreshLocked(ctx context.Context, now time.Time) {
+	k.lastAttempt = now
+
+	resp, err := k.httpClient.Do(ctx, httpclient.Request{Method: http.MethodGet, URL: k.jwksURL})
+	if err == nil && resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
+	}
+	var set jwk.Set
+	if err == nil {
+		set, err = jwk.Parse(resp.Body)
+	}
+	if err == nil && set.Len() == 0 {
+		err = fmt.Errorf("JWKS contains no keys")
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "failed to fetch impersonation signing keys", "error", err)
+		return
+	}
+
+	k.set = set
+	k.fetchedAt = now
+}
+
+// rsaSigningKey returns key as an RSA public key if it is usable for RS256
+// signature verification.
+func rsaSigningKey(key jwk.Key) (*rsa.PublicKey, error) {
+	if key.KeyType() != jwa.RSA {
+		return nil, errors.NewUnauthorized("invalid subject_token")
+	}
+	if use := key.KeyUsage(); use != "" && use != string(jwk.ForSignature) {
+		return nil, errors.NewUnauthorized("invalid subject_token")
+	}
+	if alg := key.Algorithm().String(); alg != "" && alg != jwa.RS256.String() {
+		return nil, errors.NewUnauthorized("invalid subject_token")
+	}
+	var pub rsa.PublicKey
+	if err := key.Raw(&pub); err != nil {
+		return nil, errors.NewUnauthorized("invalid subject_token")
+	}
+	return &pub, nil
 }
 
 type cteResponse struct {
@@ -85,10 +204,8 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 
 	httpClient := httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second})
 
-	jwtConfig, err := NewJWTVerificationConfig(ctx, domain, httpClient)
-	if err != nil {
-		return nil, errors.NewUnexpected("failed to create subject token verification config", err)
-	}
+	subjectKeys := newSubjectTokenKeys(domain, httpClient)
+	subjectKeys.prefetch(ctx)
 
 	slog.DebugContext(ctx, "impersonation flow initialized",
 		"client_id", clientID,
@@ -101,16 +218,9 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 		privateKey:    rsaKey,
 		domain:        domain,
 		lfxV2Audience: lfxV2Audience,
-		// Only LFX V2 API tokens are valid subject tokens: the exchange declares
-		// subject_token_type as the LFX V2 audience, so Management API tokens
-		// (accepted elsewhere via audienceAllowList) are deliberately excluded.
-		subjectTokenVerifier: &JWTVerificationConfig{
-			PublicKey:         jwtConfig.PublicKey,
-			ExpectedIssuer:    jwtConfig.ExpectedIssuer,
-			ExpectedAudiences: []string{lfxV2Audience},
-			JWKSURL:           jwtConfig.JWKSURL,
-		},
-		httpClient: httpClient,
+		issuer:        "https://" + domain + "/",
+		subjectKeys:   subjectKeys,
+		httpClient:    httpClient,
 	}, nil
 }
 
@@ -118,9 +228,7 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 // V2 access token issued by this tenant and that its bearer is permitted to
 // impersonate. It fails closed if the verifier is not fully configured.
 func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectToken string) error {
-	v := f.subjectTokenVerifier
-	if v == nil || v.PublicKey == nil || strings.TrimSpace(v.ExpectedIssuer) == "" ||
-		len(v.ExpectedAudiences) == 0 || slices.Contains(v.ExpectedAudiences, "") {
+	if f.subjectKeys == nil || strings.TrimSpace(f.issuer) == "" || strings.TrimSpace(f.lfxV2Audience) == "" {
 		return errors.NewUnexpected("subject token verification is not configured")
 	}
 
@@ -130,8 +238,31 @@ func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectTo
 		return errors.NewUnauthorized("invalid subject_token")
 	}
 
+	msg, err := jws.Parse([]byte(subjectToken))
+	if err != nil || len(msg.Signatures()) != 1 {
+		return errors.NewUnauthorized("invalid subject_token")
+	}
+	kid := msg.Signatures()[0].ProtectedHeaders().KeyID()
+	if kid == "" {
+		return errors.NewUnauthorized("invalid subject_token")
+	}
+
+	signingKey, err := f.subjectKeys.key(ctx, kid)
+	if err != nil {
+		return err
+	}
+
+	// Only LFX V2 API tokens are valid subject tokens: the exchange declares
+	// subject_token_type as the LFX V2 audience, so Management API tokens
+	// (accepted elsewhere via audienceAllowList) are deliberately excluded.
+	verifier := &JWTVerificationConfig{
+		PublicKey:         signingKey,
+		ExpectedIssuer:    f.issuer,
+		ExpectedAudiences: []string{f.lfxV2Audience},
+	}
+
 	// JWTVerify logs the specific failure; the reply stays generic.
-	claims, err := v.JWTVerify(ctx, subjectToken)
+	claims, err := verifier.JWTVerify(ctx, subjectToken)
 	if err != nil {
 		return errors.NewUnauthorized("invalid subject_token")
 	}
