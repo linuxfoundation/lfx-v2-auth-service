@@ -645,6 +645,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("invalid email"), nil
 	}
 
+	// Mirror the send_verification guard: alias-domain addresses are claimed
+	// only through add_alias, so a code obtained outside this service (or issued
+	// before the guard existed) cannot be exchanged for one either.
+	if isAliasDomainAddress(email.Email) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
+	}
+
 	//
 	errExists := m.checkEmailExists(ctx, email.Email)
 	if errExists != nil {
@@ -992,6 +999,17 @@ func isAllowedAliasDomain(domain string) bool {
 		}
 	}
 	return false
+}
+
+// isAliasDomainAddress reports whether address (in any form net/mail accepts)
+// has its domain listed in ALLOWED_ALIAS_DOMAINS.
+func isAliasDomainAddress(address string) bool {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	return at >= 0 && isAllowedAliasDomain(parsed.Address[at+1:])
 }
 
 // hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
