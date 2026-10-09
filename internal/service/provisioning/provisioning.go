@@ -96,6 +96,13 @@ const (
 	// refused because this LFID is verified on a different member. Kept
 	// separate from the read-side reason so the two are countable apart.
 	reasonLFIDOnAnotherMember = "cdp-lfid-on-another-member"
+
+	// reasonMemberLacksOwnLFID marks a resolve match that does not hold this
+	// user's LFID as a verified identity, so it can only have matched on the
+	// email arm. An email match alone proves nothing about who owns the
+	// member — the same verified-own-LFID rule merge-repair applies to a
+	// repair target — so it is never adopted.
+	reasonMemberLacksOwnLFID = "cdp-member-lacks-own-lfid"
 )
 
 // Orchestrator provisions a CDP identity for a verified user.
@@ -208,7 +215,9 @@ func (o *orchestrator) Provision(ctx context.Context, req Request) (Result, erro
 
 	// The email is a secondary identifier that only widens the match, so it
 	// also comes from Auth0 rather than the payload — a forged one could widen
-	// the match onto somebody else's member.
+	// the match onto somebody else's member. Even a verified one never selects
+	// the member on its own: findOrCreateMember only adopts a member that
+	// already holds this user's LFID.
 	memberID, result, err := o.findOrCreateMember(ctx, req, state, username)
 	if err != nil {
 		return Result{}, err
@@ -267,6 +276,32 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 				"existing_lfid", redaction.Redact(other),
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
+		}
+		if !cdpidentity.HoldsVerifiedLFID(held, username) {
+			// Resolve filters verified identities on both arms, so a member
+			// without this LFID verified matched on the email alone — unless
+			// the identities read is trailing the resolve, as on a replay
+			// after a create conflict. Asking again on the LFID arm alone
+			// tells the two apart: only that arm finding this same member
+			// proves it holds the LFID. Anything else is an email-only match,
+			// which is not proof the member is this person: attaching would
+			// stamp this LFID as verified on someone else's profile and store
+			// it write-once.
+			byLFID, errResolve := o.cdpClient.Resolve(ctx, username, "")
+			if errResolve != nil {
+				return "", Result{}, errResolve
+			}
+			if byLFID.Outcome != cdp.OutcomeFound || !strings.EqualFold(byLFID.MemberID, resolved.MemberID) {
+				slog.WarnContext(ctx, "CDP member matched only on email and does not hold this LFID, skipping provisioning",
+					"user_id", redaction.Redact(req.UserID),
+					"member_id", redaction.Redact(resolved.MemberID),
+				)
+				return "", skip(reasonMemberLacksOwnLFID), nil
+			}
+			slog.InfoContext(ctx, "CDP member resolves on this LFID but its identities do not show it yet",
+				"user_id", redaction.Redact(req.UserID),
+				"member_id", redaction.Redact(resolved.MemberID),
+			)
 		}
 
 		attached, errAttach := o.cdpClient.AttachIdentity(ctx, resolved.MemberID, lfidIdentity(username))
@@ -373,19 +408,20 @@ func (o *orchestrator) findOrCreateMember(ctx context.Context, req Request, stat
 			)
 			return "", skip(reasonMemberHoldsForeignLFID), nil
 		}
-		if !cdpidentity.HoldsLFID(held, username) {
-			// Should not happen: the 409 says the identity is attached
-			// somewhere, and a single-member re-resolve should be the member
-			// holding it. Logged rather than enforced because CDP's
-			// read-after-write behaviour is undocumented, so this may simply
-			// be the attach not yet visible — and refusing on an unmeasured
-			// assumption would drop users this trigger provisions correctly
-			// today. Measure it here first; gate on it once it is known.
-			slog.WarnContext(ctx, "CDP create conflicted but the resolved member does not yet show the LFID",
+		if !cdpidentity.HoldsVerifiedLFID(held, username) {
+			// The 409 says the identity is attached somewhere, and a
+			// single-member re-resolve should be the member holding it. One
+			// that does not hold it matched on the email alone, which is not
+			// proof of ownership, so it is never stored. Retried rather than
+			// skipped: CDP's read-after-write behaviour is undocumented, so
+			// this may be the attach not yet visible, and the attempt ceiling
+			// bounds a replay that keeps getting the same answer.
+			slog.WarnContext(ctx, "CDP create conflicted but the resolved member does not yet show the LFID, retrying",
 				"user_id", redaction.Redact(req.UserID),
 				"member_id", redaction.Redact(reResolved.MemberID),
 				"identities_held", len(held),
 			)
+			return "", Result{}, errs.NewUnexpected("CDP create conflicted but the resolved member does not hold the LFID")
 		}
 		return reResolved.MemberID, Result{}, nil
 	}
@@ -433,7 +469,7 @@ func (o *orchestrator) adoptConflictMember(
 		return "", skip(reasonLFIDOnAnotherMember), nil
 	}
 
-	if !cdpidentity.HoldsLFID(held, username) {
+	if !cdpidentity.HoldsVerifiedLFID(held, username) {
 		// It was named as the holder of this LFID and does not hold it, so the
 		// two answers disagree and neither is worth making permanent.
 		slog.WarnContext(ctx, "the conflicting CDP member does not hold this LFID, skipping provisioning",

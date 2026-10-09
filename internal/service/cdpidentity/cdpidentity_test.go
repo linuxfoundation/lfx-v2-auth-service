@@ -59,3 +59,25 @@ func TestHoldsLFID(t *testing.T) {
 	assert.False(t, cdpidentity.HoldsLFID([]cdp.MemberIdentity{lfid("kimmaida")}, "psmith"))
 	assert.False(t, cdpidentity.HoldsLFID(nil, "psmith"))
 }
+
+func TestHoldsVerifiedLFID(t *testing.T) {
+	lfid := func(v string, verified bool) cdp.MemberIdentity {
+		return cdp.MemberIdentity{Platform: "lfid", Type: "username", Value: v, Verified: verified}
+	}
+
+	t.Run("a verified own LFID counts", func(t *testing.T) {
+		assert.True(t, cdpidentity.HoldsVerifiedLFID([]cdp.MemberIdentity{lfid("PSmith", true)}, "psmith"))
+	})
+
+	t.Run("an unverified own LFID does not count", func(t *testing.T) {
+		assert.False(t, cdpidentity.HoldsVerifiedLFID([]cdp.MemberIdentity{lfid("psmith", false)}, "psmith"))
+	})
+
+	t.Run("a verified foreign LFID does not count", func(t *testing.T) {
+		assert.False(t, cdpidentity.HoldsVerifiedLFID([]cdp.MemberIdentity{lfid("someoneelse", true)}, "psmith"))
+	})
+
+	t.Run("no identities does not count", func(t *testing.T) {
+		assert.False(t, cdpidentity.HoldsVerifiedLFID(nil, "psmith"))
+	})
+}
