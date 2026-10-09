@@ -2996,11 +2996,29 @@ func TestMessageHandlerOrchestrator_ChangePassword(t *testing.T) {
 			},
 		},
 		{
+			name:        "principal not established from a verified token is refused",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|victim"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				changePasswordFunc: func(ctx context.Context, user *model.User, currentPassword, newPassword string) error {
+					t.Errorf("password handler must not be called for an unverified principal")
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, errUnverifiedPrincipal)
+			},
+		},
+		{
 			name:        "password handler error returns error",
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			passwordHandler: &mockPasswordHandler{
@@ -3017,7 +3035,7 @@ func TestMessageHandlerOrchestrator_ChangePassword(t *testing.T) {
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			passwordHandler: &mockPasswordHandler{
@@ -3131,11 +3149,29 @@ func TestMessageHandlerOrchestrator_SendResetPasswordLink(t *testing.T) {
 			},
 		},
 		{
+			name:        "principal not established from a verified token is refused",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|victim"}, nil
+				},
+			},
+			passwordHandler: &mockPasswordHandler{
+				sendResetPasswordLinkFunc: func(ctx context.Context, user *model.User) error {
+					t.Errorf("password handler must not be called for an unverified principal")
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, errUnverifiedPrincipal)
+			},
+		},
+		{
 			name:        "password handler error returns error",
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			passwordHandler: &mockPasswordHandler{
@@ -3152,7 +3188,7 @@ func TestMessageHandlerOrchestrator_SendResetPasswordLink(t *testing.T) {
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			passwordHandler: &mockPasswordHandler{
@@ -3281,11 +3317,30 @@ func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
 			},
 		},
 		{
+			name:        "principal not established from a verified token is refused",
+			messageData: validPayload(),
+			userReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					// A bare sub resolves to a UserID with no verified Token.
+					return &model.User{UserID: "auth0|victim"}, nil
+				},
+			},
+			userWriter: &mockUserServiceWriter{
+				setPrimaryEmailFunc: func(ctx context.Context, userID string, email string) error {
+					t.Errorf("SetPrimaryEmail must not be called for an unverified principal")
+					return nil
+				},
+			},
+			validateResult: func(t *testing.T, result []byte) {
+				assertErrorResponse(t, result, errUnverifiedPrincipal)
+			},
+		},
+		{
 			name:        "SetPrimaryEmail handler error returns error",
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			userWriter: &mockUserServiceWriter{
@@ -3302,7 +3357,7 @@ func TestMessageHandlerOrchestrator_SetPrimaryEmail(t *testing.T) {
 			messageData: validPayload(),
 			userReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123"}, nil
+					return &model.User{UserID: "auth0|123", Token: "valid-token"}, nil
 				},
 			},
 			userWriter: &mockUserServiceWriter{
@@ -3374,7 +3429,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 	defaultReader := func() *mockUserServiceReader {
 		return &mockUserServiceReader{
 			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-				return &model.User{UserID: userID, Sub: userID}, nil
+				return &model.User{UserID: userID, Sub: userID, Token: validToken}, nil
 			},
 			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 				return &model.User{UserID: userID}, nil
@@ -3430,6 +3485,30 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		reply := parseReply(t, result)
 		if reply["error"] != "auth_service_unavailable" {
 			t.Errorf("expected auth_service_unavailable, got %v", reply["error"])
+		}
+	})
+
+	t.Run("principal not established from a verified token is refused", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		reader := defaultReader()
+		reader.metadataLookupFunc = func(_ context.Context, _ string) (*model.User, error) {
+			// A bare sub resolves to a UserID with no verified Token.
+			return &model.User{UserID: userID, Sub: userID}, nil
+		}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(reader),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddAlias(ctx, msgFor(userID, "jdoe"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != errUnverifiedPrincipal {
+			t.Errorf("expected %q, got %v", errUnverifiedPrincipal, reply["error"])
+		}
+		if len(alias.calledWith) != 0 {
+			t.Errorf("AddSystemManagedEmail must not be called for an unverified principal")
 		}
 	})
 
@@ -3544,7 +3623,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		alias := &mockAliasManager{}
 		reader := &mockUserServiceReader{
 			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-				return &model.User{UserID: userID}, nil
+				return &model.User{UserID: userID, Token: validToken}, nil
 			},
 			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 				return &model.User{
@@ -3580,7 +3659,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		alias := &mockAliasManager{}
 		reader := &mockUserServiceReader{
 			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-				return &model.User{UserID: userID}, nil
+				return &model.User{UserID: userID, Token: validToken}, nil
 			},
 			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 				return &model.User{
@@ -3654,7 +3733,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		alias := &mockAliasManager{}
 		reader := &mockUserServiceReader{
 			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-				return &model.User{UserID: userID}, nil
+				return &model.User{UserID: userID, Token: validToken}, nil
 			},
 			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 				return &model.User{UserID: userID}, nil
@@ -3691,7 +3770,7 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		alias := &mockAliasManager{}
 		reader := &mockUserServiceReader{
 			metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-				return &model.User{UserID: userID}, nil
+				return &model.User{UserID: userID, Token: validToken}, nil
 			},
 			getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 				return &model.User{UserID: userID}, nil

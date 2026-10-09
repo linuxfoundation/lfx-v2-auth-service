@@ -18,6 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -840,6 +841,34 @@ func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
 	})
 }
 
+func TestUserReaderWriter_MetadataLookup_ScopeGatedRejectsNonJWT(t *testing.T) {
+	ctx := context.Background()
+
+	jwtConfig, _ := createTestJWTVerificationConfig(t)
+	writer := &userReaderWriter{
+		config: Config{
+			JWTVerificationConfig: jwtConfig,
+		},
+	}
+
+	for _, input := range []string{"auth0|123456789", "john.doe"} {
+		t.Run(input, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input, constants.UserUpdateIdentityRequiredScope)
+			require.Error(t, err)
+			assert.Nil(t, user)
+			var unauthorized errors.Unauthorized
+			assert.ErrorAs(t, err, &unauthorized)
+		})
+	}
+
+	t.Run("read lookup without scopes still accepts a bare sub", func(t *testing.T) {
+		user, err := writer.MetadataLookup(ctx, "auth0|123456789")
+		require.NoError(t, err)
+		assert.Equal(t, "auth0|123456789", user.UserID)
+		assert.Empty(t, user.Token)
+	})
+}
+
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
 	ctx := context.Background()
 
@@ -1107,7 +1136,7 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("old primary not linked is preserved before promote", func(t *testing.T) {
-		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":true,"identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		rw := newTestReaderWriter(ft)
@@ -1223,12 +1252,50 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 		}, ft.methodPaths())
 	})
 
-	t.Run("old primary backed by an UNVERIFIED Google identity is preserved as a verified email", func(t *testing.T) {
-		// A Google identity (verified or not) is never a primary-email candidate, so
-		// the old primary is materialized as a verified email identity regardless of
-		// Google's email_verified flag.
-		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","identities":[` +
+	t.Run("old primary backed only by an UNVERIFIED Google identity is not preserved", func(t *testing.T) {
+		// Neither the root email_verified flag nor the backing identity proves
+		// ownership of the old primary, so it must not be materialized as a
+		// (verified) email identity; the switch still proceeds.
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","email_verified":false,"identities":[` +
 			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":false}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "alice@linux.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified old primary")
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+	})
+
+	t.Run("old primary with unverified root email and no backing identity is not preserved", func(t *testing.T) {
+		// e.g. a database signup whose address was never confirmed.
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":false,"identities":[` +
+			`{"connection":"Username-Password-Authentication","provider":"auth0","profileData":{"email":"old@example.com","email_verified":false}},` +
+			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
+		ft := newFakeAuth0(testPrimaryUserID, getUser)
+		rw := newTestReaderWriter(ft)
+
+		err := rw.SetPrimaryEmail(ctx, testPrimaryUserID, "new@example.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, "/api/v2/users"), "no stub may be created for an unverified old primary")
+		assert.Equal(t, []string{
+			"GET /api/v2/users/auth0|test123",
+			"PATCH /api/v2/users/auth0|test123",
+		}, ft.methodPaths())
+		patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
+		require.True(t, ok)
+		assert.Contains(t, patchBody, `"email":"new@example.com"`)
+	})
+
+	t.Run("old primary with unverified root but a verified backing identity is preserved", func(t *testing.T) {
+		getUser := `{"user_id":"auth0|test123","email":"alice@gmail.com","email_verified":false,"identities":[` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alice@gmail.com","email_verified":true}},` +
 			`{"connection":"email","provider":"email","profileData":{"email":"alice@linux.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		rw := newTestReaderWriter(ft)
@@ -1286,7 +1353,7 @@ func TestUserReaderWriter_SetPrimaryEmail_PreservesOldPrimary(t *testing.T) {
 	})
 
 	t.Run("preservation failure aborts the switch and rolls back the stub", func(t *testing.T) {
-		getUser := `{"user_id":"auth0|test123","email":"old@example.com","identities":[` +
+		getUser := `{"user_id":"auth0|test123","email":"old@example.com","email_verified":true,"identities":[` +
 			`{"connection":"email","provider":"email","profileData":{"email":"new@example.com","email_verified":true}}]}`
 		ft := newFakeAuth0(testPrimaryUserID, getUser)
 		ft.linkStatus = http.StatusInternalServerError // linking the preserved stub fails
@@ -1428,6 +1495,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		// Unlike the preservation path, this stub IS system-managed.
 		createBody, _ := ft.firstBodyFor(http.MethodPost, "/api/v2/users")
 		assert.Contains(t, createBody, `"email":"alias@linux.com"`)
+		assert.Contains(t, createBody, `"email_verified":true`)
 		assert.Contains(t, createBody, `"system_managed":true`)
 	})
 

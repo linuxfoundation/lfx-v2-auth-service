@@ -249,6 +249,15 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 
 	}
 
+	// Scope-gated lookups authorize writes on the caller's own account, so the
+	// caller must prove their identity with a verified JWT. A bare sub or
+	// username carries no proof of identity and must never be accepted as the
+	// acting principal for a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "scope-gated metadata lookup rejected: input is not a JWT")
+		return nil, errors.NewUnauthorized("a valid JWT token is required")
+	}
+
 	// Determine lookup strategy based on input format
 	switch {
 	case strings.Contains(input, "|"):
@@ -550,7 +559,9 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		return "", errors.NewValidation("email is required")
 	}
 
-	return u.createAndLinkEmailIdentity(ctx, primaryUserID, email, &Auth0AppMetadata{SystemManaged: true})
+	// Verified: system aliases are issued on LF-controlled domains, so ownership
+	// is established by the service itself rather than claimed by the user.
+	return u.createAndLinkEmailIdentity(ctx, primaryUserID, email, true, &Auth0AppMetadata{SystemManaged: true})
 }
 
 // createAndLinkEmailIdentity creates a stub Auth0 passwordless email-connection
@@ -562,14 +573,16 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 //   - non-nil: attached as-is (e.g. {SystemManaged:true} for a system alias that
 //     must not be user-unlinked).
 //
-// EmailVerified is always set: callers guarantee the address is already verified
-// (a system alias on an LF-controlled domain, or the user's current verified
-// primary email being preserved before a switch).
+// emailVerified is written verbatim as the stub's email_verified flag. Callers
+// must pass true only when ownership of the address has been established (a
+// system alias on an LF-controlled domain, or a previous primary whose
+// verification is confirmed by Auth0); the stub is linked with M2M credentials,
+// so this flag is the only verification gate on the resulting identity.
 //
 // On link failure the just-created stub is rolled back on a best-effort basis:
 // system-managed stubs via deleteSystemManagedUser, otherwise via
 // deleteEmailConnectionStub.
-func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, primaryUserID, email string, appMetadata *Auth0AppMetadata) (string, error) {
+func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, primaryUserID, email string, emailVerified bool, appMetadata *Auth0AppMetadata) (string, error) {
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
 		return "", errors.NewUnexpected("failed to get M2M token for add email identity", errToken)
@@ -579,7 +592,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 	createPayload := systemManagedUserPayload{
 		Connection:    constants.EmailConnection,
 		Email:         email,
-		EmailVerified: true,
+		EmailVerified: emailVerified,
 		AppMetadata:   appMetadata,
 	}
 
@@ -763,6 +776,24 @@ func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	return false
 }
 
+// isPrimaryEmailVerified reports whether ownership of the user's current root
+// primary email has been proven: either Auth0's root email_verified flag is set,
+// or a linked identity for the same address (case-insensitive) reports
+// email_verified. An unverified root email (e.g. a database signup that never
+// confirmed, or a social login whose provider reported email_verified:false)
+// must never be re-asserted as verified.
+func isPrimaryEmailVerified(user *model.User, email string) bool {
+	if user.PrimaryEmailVerified && strings.EqualFold(user.PrimaryEmail, email) {
+		return true
+	}
+	for _, id := range user.Identities {
+		if id.EmailVerified && strings.EqualFold(id.Email, email) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
 // The email must already be a verified linked identity on the user's account.
 func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
@@ -811,9 +842,19 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	// create+link it as a normal, user-removable verified email identity first.
 	// Done first so that any failure leaves the account unchanged rather than
 	// silently dropping the old primary.
+	//
+	// Preservation only happens when ownership of the old primary was proven
+	// (see isPrimaryEmailVerified). An unverified old primary is dropped rather
+	// than materialized: minting a verified identity would assert ownership the
+	// user never demonstrated, and even an unverified stub would claim the
+	// address's passwordless user on this account.
 	oldPrimary := fullUser.PrimaryEmail
 	if oldPrimary != "" && !strings.EqualFold(oldPrimary, email) && !hasSufficientPrimaryEmailIdentity(fullUser, oldPrimary) {
-		if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {
+		if !isPrimaryEmailVerified(fullUser, oldPrimary) {
+			slog.InfoContext(ctx, "old primary email is unverified; not preserving it as an email identity",
+				"user_id", redaction.Redact(userID),
+			)
+		} else if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, true, nil); errPreserve != nil {
 			slog.ErrorContext(ctx, "failed to preserve old primary email before switching",
 				"error", errPreserve,
 				"user_id", redaction.Redact(userID),

@@ -81,6 +81,12 @@ const minHealthyConnection = 1 * time.Second
 // loudly enough to be noticed.
 const forbiddenRetryInterval = 5 * time.Minute
 
+// maxRateLimitWait caps a rate limit's Retry-After hint. The hint comes from an
+// upstream response header, and this goroutine is the only stream reader and
+// keeps the leader Lease while it sleeps, so a wrong or hostile value must not
+// park provisioning for longer than this.
+const maxRateLimitWait = 5 * time.Minute
+
 // Consumer reads the Auth0 events stream and provisions the users it names.
 //
 // Exactly one replica may run it. The stream has no competing-consumer
@@ -96,9 +102,10 @@ type Consumer struct {
 
 	// Reconnection backoff bounds. Fields rather than constants so tests can
 	// exercise the reconnect paths without sleeping through them.
-	minBackoff     time.Duration
-	maxBackoff     time.Duration
-	refusalBackoff time.Duration
+	minBackoff       time.Duration
+	maxBackoff       time.Duration
+	refusalBackoff   time.Duration
+	maxRateLimitWait time.Duration
 
 	// Failure bookkeeping for the message currently being retried.
 	failedOffset string
@@ -141,12 +148,13 @@ func WithReplayWindow(window time.Duration) ConsumerOption {
 // NewConsumer creates the events consumer.
 func NewConsumer(options ...ConsumerOption) (*Consumer, error) {
 	consumer := &Consumer{
-		eventTypes:     []string{EventTypeUserCreated, EventTypeUserUpdated},
-		replayWindow:   24 * time.Hour,
-		now:            time.Now,
-		minBackoff:     minReconnectBackoff,
-		maxBackoff:     maxReconnectBackoff,
-		refusalBackoff: forbiddenRetryInterval,
+		eventTypes:       []string{EventTypeUserCreated, EventTypeUserUpdated},
+		replayWindow:     24 * time.Hour,
+		now:              time.Now,
+		minBackoff:       minReconnectBackoff,
+		maxBackoff:       maxReconnectBackoff,
+		refusalBackoff:   forbiddenRetryInterval,
+		maxRateLimitWait: maxRateLimitWait,
 	}
 	for _, option := range options {
 		option(consumer)
@@ -283,8 +291,10 @@ func (c *Consumer) Run(ctx context.Context) {
 			// or CDP refusing a call while an event was being provisioned.
 			// Both mean wait rather than press on, and neither is the current
 			// event's fault, so handle counted no attempt against it.
+			// The hint is bounded here as well as at parse time, so any
+			// RateLimited, however it was built, is covered.
 			if limited.RetryAfter > 0 {
-				wait = limited.RetryAfter
+				wait = min(limited.RetryAfter, c.maxRateLimitWait)
 			}
 			slog.WarnContext(ctx, "rate limited, pausing before reconnecting",
 				"error", err,

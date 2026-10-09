@@ -112,12 +112,14 @@ type tallyReport struct {
 	Unchecked             int            `json:"unchecked"`
 	DurationSeconds       float64        `json:"duration_seconds"`
 	// IdentifiersRedacted marks the stdout copy, whose user ids and UUIDs
-	// are redacted because container logs have no per-record deletion.
+	// (including any echoed in error messages) are redacted because
+	// container logs have no per-record deletion.
 	IdentifiersRedacted bool `json:"identifiers_redacted"`
 }
 
 // redacted returns the copy safe for a log sink: counters intact, every
-// user id and UUID passed through redaction.Redact.
+// user id and UUID passed through redaction.Redact, and every error message
+// stripped of the identifiers an upstream error can echo.
 func (t tallyReport) redacted() tallyReport {
 	out := t
 	out.IdentifiersRedacted = true
@@ -137,9 +139,15 @@ func (t tallyReport) redacted() tallyReport {
 func redactedErrors(in []checkError) []checkError {
 	out := make([]checkError, len(in))
 	for i, e := range in {
-		out[i] = checkError{UserID: redaction.Redact(e.UserID), Message: e.Message}
+		out[i] = checkError{UserID: redaction.Redact(e.UserID), Message: redactMessage(e.Message)}
 	}
 	return out
+}
+
+// redactMessage strips identifiers an upstream error may echo: URLs (request
+// paths carry member and user ids), emails, JWTs, and bare UUIDs.
+func redactMessage(msg string) string {
+	return redaction.RedactUUIDs(httpclient.SanitizeError(errors.New(msg)))
 }
 
 // processUser classifies one holder and, in live mode only, CAS-writes a

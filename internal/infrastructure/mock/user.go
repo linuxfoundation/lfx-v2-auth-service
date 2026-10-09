@@ -114,121 +114,11 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	return result, nil
 }
 
-// UpdateUser applies the provided changes to a mock user record.
-func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
-	slog.InfoContext(ctx, "mock: updating user", "user", user)
-
-	// For mock implementation, we'll use user_id, sub, username, or primary email as key
-	key := user.UserID
-	if key == "" {
-		key = user.Sub
-	}
-	if key == "" {
-		key = user.Username
-	}
-	if key == "" {
-		key = user.PrimaryEmail
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("mock: user identifier (user_id, sub, username, or primary email) is required")
-	}
-
-	// Get existing user from storage
-	existingUser, exists := u.users[key]
-	if !exists {
-		// If user doesn't exist, create a new one with the provided data
-		u.users[key] = user
-		slog.InfoContext(ctx, "mock: new user created in storage", "key", key)
-		return user, nil
-	}
-
-	// PATCH-style update: only update fields that are provided (non-empty/non-nil)
-	updatedUser := *existingUser // Create a copy of the existing user
-
-	// Update basic fields only if they're provided (non-empty)
-	if user.Token != "" {
-		updatedUser.Token = user.Token
-	}
-	if user.UserID != "" {
-		updatedUser.UserID = user.UserID
-	}
-	if user.Sub != "" {
-		updatedUser.Sub = user.Sub
-	}
-	if user.Username != "" {
-		updatedUser.Username = user.Username
-	}
-	if user.PrimaryEmail != "" {
-		updatedUser.PrimaryEmail = user.PrimaryEmail
-	}
-
-	// Update UserMetadata only if it's provided (not nil)
-	if user.UserMetadata != nil {
-		if updatedUser.UserMetadata == nil {
-			// If existing user has no metadata, use the provided metadata
-			updatedUser.UserMetadata = user.UserMetadata
-		} else {
-			// Partial update of metadata fields - only update non-nil fields
-			if user.UserMetadata.Picture != nil {
-				updatedUser.UserMetadata.Picture = user.UserMetadata.Picture
-			}
-			if user.UserMetadata.Zoneinfo != nil {
-				updatedUser.UserMetadata.Zoneinfo = user.UserMetadata.Zoneinfo
-			}
-			if user.UserMetadata.Name != nil {
-				updatedUser.UserMetadata.Name = user.UserMetadata.Name
-			}
-			if user.UserMetadata.GivenName != nil {
-				updatedUser.UserMetadata.GivenName = user.UserMetadata.GivenName
-			}
-			if user.UserMetadata.FamilyName != nil {
-				updatedUser.UserMetadata.FamilyName = user.UserMetadata.FamilyName
-			}
-			if user.UserMetadata.JobTitle != nil {
-				updatedUser.UserMetadata.JobTitle = user.UserMetadata.JobTitle
-			}
-			if user.UserMetadata.Organization != nil {
-				updatedUser.UserMetadata.Organization = user.UserMetadata.Organization
-			}
-			if user.UserMetadata.OrganizationDomain != nil {
-				updatedUser.UserMetadata.OrganizationDomain = user.UserMetadata.OrganizationDomain
-			}
-			if user.UserMetadata.Country != nil {
-				updatedUser.UserMetadata.Country = user.UserMetadata.Country
-			}
-			if user.UserMetadata.StateProvince != nil {
-				updatedUser.UserMetadata.StateProvince = user.UserMetadata.StateProvince
-			}
-			if user.UserMetadata.City != nil {
-				updatedUser.UserMetadata.City = user.UserMetadata.City
-			}
-			if user.UserMetadata.Address != nil {
-				updatedUser.UserMetadata.Address = user.UserMetadata.Address
-			}
-			if user.UserMetadata.PostalCode != nil {
-				updatedUser.UserMetadata.PostalCode = user.UserMetadata.PostalCode
-			}
-			if user.UserMetadata.PhoneNumber != nil {
-				updatedUser.UserMetadata.PhoneNumber = user.UserMetadata.PhoneNumber
-			}
-			if user.UserMetadata.TShirtSize != nil {
-				updatedUser.UserMetadata.TShirtSize = user.UserMetadata.TShirtSize
-			}
-			if user.UserMetadata.Bio != nil {
-				updatedUser.UserMetadata.Bio = user.UserMetadata.Bio
-			}
-			if user.UserMetadata.Skills != nil {
-				updatedUser.UserMetadata.Skills = user.UserMetadata.Skills
-			}
-		}
-	}
-
-	// Store the updated user back to storage
-	u.users[key] = &updatedUser
-	slog.InfoContext(ctx, "mock: user updated in storage with PATCH semantics", "key", key)
-
-	return &updatedUser, nil
+// UpdateUser refuses user_metadata.update requests. The mock cannot verify
+// the caller's token, so it must never let a caller change an account.
+func (u *userWriter) UpdateUser(ctx context.Context, _ *model.User) (*model.User, error) {
+	slog.WarnContext(ctx, "mock: user update rejected: token verification is not supported")
+	return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
 }
 
 // SendVerificationAlternateEmail is a no-op in the mock adapter.
@@ -611,6 +501,14 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return nil, errors.NewValidation("input is required")
+	}
+
+	// Scope-gated lookups authorize writes. The mock parses JWTs without
+	// verifying their signature or scopes, so it can never prove who the caller
+	// is and must not authorize a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "mock: scope-gated metadata lookup rejected: token verification is not supported")
+		return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
 	}
 
 	user := &model.User{}
