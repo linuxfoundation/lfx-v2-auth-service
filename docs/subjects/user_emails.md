@@ -230,7 +230,7 @@ nats request lfx.auth-service.user_emails.set_primary \
 |----------|---------|
 | Auth0    | Full    |
 | Authelia | Not implemented |
-| Mock     | Simulated (mutates in-memory store) |
+| Mock     | Refused — the mock cannot verify tokens, so it rejects `set_primary` requests |
 
 ---
 

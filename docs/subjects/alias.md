@@ -112,7 +112,7 @@ A subsequent `lfx.auth-service.user_identity.unlink` call targeting an `email`-c
 3. **Fail-closed**: any non-404 fetch error returns an `Unexpected` error so a flaky Auth0 cannot silently allow the unlink.
 4. If `app_metadata.system_managed == true`, the adapter returns `errors.NewForbidden("system_managed_identity")`.
 
-The mock adapter mirrors this guard: any `email`-connection entry in `user.Identities` is by construction system-managed (only `AddSystemManagedEmail` writes there), so the mock refuses the unlink with the same error.
+The mock backend never reaches this guard: it cannot verify tokens, so it refuses every unlink request before dispatch.
 
 ### Surfacing in `user_emails.read`
 
