@@ -739,12 +739,18 @@ func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email
 			continue
 		}
 
-		if errDel := u.deleteOrphanedEmailStub(ctx, candidate.UserID, email, m2mToken); errDel != nil {
+		removed, errDel := u.deleteOrphanedEmailStub(ctx, candidate.UserID, email, m2mToken)
+		if errDel != nil {
 			slog.ErrorContext(ctx, "failed to delete orphaned email stub user",
 				"error", errDel,
 				"stub_user_id", redaction.Redact(candidate.UserID),
 			)
 			return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+		}
+		if !removed {
+			// The fresh read shows the record has since become a genuine claim
+			// (verified, linked or system-managed); keep the original conflict.
+			return false, nil
 		}
 
 		slog.InfoContext(ctx, "deleted orphaned unverified email stub user",
@@ -798,8 +804,10 @@ func isOrphanedEmailStub(user *Auth0User, email string) bool {
 // deleteOrphanedEmailStub deletes userID only if a fresh read still shows it as
 // an orphaned stub for email (see isOrphanedEmailStub), so a record that was
 // verified, linked or marked system-managed after the lookup is never removed.
-// A 404 on the pre-flight GET is treated as already-gone.
-func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, email, m2mToken string) error {
+// It returns true when the stub is gone (deleted here, or a 404 on the GET or
+// DELETE because it was removed concurrently) and false, with no error, when
+// the record is no longer an orphan and therefore a genuine claim.
+func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, email, m2mToken string) (bool, error) {
 	apiGet := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodGet),
@@ -810,12 +818,12 @@ func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, 
 	var target Auth0User
 	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
 		if statusCode == http.StatusNotFound {
-			return nil
+			return true, nil
 		}
-		return errors.NewUnexpected("failed to verify orphaned email stub before delete", errGet)
+		return false, errors.NewUnexpected("failed to verify orphaned email stub before delete", errGet)
 	}
 	if !isOrphanedEmailStub(&target, email) {
-		return errors.NewForbidden("refusing to delete user that is not an orphaned email stub")
+		return false, nil
 	}
 
 	apiDelete := httpclient.NewAPIRequest(
@@ -825,10 +833,14 @@ func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, 
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("delete orphaned email stub user"),
 	)
-	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
-		return errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+	if statusCode, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		if statusCode == http.StatusNotFound {
+			// Removed concurrently between the read and the delete.
+			return true, nil
+		}
+		return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
 	}
-	return nil
+	return true, nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration

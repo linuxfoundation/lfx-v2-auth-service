@@ -1703,7 +1703,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		},
 	}
 	for _, tc := range changedBeforeDelete {
-		t.Run("stub that became "+tc.name+" before delete is not removed", func(t *testing.T) {
+		t.Run("stub that became "+tc.name+" before delete is not removed and stays a claim conflict", func(t *testing.T) {
 			ft := newFakeAuth0(testPrimaryUserID, "{}")
 			ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
 			ft.byEmailResp = orphanStub
@@ -1713,8 +1713,8 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 			require.Error(t, err)
 			var validationErr errors.Validation
-			assert.NotErrorAs(t, err, &validationErr)
-			assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
+			assert.ErrorAs(t, err, &validationErr, "a newly genuine claim must map to the claim-conflict validation error")
+			assert.Contains(t, err.Error(), "email already linked")
 			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
 			assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
 		})
@@ -1735,6 +1735,20 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
 		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))
 		assert.Equal(t, 1, ft.countFor(http.MethodPost, "/api/v2/users"))
+	})
+
+	t.Run("stub deleted concurrently between read and delete still retries the create", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.createStatuses = []int{http.StatusConflict, http.StatusCreated}
+		ft.byEmailResp = orphanStub
+		ft.stubGetResp = orphanRecord
+		ft.deleteStatus = http.StatusNotFound
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))
+		assert.Equal(t, 2, ft.countFor(http.MethodPost, "/api/v2/users"))
 	})
 
 	t.Run("stub already gone before delete still retries the create", func(t *testing.T) {
