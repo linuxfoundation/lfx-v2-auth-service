@@ -84,6 +84,16 @@ func TestSanitizeURL(t *testing.T) {
 			input:    "https://auth.example.com/api/v2/users/secret%2Fuser",
 			expected: "https://auth.example.com/api/v2/users/sec%2A%2A%2A%2A",
 		},
+		{
+			name:     "url with CDP member id",
+			input:    "https://cdp.example.com/v1/members/0a1b2c3d-4e5f-6789-abcd-ef0123456789/identities",
+			expected: "https://cdp.example.com/v1/members/0a1%2A%2A%2A%2A/identities",
+		},
+		{
+			name:     "url with CDP member resolve route",
+			input:    "https://cdp.example.com/v1/members/resolve",
+			expected: "https://cdp.example.com/v1/members/resolve",
+		},
 	}
 
 	for _, tt := range tests {
@@ -346,6 +356,16 @@ func TestSanitizeError_URLError(t *testing.T) {
 			},
 			omits:    []string{"secret_user_123"},
 			contains: []string{"auth0%7Csec%2A%2A%2A%2A", "connection refused"},
+		},
+		{
+			name: "transport failure on CDP member identities url",
+			err: fmt.Errorf("failed to make request: %w", &url.Error{
+				Op:  "Get",
+				URL: "https://cdp.example.com/v1/members/0a1b2c3d-4e5f-6789-abcd-ef0123456789/identities",
+				Err: context.DeadlineExceeded,
+			}),
+			omits:    []string{"0a1b2c3d-4e5f-6789-abcd-ef0123456789", "0a1b2c3d"},
+			contains: []string{"/v1/members/0a1%2A%2A%2A%2A/identities", "deadline exceeded"},
 		},
 	}
 
