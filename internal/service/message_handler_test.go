@@ -4014,3 +4014,210 @@ func TestHasEmailDomainSuffix(t *testing.T) {
 		})
 	}
 }
+
+// recordingEmailHandler is a port.EmailHandler that records which addresses a
+// verification was sent to or verified for.
+type recordingEmailHandler struct {
+	sent     []string
+	verified []string
+}
+
+func (r *recordingEmailHandler) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
+	r.sent = append(r.sent, alternateEmail)
+	return nil
+}
+
+func (r *recordingEmailHandler) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
+	r.verified = append(r.verified, email.Email)
+	return &model.AuthResponse{IDToken: "id-token"}, nil
+}
+
+func TestMessageHandlerOrchestrator_StartEmailLinking_AliasDomains(t *testing.T) {
+	ctx := context.Background()
+
+	notFoundReader := &mockUserServiceReader{
+		searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+			return nil, errors.NewNotFound("not found")
+		},
+	}
+
+	tests := []struct {
+		name          string
+		aliasDomains  string
+		input         string
+		wantSuccess   bool
+		wantErrorText string
+		wantSent      string
+	}{
+		{
+			name:          "alias domain address is refused",
+			aliasDomains:  "linux.com",
+			input:         "jane.doe@linux.com",
+			wantErrorText: "email domain is reserved for system-managed aliases",
+		},
+		{
+			name:          "alias domain match is case-insensitive",
+			aliasDomains:  "linux.com",
+			input:         "  Jane.Doe@LINUX.com ",
+			wantErrorText: "email domain is reserved for system-managed aliases",
+		},
+		{
+			name:          "any configured alias domain is refused",
+			aliasDomains:  "linux.com, Example.ORG",
+			input:         "jane.doe@example.org",
+			wantErrorText: "email domain is reserved for system-managed aliases",
+		},
+		{
+			name:          "display-name form of an alias domain address is rejected",
+			aliasDomains:  "linux.com",
+			input:         "Jane <jane.doe@linux.com>",
+			wantErrorText: "invalid email",
+		},
+		{
+			name:          "quoted local part on an alias domain is rejected",
+			aliasDomains:  "linux.com",
+			input:         `"a@b"@linux.com`,
+			wantErrorText: "invalid email",
+		},
+		{
+			name:          "display-name form on a non-alias domain is rejected",
+			aliasDomains:  "linux.com",
+			input:         "Jane <Jane.Doe@Gmail.com>",
+			wantErrorText: "invalid email",
+		},
+		{
+			name:          "quoted local part on a non-alias domain is rejected",
+			aliasDomains:  "linux.com",
+			input:         `"a b"@example.org`,
+			wantErrorText: "invalid email",
+		},
+		{
+			name:         "bare address is sent trimmed and lowercased",
+			aliasDomains: "linux.com",
+			input:        "  Jane.Doe@Gmail.com ",
+			wantSuccess:  true,
+			wantSent:     "jane.doe@gmail.com",
+		},
+		{
+			name:         "non-alias domain proceeds",
+			aliasDomains: "linux.com",
+			input:        "jane.doe@gmail.com",
+			wantSuccess:  true,
+		},
+		{
+			name:         "subdomain of an alias domain proceeds",
+			aliasDomains: "linux.com",
+			input:        "jane.doe@mail.linux.com",
+			wantSuccess:  true,
+		},
+		{
+			name:         "alias feature disabled proceeds",
+			aliasDomains: "",
+			input:        "jane.doe@linux.com",
+			wantSuccess:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(constants.AllowedAliasDomainsEnvKey, tt.aliasDomains)
+
+			emailHandler := &recordingEmailHandler{}
+			handler := NewMessageHandlerOrchestrator(
+				WithUserReaderForMessageHandler(notFoundReader),
+				WithEmailHandlerForMessageHandler(emailHandler),
+			)
+
+			result, err := handler.StartEmailLinking(ctx, &mockTransportMessenger{data: []byte(tt.input)})
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+
+			var reply UserDataResponse
+			if err := json.Unmarshal(result, &reply); err != nil {
+				t.Fatalf("failed to parse reply: %v", err)
+			}
+
+			if reply.Success != tt.wantSuccess {
+				t.Fatalf("success = %v, want %v (error %q)", reply.Success, tt.wantSuccess, reply.Error)
+			}
+			if tt.wantSuccess {
+				if len(emailHandler.sent) != 1 {
+					t.Fatalf("expected exactly one verification send, got %d", len(emailHandler.sent))
+				}
+				if tt.wantSent != "" && emailHandler.sent[0] != tt.wantSent {
+					t.Errorf("sent to %q, want %q", emailHandler.sent[0], tt.wantSent)
+				}
+				return
+			}
+			if reply.Error != tt.wantErrorText {
+				t.Errorf("error = %q, want %q", reply.Error, tt.wantErrorText)
+			}
+			if len(emailHandler.sent) != 0 {
+				t.Errorf("verification must not be sent for a refused address, got %v", emailHandler.sent)
+			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_VerifyEmailLinking_AliasDomains(t *testing.T) {
+	ctx := context.Background()
+
+	notFoundReader := &mockUserServiceReader{
+		searchUserFunc: func(ctx context.Context, user *model.User, criteria string) (*model.User, error) {
+			return nil, errors.NewNotFound("not found")
+		},
+	}
+
+	tests := []struct {
+		name         string
+		aliasDomains string
+		email        string
+		wantSuccess  bool
+	}{
+		{name: "alias domain address is refused", aliasDomains: "linux.com", email: "jane.doe@linux.com"},
+		{name: "alias domain match is case-insensitive", aliasDomains: "linux.com", email: "Jane.Doe@LINUX.com"},
+		{name: "display-name form of an alias domain address is refused", aliasDomains: "linux.com", email: "Jane <jane.doe@linux.com>"},
+		{name: "non-alias domain proceeds", aliasDomains: "linux.com", email: "jane.doe@gmail.com", wantSuccess: true},
+		{name: "alias feature disabled proceeds", aliasDomains: "", email: "jane.doe@linux.com", wantSuccess: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(constants.AllowedAliasDomainsEnvKey, tt.aliasDomains)
+
+			emailHandler := &recordingEmailHandler{}
+			handler := NewMessageHandlerOrchestrator(
+				WithUserReaderForMessageHandler(notFoundReader),
+				WithEmailHandlerForMessageHandler(emailHandler),
+			)
+
+			data, _ := json.Marshal(model.Email{Email: tt.email, OTP: "123456"})
+			result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: data})
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+
+			var reply UserDataResponse
+			if err := json.Unmarshal(result, &reply); err != nil {
+				t.Fatalf("failed to parse reply: %v", err)
+			}
+
+			if reply.Success != tt.wantSuccess {
+				t.Fatalf("success = %v, want %v (error %q)", reply.Success, tt.wantSuccess, reply.Error)
+			}
+			if tt.wantSuccess {
+				if len(emailHandler.verified) != 1 {
+					t.Errorf("expected exactly one verification exchange, got %d", len(emailHandler.verified))
+				}
+				return
+			}
+			if reply.Error != "email domain is reserved for system-managed aliases" {
+				t.Errorf("error = %q, want reserved-domain error", reply.Error)
+			}
+			if len(emailHandler.verified) != 0 {
+				t.Errorf("OTP must not be exchanged for a reserved address, got %v", emailHandler.verified)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/mail"
 	"os"
 	"strings"
 	"time"
@@ -595,6 +596,25 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 		return m.errorResponse("invalid email"), nil
 	}
 
+	// Addresses on system-managed alias domains are claimed only through
+	// add_alias. Starting a passwordless flow for them would provision an
+	// email-connection user in the identity provider for an address the
+	// caller has not proven they own.
+	// Only a bare address is accepted: display-name or quoted forms accepted by
+	// IsValidEmail would otherwise let the checked domain differ from the
+	// string sent to the provider.
+	parsed, errParse := mail.ParseAddress(alternateEmailInput)
+	if errParse != nil || !strings.EqualFold(parsed.Address, alternateEmailInput) {
+		return m.errorResponse("invalid email"), nil
+	}
+	at := strings.LastIndex(alternateEmailInput, "@")
+	if at < 0 {
+		return m.errorResponse("invalid email"), nil
+	}
+	if isAllowedAliasDomain(alternateEmailInput[at+1:]) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
+	}
+
 	err := m.checkEmailExists(ctx, alternateEmailInput)
 	if err != nil {
 		return m.errorResponse(err.Error()), nil
@@ -636,6 +656,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 
 	if !email.IsValidEmail() {
 		return m.errorResponse("invalid email"), nil
+	}
+
+	// Mirror the send_verification guard: alias-domain addresses are claimed
+	// only through add_alias, so a code obtained outside this service (or issued
+	// before the guard existed) cannot be exchanged for one either.
+	if isAliasDomainAddress(email.Email) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
 	//
@@ -977,6 +1004,36 @@ type addAliasResponse struct {
 	Email   string `json:"email,omitempty"`
 }
 
+// isAllowedAliasDomain reports whether domain is listed in ALLOWED_ALIAS_DOMAINS
+// (comma-separated, case-insensitive). Empty/unset env means no alias domains.
+func isAllowedAliasDomain(domain string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey))
+	if raw == "" {
+		return false
+	}
+	for _, d := range strings.Split(raw, ",") {
+		if strings.EqualFold(domain, strings.TrimSpace(d)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAliasDomainAddress reports whether address (in any form net/mail accepts)
+// has its domain listed in ALLOWED_ALIAS_DOMAINS.
+func isAliasDomainAddress(address string) bool {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	return at >= 0 && isAllowedAliasDomain(parsed.Address[at+1:])
+}
+
 // hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
 // "@linux.com"), case-insensitively and tolerant of surrounding whitespace.
 func hasEmailDomainSuffix(email, domainSuffix string) bool {
@@ -1018,16 +1075,7 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 	if requestedDomain == "" {
 		return m.errorResponse("domain_not_allowed"), nil
 	}
-	allowed := false
-	if raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey)); raw != "" {
-		for _, d := range strings.Split(raw, ",") {
-			if strings.EqualFold(requestedDomain, strings.TrimSpace(d)) {
-				allowed = true
-				break
-			}
-		}
-	}
-	if !allowed {
+	if !isAllowedAliasDomain(requestedDomain) {
 		return m.errorResponse("domain_not_allowed"), nil
 	}
 

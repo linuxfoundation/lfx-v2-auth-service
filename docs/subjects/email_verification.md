@@ -135,6 +135,17 @@ The service sends a one-time password (OTP) to the provided email address and re
 
 > **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
 
+**Error Reply (Reserved Domain):**
+
+Addresses on a domain listed in `ALLOWED_ALIAS_DOMAINS` are system-managed and can only be claimed through [`add_alias`](alias.md); no verification code is sent for them.
+
+```json
+{
+  "success": false,
+  "error": "email domain is reserved for system-managed aliases"
+}
+```
+
 **Error Reply (Invalid Email):**
 ```json
 {
@@ -214,6 +225,17 @@ The returned token is an authentication token that can be used to link the verif
 ```
 
 > **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
+
+**Error Reply (Reserved Domain):**
+
+Codes for addresses on a domain listed in `ALLOWED_ALIAS_DOMAINS` are never exchanged; those addresses can only be claimed through [`add_alias`](alias.md).
+
+```json
+{
+  "success": false,
+  "error": "email domain is reserved for system-managed aliases"
+}
+```
 
 **Error Reply (Invalid Request):**
 ```json

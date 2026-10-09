@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -608,6 +609,19 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 
 	var stubUser Auth0User
 	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
+	if errCreate != nil && statusCode == http.StatusConflict {
+		// An existing email-connection user only counts as a claim when it is
+		// verified, linked, or system-managed. An orphaned, never-verified
+		// passwordless user is removed and the create is retried once.
+		reconciled, errReconcile := u.reconcileOrphanedEmailStub(ctx, email, m2mToken)
+		if errReconcile != nil {
+			return "", errReconcile
+		}
+		if reconciled {
+			stubUser = Auth0User{}
+			statusCode, errCreate = apiCreate.Call(ctx, &stubUser)
+		}
+	}
 	if errCreate != nil {
 		if statusCode == http.StatusConflict {
 			slog.InfoContext(ctx, "email stub user already exists in Auth0",
@@ -691,6 +705,142 @@ func (u *userReaderWriter) rollbackEmailStub(ctx context.Context, userID, m2mTok
 		return u.deleteSystemManagedUser(ctx, userID, m2mToken)
 	}
 	return u.deleteEmailConnectionStub(ctx, userID, m2mToken)
+}
+
+// reconcileOrphanedEmailStub looks up the users holding email and deletes an
+// orphaned passwordless stub: a standalone user whose only identity is on the
+// email connection, whose email was never verified, and which is not
+// system-managed. Such a record is left behind by a passwordless flow that was
+// started but never completed, so it does not represent a claim on the address.
+// It returns true when a stub was removed (the caller may retry the create)
+// and false when the existing record is a genuine claim. Lookup or delete
+// failures are returned as unexpected errors.
+func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email, m2mToken string) (bool, error) {
+	apiSearch := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users-by-email?email=%s", u.config.Domain, url.QueryEscape(strings.ToLower(strings.TrimSpace(email))))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("look up existing email stub user"),
+	)
+
+	var users []Auth0User
+	if statusCode, errSearch := apiSearch.Call(ctx, &users); errSearch != nil {
+		slog.ErrorContext(ctx, "failed to look up existing email stub user",
+			"error", errSearch,
+			"status_code", statusCode,
+			"email", redaction.RedactEmail(email),
+		)
+		return false, errors.NewUnexpected("failed to look up existing email stub user", errSearch)
+	}
+
+	for _, candidate := range users {
+		if !isOrphanedEmailStub(&candidate, email) {
+			continue
+		}
+
+		removed, errDel := u.deleteOrphanedEmailStub(ctx, candidate.UserID, email, m2mToken)
+		if errDel != nil {
+			slog.ErrorContext(ctx, "failed to delete orphaned email stub user",
+				"error", errDel,
+				"stub_user_id", redaction.Redact(candidate.UserID),
+			)
+			return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+		}
+		if !removed {
+			// The fresh read shows the record has since become a genuine claim
+			// (verified, linked or system-managed); keep the original conflict.
+			return false, nil
+		}
+
+		slog.InfoContext(ctx, "deleted orphaned unverified email stub user",
+			"stub_user_id", redaction.Redact(candidate.UserID),
+			"email", redaction.RedactEmail(email),
+		)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// orphanedEmailStubMinAge is how old an unverified passwordless user must be
+// before it is treated as abandoned. It is well beyond the passwordless OTP
+// lifetime, so a record created by a sign-up or link that may still be in
+// progress is not removed; a newer record keeps blocking the claim until it
+// ages out.
+const orphanedEmailStubMinAge = time.Hour
+
+// isOrphanedEmailStub reports whether user is a standalone, never-verified,
+// non-system-managed passwordless user whose root email is email and which was
+// created at least orphanedEmailStubMinAge ago.
+func isOrphanedEmailStub(user *Auth0User, email string) bool {
+	if user == nil || strings.TrimSpace(user.UserID) == "" {
+		return false
+	}
+	createdAt, errParse := time.Parse(time.RFC3339, user.CreatedAt)
+	if errParse != nil || time.Since(createdAt) < orphanedEmailStubMinAge {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Email), strings.TrimSpace(email)) {
+		return false
+	}
+	if user.EmailVerified {
+		return false
+	}
+	if user.AppMetadata != nil && user.AppMetadata.SystemManaged {
+		return false
+	}
+	if len(user.Identities) != 1 || user.Identities[0].Connection != constants.EmailConnection {
+		return false
+	}
+	// The identity's own verification flag can be set even when the root flag
+	// is not; either one means the address was proven and is a genuine claim.
+	if pd := user.Identities[0].ProfileData; pd != nil && pd.EmailVerified {
+		return false
+	}
+	return true
+}
+
+// deleteOrphanedEmailStub deletes userID only if a fresh read still shows it as
+// an orphaned stub for email (see isOrphanedEmailStub), so a record that was
+// verified, linked or marked system-managed after the lookup is never removed.
+// It returns true when the stub is gone (deleted here, or a 404 on the GET or
+// DELETE because it was removed concurrently) and false, with no error, when
+// the record is no longer an orphan and therefore a genuine claim.
+func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, email, m2mToken string) (bool, error) {
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify orphaned email stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			return true, nil
+		}
+		return false, errors.NewUnexpected("failed to verify orphaned email stub before delete", errGet)
+	}
+	if !isOrphanedEmailStub(&target, email) {
+		return false, nil
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete orphaned email stub user"),
+	)
+	if statusCode, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		if statusCode == http.StatusNotFound {
+			// Removed concurrently between the read and the delete.
+			return true, nil
+		}
+		return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+	}
+	return true, nil
 }
 
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
