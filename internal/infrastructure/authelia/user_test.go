@@ -139,17 +139,34 @@ func TestUserWriter_UpdateUser_RequiresVerifiedIdentity(t *testing.T) {
 		"authelia_at_nosub":    {PreferredUsername: "victim"},
 	}
 
-	for _, token := range []string{"", "authelia_at_invalid", "authelia_at_nosub"} {
-		t.Run("rejects token "+token, func(t *testing.T) {
+	rejections := []struct {
+		name    string
+		token   string
+		outage  bool
+		errType any
+	}{
+		{name: "empty token", token: "", errType: &errs.Validation{}},
+		{name: "invalid token", token: "authelia_at_invalid", errType: &errs.Unauthorized{}},
+		{name: "token without sub", token: "authelia_at_nosub", errType: &errs.Unauthorized{}},
+		{name: "userinfo outage", token: "authelia_at_attacker", outage: true, errType: &errs.Unexpected{}},
+	}
+	for _, tc := range rejections {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
 			storage := newStorage()
 			rw := newUserInfoTestWriter(t, storage, tokens)
+			if tc.outage {
+				outage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}))
+				t.Cleanup(outage.Close)
+				rw.oidcUserInfoURL = outage.URL
+			}
 			_, err := rw.UpdateUser(ctx, &model.User{
-				Token:        token,
+				Token:        tc.token,
 				Username:     "victim",
 				UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
 			})
-			var unauthorized errs.Unauthorized
-			require.ErrorAs(t, err, &unauthorized)
+			require.ErrorAs(t, err, tc.errType)
 			assert.Equal(t, "Victim", *storage.users["victim"].UserMetadata.Name)
 		})
 	}

@@ -202,10 +202,12 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	// The token is the caller's only proof of identity: verify it against the
 	// OIDC userinfo endpoint and take the account to update exclusively from the
 	// verified response, never from caller-supplied fields.
+	// Return fetch errors as-is: a rejected token is already Unauthorized, while
+	// provider outages and misconfiguration stay distinguishable from bad tokens.
 	userInfo, err := a.fetchOIDCUserInfo(ctx, user.Token)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to verify token via OIDC userinfo", "error", err)
-		return nil, errs.NewUnauthorized("a valid token is required", err)
+		return nil, err
 	}
 	if userInfo == nil || strings.TrimSpace(userInfo.Sub) == "" || strings.TrimSpace(userInfo.PreferredUsername) == "" {
 		return nil, errs.NewUnauthorized("a valid token is required")
