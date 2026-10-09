@@ -179,6 +179,8 @@ func (u *Auth0User) ToUser() *model.User {
 		Identities:   identities,
 		UserMetadata: meta,
 		CreatedAt:    earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
+		// Carried so callers can refuse to treat an unverified root email as owned.
+		PrimaryEmailVerified: u.EmailVerified,
 	}
 }
 
