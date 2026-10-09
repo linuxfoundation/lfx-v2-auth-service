@@ -199,27 +199,23 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		return nil, errs.NewValidation("user is required")
 	}
 
-	if user.Token != "" {
-		// Fetch user information from OIDC userinfo endpoint
-		userInfo, err := a.fetchOIDCUserInfo(ctx, user.Token)
-		if err != nil {
-			slog.WarnContext(ctx, "failed to fetch OIDC userinfo, skipping sub update",
-				"username", user.Username,
-				"error", err,
-			)
-		}
-		if userInfo != nil && userInfo.Sub != "" {
-			user.Sub = userInfo.Sub
-			slog.DebugContext(ctx, "updated user sub from OIDC userinfo",
-				"username", user.Username,
-				"preferred_username", userInfo.PreferredUsername,
-				"sub", userInfo.Sub,
-			)
-			if user.Username == "" {
-				user.Username = userInfo.PreferredUsername
-			}
-		}
+	// The token is the caller's only proof of identity: verify it against the
+	// OIDC userinfo endpoint and take the account to update exclusively from the
+	// verified response, never from caller-supplied fields.
+	userInfo, err := a.fetchOIDCUserInfo(ctx, user.Token)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to verify token via OIDC userinfo", "error", err)
+		return nil, errs.NewUnauthorized("a valid token is required", err)
 	}
+	if userInfo == nil || strings.TrimSpace(userInfo.Sub) == "" || strings.TrimSpace(userInfo.PreferredUsername) == "" {
+		return nil, errs.NewUnauthorized("a valid token is required")
+	}
+	user.Sub = userInfo.Sub
+	user.Username = userInfo.PreferredUsername
+	slog.DebugContext(ctx, "resolved user from OIDC userinfo",
+		"username", redaction.Redact(user.Username),
+		"sub", redaction.Redact(user.Sub),
+	)
 
 	if user.Sub == "" && user.Username == "" {
 		return nil, errs.NewValidation("username or sub is required")
