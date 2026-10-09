@@ -8,12 +8,18 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,6 +44,7 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	}
 
 	inputUser := &model.User{
+		Token:    "authelia_at_testuser",
 		Username: "testuser",
 		UserMetadata: &model.UserMetadata{
 			Name:     converters.StringPtr("Jane Doe"), // Update
@@ -53,9 +60,9 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 		},
 	}
 
-	userWriter := &userReaderWriter{
-		storage: mockStorage,
-	}
+	userWriter := newUserInfoTestWriter(t, mockStorage, map[string]OIDCUserInfo{
+		"authelia_at_testuser": {Sub: "testuser-sub", PreferredUsername: "testuser"},
+	})
 
 	result, err := userWriter.UpdateUser(ctx, inputUser)
 	if err != nil {
@@ -92,6 +99,98 @@ func TestUserWriter_UpdateUser_MetadataPatchBehavior(t *testing.T) {
 	if result.UserMetadata.City == nil || *result.UserMetadata.City != "New York" {
 		t.Error("UpdateUser() should add new City field")
 	}
+}
+
+// newUserInfoTestWriter returns a userReaderWriter whose OIDC userinfo
+// endpoint answers for the given bearer tokens and rejects any other token.
+func newUserInfoTestWriter(t *testing.T, storage *mockStorageReaderWriter, tokens map[string]OIDCUserInfo) *userReaderWriter {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info, ok := tokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(info)
+	}))
+	t.Cleanup(server.Close)
+	return &userReaderWriter{
+		storage:         storage,
+		oidcUserInfoURL: server.URL,
+		httpClient:      httpclient.NewClient(httpclient.Config{Timeout: 5 * time.Second}),
+	}
+}
+
+// TestUserWriter_UpdateUser_RequiresVerifiedIdentity verifies that metadata
+// updates are refused without a verified token and always apply to the account
+// the token belongs to, never to a caller-supplied username.
+func TestUserWriter_UpdateUser_RequiresVerifiedIdentity(t *testing.T) {
+	ctx := context.Background()
+
+	newStorage := func() *mockStorageReaderWriter {
+		return &mockStorageReaderWriter{users: map[string]*AutheliaUser{
+			"victim":   {User: &model.User{Username: "victim", UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Victim")}}},
+			"attacker": {User: &model.User{Username: "attacker", UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Attacker")}}},
+		}}
+	}
+	tokens := map[string]OIDCUserInfo{
+		"authelia_at_attacker": {Sub: "attacker-sub", PreferredUsername: "attacker"},
+		"authelia_at_nosub":    {PreferredUsername: "victim"},
+	}
+
+	rejections := []struct {
+		name    string
+		token   string
+		outage  bool
+		errType any
+	}{
+		{name: "empty token", token: "", errType: &errs.Validation{}},
+		{name: "invalid token", token: "authelia_at_invalid", errType: &errs.Unauthorized{}},
+		{name: "token without sub", token: "authelia_at_nosub", errType: &errs.Unauthorized{}},
+		{name: "userinfo outage", token: "authelia_at_attacker", outage: true, errType: &errs.Unexpected{}},
+	}
+	for _, tc := range rejections {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			storage := newStorage()
+			rw := newUserInfoTestWriter(t, storage, tokens)
+			if tc.outage {
+				outage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}))
+				t.Cleanup(outage.Close)
+				rw.oidcUserInfoURL = outage.URL
+			}
+			_, err := rw.UpdateUser(ctx, &model.User{
+				Token:        tc.token,
+				Username:     "victim",
+				UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
+			})
+			require.ErrorAs(t, err, tc.errType)
+			assert.Equal(t, "Victim", *storage.users["victim"].UserMetadata.Name)
+		})
+	}
+
+	t.Run("caller-supplied identity is ignored in favour of the token identity", func(t *testing.T) {
+		storage := newStorage()
+		rw := newUserInfoTestWriter(t, storage, tokens)
+		input := &model.User{
+			Token:        "authelia_at_attacker",
+			UserID:       "victim-sub",
+			Sub:          "victim-sub",
+			Username:     "victim",
+			UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
+		}
+		result, err := rw.UpdateUser(ctx, input)
+		require.NoError(t, err)
+		assert.Equal(t, "attacker", result.Username)
+		// The handler publishes input.UserID downstream, so it must carry the
+		// verified identity rather than the caller-supplied one.
+		assert.Equal(t, "attacker-sub", input.UserID)
+		assert.Equal(t, "attacker-sub", input.Sub)
+		assert.Equal(t, "Victim", *storage.users["victim"].UserMetadata.Name)
+		assert.Equal(t, "Mallory", *storage.users["attacker"].UserMetadata.Name)
+	})
 }
 
 // TestUserReaderWriter_GetUser_Identities tests that GetUser correctly returns the identities

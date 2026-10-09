@@ -112,7 +112,7 @@ A subsequent `lfx.auth-service.user_identity.unlink` call targeting an `email`-c
 3. **Fail-closed**: any non-404 fetch error returns an `Unexpected` error so a flaky Auth0 cannot silently allow the unlink.
 4. If `app_metadata.system_managed == true`, the adapter returns `errors.NewForbidden("system_managed_identity")`.
 
-The mock adapter mirrors this guard: any `email`-connection entry in `user.Identities` is by construction system-managed (only `AddSystemManagedEmail` writes there), so the mock refuses the unlink with the same error.
+The mock backend never reaches this guard: it cannot verify tokens, so it refuses every unlink request before dispatch.
 
 ### Surfacing in `user_emails.read`
 
@@ -135,7 +135,7 @@ nats request lfx.auth-service.add_alias \
 | Provider | Support |
 |----------|---------|
 | Auth0    | Full — creates a system-managed stub on the `email` connection, links it, and rolls back on link failure |
-| Mock     | Simulated — appends an `email`-connection identity and enforces the same unlink guard |
+| Mock     | Refused — the mock cannot verify tokens, so it rejects `add_alias` requests |
 | Authelia | Not supported — returns `alias service unavailable` |
 
 ### Environment Configuration

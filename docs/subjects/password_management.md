@@ -101,7 +101,7 @@ nats request lfx.auth-service.password.update \
 |----------|---------|
 | Auth0    | Full    |
 | Authelia | Not implemented |
-| Mock     | Stub (returns success without validation) |
+| Mock     | Refused — the mock cannot verify tokens, so it rejects password changes |
 
 ---
 
@@ -175,7 +175,7 @@ nats request lfx.auth-service.password.reset_link \
 |----------|---------|
 | Auth0    | Full    |
 | Authelia | Not implemented |
-| Mock     | Stub (returns success without sending email) |
+| Mock     | Refused — the mock cannot verify tokens, so it rejects reset link requests |
 
 ---
 

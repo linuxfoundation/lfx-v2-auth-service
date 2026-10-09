@@ -18,6 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -837,6 +838,34 @@ func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
 		user, err := writer.MetadataLookup(ctx, tokenString, "update:current_user_identities")
 		require.NoError(t, err)
 		assert.Equal(t, tokenString, user.Token)
+	})
+}
+
+func TestUserReaderWriter_MetadataLookup_ScopeGatedRejectsNonJWT(t *testing.T) {
+	ctx := context.Background()
+
+	jwtConfig, _ := createTestJWTVerificationConfig(t)
+	writer := &userReaderWriter{
+		config: Config{
+			JWTVerificationConfig: jwtConfig,
+		},
+	}
+
+	for _, input := range []string{"auth0|123456789", "john.doe"} {
+		t.Run(input, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input, constants.UserUpdateIdentityRequiredScope)
+			require.Error(t, err)
+			assert.Nil(t, user)
+			var unauthorized errors.Unauthorized
+			assert.ErrorAs(t, err, &unauthorized)
+		})
+	}
+
+	t.Run("read lookup without scopes still accepts a bare sub", func(t *testing.T) {
+		user, err := writer.MetadataLookup(ctx, "auth0|123456789")
+		require.NoError(t, err)
+		assert.Equal(t, "auth0|123456789", user.UserID)
+		assert.Empty(t, user.Token)
 	})
 }
 
