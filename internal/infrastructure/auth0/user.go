@@ -250,6 +250,15 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 
 	}
 
+	// Scope-gated lookups authorize writes on the caller's own account, so the
+	// caller must prove their identity with a verified JWT. A bare sub or
+	// username carries no proof of identity and must never be accepted as the
+	// acting principal for a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "scope-gated metadata lookup rejected: input is not a JWT")
+		return nil, errors.NewUnauthorized("a valid JWT token is required")
+	}
+
 	// Determine lookup strategy based on input format
 	switch {
 	case strings.Contains(input, "|"):

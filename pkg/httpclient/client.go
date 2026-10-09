@@ -77,10 +77,16 @@ func RetryAfter(err error) time.Duration {
 	return ParseRetryAfter(retryable.Headers)
 }
 
+// MaxRetryAfter caps any Retry-After hint. The header is upstream-supplied
+// input, not a trusted scheduling instruction: a wrong or hostile value must
+// not park a caller for hours or years.
+const MaxRetryAfter = 5 * time.Minute
+
 // ParseRetryAfter reads Retry-After, which is either delta-seconds or an
-// HTTP-date. It returns 0 when the header is absent, unparseable, or already in
-// the past, so a caller can treat 0 as "the server named no wait" and fall back
-// to its own backoff rather than retrying at once.
+// HTTP-date, and bounds the result by MaxRetryAfter. It returns 0 when the
+// header is absent, unparseable, or already in the past, so a caller can treat
+// 0 as "the server named no wait" and fall back to its own backoff rather than
+// retrying at once.
 func ParseRetryAfter(header http.Header) time.Duration {
 	raw := strings.TrimSpace(header.Get("Retry-After"))
 	if raw == "" {
@@ -90,11 +96,18 @@ func ParseRetryAfter(header http.Header) time.Duration {
 		if seconds <= 0 {
 			return 0
 		}
+		// Compared before converting, so a huge value cannot overflow.
+		if seconds > int(MaxRetryAfter/time.Second) {
+			return MaxRetryAfter
+		}
 		return time.Duration(seconds) * time.Second
+	} else if stderrors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+		// Too large even for an int, so further out than the ceiling.
+		return MaxRetryAfter
 	}
 	if deadline, err := http.ParseTime(raw); err == nil {
 		if wait := time.Until(deadline); wait > 0 {
-			return wait
+			return min(wait, MaxRetryAfter)
 		}
 	}
 	return 0

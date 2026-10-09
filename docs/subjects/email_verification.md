@@ -287,7 +287,7 @@ The Mock flow is fully self-contained — no NATS KV or SMTP is involved:
 
 1. **Send verification** (`email_linking.send_verification`): Generates a 6-digit OTP stored in-memory with a 5-minute TTL. The OTP is logged to stdout (no email is sent).
 2. **Verify OTP** (`email_linking.verify`): Compares the submitted code against the in-memory entry. On success, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
-3. **Link identity** (`user_identity.link`): Same `email|` dispatch — the verified email is appended to the user's `alternate_emails` in the in-memory store.
+3. **Link identity** (`user_identity.link`): Refused — the mock cannot verify tokens, so it rejects link requests. Steps 1–2 still work for local testing of the OTP exchange.
 
 > The Mock provider returns `alternate email already linked` (rather than `email already linked`) for an already-linked address — see the note under the error replies above.
 

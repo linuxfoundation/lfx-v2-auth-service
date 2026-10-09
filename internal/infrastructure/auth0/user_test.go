@@ -18,7 +18,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
-	apperrors "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -841,6 +841,34 @@ func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
 	})
 }
 
+func TestUserReaderWriter_MetadataLookup_ScopeGatedRejectsNonJWT(t *testing.T) {
+	ctx := context.Background()
+
+	jwtConfig, _ := createTestJWTVerificationConfig(t)
+	writer := &userReaderWriter{
+		config: Config{
+			JWTVerificationConfig: jwtConfig,
+		},
+	}
+
+	for _, input := range []string{"auth0|123456789", "john.doe"} {
+		t.Run(input, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input, constants.UserUpdateIdentityRequiredScope)
+			require.Error(t, err)
+			assert.Nil(t, user)
+			var unauthorized errors.Unauthorized
+			assert.ErrorAs(t, err, &unauthorized)
+		})
+	}
+
+	t.Run("read lookup without scopes still accepts a bare sub", func(t *testing.T) {
+		user, err := writer.MetadataLookup(ctx, "auth0|123456789")
+		require.NoError(t, err)
+		assert.Equal(t, "auth0|123456789", user.UserID)
+		assert.Empty(t, user.Token)
+	})
+}
+
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
 	ctx := context.Background()
 
@@ -1594,7 +1622,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 			require.Error(t, err)
-			var validationErr apperrors.Validation
+			var validationErr errors.Validation
 			assert.ErrorAs(t, err, &validationErr)
 			assert.Contains(t, err.Error(), "email already linked")
 			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""), "no user may be deleted")
@@ -1643,7 +1671,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 		require.Error(t, err)
-		var validationErr apperrors.Validation
+		var validationErr errors.Validation
 		assert.NotErrorAs(t, err, &validationErr, "infra failure must not look like a claim conflict")
 		assert.Contains(t, err.Error(), "failed to look up existing email stub user")
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
@@ -1684,7 +1712,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 			require.Error(t, err)
-			var validationErr apperrors.Validation
+			var validationErr errors.Validation
 			assert.NotErrorAs(t, err, &validationErr)
 			assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
 			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
@@ -1702,7 +1730,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
 		require.Error(t, err)
-		var validationErr apperrors.Validation
+		var validationErr errors.Validation
 		assert.NotErrorAs(t, err, &validationErr)
 		assert.Contains(t, err.Error(), "failed to delete orphaned email stub user")
 		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan1"))

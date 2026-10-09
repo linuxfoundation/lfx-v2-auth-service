@@ -220,7 +220,7 @@ nats request lfx.auth-service.user_metadata.update '{
 ```
 
 **Important Notes:**
-- The service works with Auth0, Authelia, and mock repositories based on configuration
+- The service works with Auth0 and Authelia repositories based on configuration; the mock repository refuses updates because it cannot verify tokens
 - `bio` is trimmed and capped at 2000 characters; longer values are silently truncated rather than rejected
 - `skills` accepts a comma-separated string and is normalized before storage: items are trimmed, empty items are dropped, and duplicates are removed via Unicode case folding (case-insensitive, so `"Go"` and `"go"` are treated as the same skill); when duplicates collide, the first occurrence's casing is kept
 - The raw `skills` input is capped at 4000 characters before it is split, and at most 50 unique, non-empty items are kept while splitting (empty segments and duplicates don't consume the quota); if the 4000-character cut lands inside an item, that whole item is dropped (never stored as a fragment), and if it lands inside the first item the value normalizes to empty — both caps apply before the final cap below

@@ -136,6 +136,19 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	return responseJSON
 }
 
+// errUnverifiedPrincipal is returned when a write is requested by a principal
+// that was not established from a verified token.
+const errUnverifiedPrincipal = "a valid JWT token is required"
+
+// isVerifiedPrincipal reports whether the user returned by a scope-gated
+// MetadataLookup was established from the caller's token, which the backend
+// verified (a signed JWT for Auth0, the OIDC userinfo endpoint for Authelia).
+// A bare sub or username leaves Token empty and
+// must never authorize a write performed with service credentials.
+func isVerifiedPrincipal(user *model.User) bool {
+	return user != nil && strings.TrimSpace(user.UserID) != "" && strings.TrimSpace(user.Token) != ""
+}
+
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
 func (m *messageHandlerOrchestrator) searchByEmail(ctx context.Context, criteria string, email string) (*model.User, error) {
 	if m.userReader == nil {
@@ -799,6 +812,9 @@ func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg por
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
 	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
+	}
 
 	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
 	if errChange != nil {
@@ -837,6 +853,9 @@ func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, 
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
@@ -891,6 +910,9 @@ func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg po
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, email)
@@ -1060,6 +1082,9 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
 	if errLookup != nil {
 		return m.errorResponse(errLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	// Fetch the canonical record with the service's M2M credentials (read:users),
