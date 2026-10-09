@@ -227,7 +227,8 @@ func sanitizeURL(rawURL string) string {
 	u.Fragment = ""
 	u.RawFragment = ""
 
-	// Sanitize path segments (e.g. /api/v2/users/{user_id}, /api/v2/users/{id}/identities/{provider}/{secondary_user_id}, or embedded emails)
+	// Sanitize path segments (e.g. /api/v2/users/{user_id}, /api/v2/users/{id}/identities/{provider}/{secondary_user_id},
+	// /v1/members/{member_id}/identities, or embedded emails)
 	// Split on the escaped path so an encoded separator (%2F) stays inside its
 	// own logical segment and is redacted as one identifier.
 	if escapedPath := u.EscapedPath(); escapedPath != "" {
@@ -246,6 +247,8 @@ func sanitizeURL(rawURL string) string {
 			}
 			switch {
 			case i > 0 && segments[i-1] == "users" && !strings.HasPrefix(seg, "by-"):
+				segments[i] = redaction.Redact(seg)
+			case i > 0 && segments[i-1] == "members" && seg != "resolve":
 				segments[i] = redaction.Redact(seg)
 			case i >= 2 && segments[i-2] == "identities":
 				segments[i] = redaction.Redact(seg)
