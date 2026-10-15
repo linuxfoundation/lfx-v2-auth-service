@@ -22,6 +22,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing of the release images.
+      id-token: write
     outputs:
       app_version: ${{ steps.prepare.outputs.app_version }}
       chart_name: ${{ steps.prepare.outputs.chart_name }}
@@ -61,23 +63,36 @@ jobs:
         with:
           version: v0.17.1
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159  # v3.9.2
+        with:
+          cosign-release: "${{ env.COSIGN_VERSION }}"
+
       - name: Build and publish auth-service image
         env:
           VERSION: ${{ steps.prepare.outputs.app_version }}
           GIT_COMMIT: ${{ github.sha }}
           STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         run: |
+          set -euo pipefail
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
           GIT_COMMIT=${GIT_COMMIT:0:7}
           export GIT_COMMIT
-          ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
+          IMAGE=$(ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t "${GITHUB_REF_NAME}" \
             -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
             -t latest \
-            --sbom spdx
+            --sbom spdx)
+          # Sign by digest so the signature binds to this build, not to a
+          # mutable tag.
+          if [[ "$IMAGE" != *@sha256:* ]]; then
+            echo "ko did not return a digest reference: $IMAGE" >&2
+            exit 1
+          fi
+          cosign sign --yes "$IMAGE"
 
       - name: Build and publish merge-repair image
         env:
@@ -85,17 +100,25 @@ jobs:
           GIT_COMMIT: ${{ github.sha }}
           STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         run: |
+          set -euo pipefail
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
           GIT_COMMIT=${GIT_COMMIT:0:7}
           export GIT_COMMIT
-          ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/cdp-merge-repair \
+          IMAGE=$(ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/cdp-merge-repair \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t "${GITHUB_REF_NAME}" \
             -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
             -t latest \
-            --sbom spdx
+            --sbom spdx)
+          # Sign by digest so the signature binds to this build, not to a
+          # mutable tag.
+          if [[ "$IMAGE" != *@sha256:* ]]; then
+            echo "ko did not return a digest reference: $IMAGE" >&2
+            exit 1
+          fi
+          cosign sign --yes "$IMAGE"
 
   release-helm-chart:
     needs: publish

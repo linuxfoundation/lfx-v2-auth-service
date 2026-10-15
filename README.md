@@ -129,6 +129,7 @@ To create a new release of the auth service:
 
 3. **The GitHub Actions workflow will automatically**:
    - Build and publish the container images (auth-service)
+   - Sign the container images with Cosign (keyless, by digest)
    - Package and publish the Helm chart to GitHub Pages
    - Publish the chart to GitHub Container Registry (GHCR)
    - Sign the chart with Cosign
@@ -143,6 +144,7 @@ To create a new release of the auth service:
 - Only update the chart `version` field when making releases - this represents the Helm chart version.
 - The container image tags are automatically managed by the consolidated CI/CD pipeline using the git tag.
 - Both container images (auth-service) and the Helm chart are published together in a single workflow.
+- Pull request builds (`ko-build-branch.yaml`) only verify the container build; they never publish images.
 
 ## Development
 
