@@ -81,6 +81,23 @@ const skillsMaxCount = 50
 // items, so a delimiter-heavy payload can't force an oversized allocation.
 const skillsMaxRawLength = 4000
 
+// metadataFieldMaxLength is the maximum number of characters allowed in each
+// short user_metadata string field (names, job title, organization, location,
+// phone, t-shirt size, zoneinfo). Auth0 imposes no limit short of its 16 MB
+// metadata ceiling and merges keys on PATCH, so without a cap here repeated
+// updates could grow a record without bound; longer values are truncated
+// during sanitization.
+const metadataFieldMaxLength = 255
+
+// addressMaxLength is the maximum number of characters allowed in the address
+// field, which may span several lines. Longer values are truncated during
+// sanitization.
+const addressMaxLength = 1000
+
+// pictureMaxLength is the maximum number of characters allowed in the picture
+// URL. Longer values are truncated during sanitization.
+const pictureMaxLength = 2048
+
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
 
@@ -160,45 +177,19 @@ func (u User) BuildSubIndexKey(ctx context.Context) string {
 
 // sanitize sanitizes the user metadata by cleaning up string fields
 func (um *UserMetadata) userMetadataSanitize() {
-	if um.Name != nil {
-		*um.Name = strings.TrimSpace(*um.Name)
-	}
-	if um.GivenName != nil {
-		*um.GivenName = strings.TrimSpace(*um.GivenName)
-	}
-	if um.FamilyName != nil {
-		*um.FamilyName = strings.TrimSpace(*um.FamilyName)
-	}
-	if um.JobTitle != nil {
-		*um.JobTitle = strings.TrimSpace(*um.JobTitle)
-	}
-	if um.Organization != nil {
-		*um.Organization = strings.TrimSpace(*um.Organization)
-	}
-	if um.OrganizationDomain != nil {
-		*um.OrganizationDomain = strings.TrimSpace(*um.OrganizationDomain)
-	}
-	if um.Country != nil {
-		*um.Country = strings.TrimSpace(*um.Country)
-	}
-	if um.StateProvince != nil {
-		*um.StateProvince = strings.TrimSpace(*um.StateProvince)
-	}
-	if um.City != nil {
-		*um.City = strings.TrimSpace(*um.City)
-	}
-	if um.Address != nil {
-		*um.Address = strings.TrimSpace(*um.Address)
-	}
-	if um.PostalCode != nil {
-		*um.PostalCode = strings.TrimSpace(*um.PostalCode)
-	}
-	if um.PhoneNumber != nil {
-		*um.PhoneNumber = strings.TrimSpace(*um.PhoneNumber)
-	}
-	if um.TShirtSize != nil {
-		*um.TShirtSize = strings.TrimSpace(*um.TShirtSize)
-	}
+	sanitizeField(um.Name, metadataFieldMaxLength)
+	sanitizeField(um.GivenName, metadataFieldMaxLength)
+	sanitizeField(um.FamilyName, metadataFieldMaxLength)
+	sanitizeField(um.JobTitle, metadataFieldMaxLength)
+	sanitizeField(um.Organization, metadataFieldMaxLength)
+	sanitizeField(um.OrganizationDomain, metadataFieldMaxLength)
+	sanitizeField(um.Country, metadataFieldMaxLength)
+	sanitizeField(um.StateProvince, metadataFieldMaxLength)
+	sanitizeField(um.City, metadataFieldMaxLength)
+	sanitizeField(um.Address, addressMaxLength)
+	sanitizeField(um.PostalCode, metadataFieldMaxLength)
+	sanitizeField(um.PhoneNumber, metadataFieldMaxLength)
+	sanitizeField(um.TShirtSize, metadataFieldMaxLength)
 	if um.Bio != nil {
 		*um.Bio = strings.TrimSpace(*um.Bio)
 		if runes := []rune(*um.Bio); len(runes) > bioMaxLength {
@@ -208,11 +199,27 @@ func (um *UserMetadata) userMetadataSanitize() {
 	if um.Skills != nil {
 		*um.Skills = sanitizeSkills(*um.Skills)
 	}
-	if um.Picture != nil {
-		*um.Picture = strings.TrimSpace(*um.Picture)
+	sanitizeField(um.Picture, pictureMaxLength)
+	sanitizeField(um.Zoneinfo, metadataFieldMaxLength)
+}
+
+// sanitizeField trims a nullable string field in place and caps it at limit
+// characters, truncating on a rune boundary. Runes are counted while walking
+// the string rather than via []rune, so the cap costs no allocation
+// proportional to an oversized input.
+func sanitizeField(value *string, limit int) {
+	if value == nil {
+		return
 	}
-	if um.Zoneinfo != nil {
-		*um.Zoneinfo = strings.TrimSpace(*um.Zoneinfo)
+	*value = strings.TrimSpace(*value)
+	count := 0
+	for i := range *value {
+		if count == limit {
+			// The cut may land on whitespace inside the value.
+			*value = strings.TrimSpace((*value)[:i])
+			return
+		}
+		count++
 	}
 }
 

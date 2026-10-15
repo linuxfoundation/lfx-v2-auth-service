@@ -55,6 +55,19 @@ const maxEventAttempts = 5
 // drops anyone already provisioned before any CDP call is made.
 const maxBarrenReconnects = 3
 
+// stuckOffsetRetryInterval is the wait between attempts on an offset that is
+// still barren after the replay window has already been tried for it.
+//
+// The replay cures a dead cursor, but not a position whose next frame fails
+// deterministically: the replay re-reads the whole window, saves the same
+// offset again and meets the same failure, and the barren guard would then
+// send it round again for as long as that frame stays in the window. Every
+// round re-reads every event in the window, each candidate a Management API
+// read on a limit shared with the user-facing handlers. So one replay is
+// allowed per position, and after that the offset is kept and retried slowly,
+// at the cost of one failed connection per interval rather than a window.
+const stuckOffsetRetryInterval = 5 * time.Minute
+
 // offsetAgeInterval is how often the offset-age gauge is emitted.
 const offsetAgeInterval = 1 * time.Minute
 
@@ -105,6 +118,7 @@ type Consumer struct {
 	minBackoff       time.Duration
 	maxBackoff       time.Duration
 	refusalBackoff   time.Duration
+	stuckBackoff     time.Duration
 	maxRateLimitWait time.Duration
 
 	// Failure bookkeeping for the message currently being retried.
@@ -116,6 +130,11 @@ type Consumer struct {
 	barrenOffset string
 	barrenRuns   int
 	processed    int
+
+	// replayedOffset is the stored offset that last sent the consumer back to
+	// the replay window, held until a connection resumed from a stored offset
+	// moves on. Touched only by Run's goroutine.
+	replayedOffset string
 
 	// lastAdvance is the local-clock time the offset last moved, as UnixNano.
 	// The age reporter reads it from another goroutine.
@@ -154,6 +173,7 @@ func NewConsumer(options ...ConsumerOption) (*Consumer, error) {
 		minBackoff:       minReconnectBackoff,
 		maxBackoff:       maxReconnectBackoff,
 		refusalBackoff:   forbiddenRetryInterval,
+		stuckBackoff:     stuckOffsetRetryInterval,
 		maxRateLimitWait: maxRateLimitWait,
 	}
 	for _, option := range options {
@@ -209,6 +229,13 @@ func (c *Consumer) Run(ctx context.Context) {
 		err = c.events.Subscribe(ctx, opts, c.handle)
 		madeProgress := c.processed > processedBefore
 		lasted := c.now().Sub(openedAt)
+
+		// Reading on from a stored offset is the only proof the position the
+		// last replay was taken for is behind us. Progress on the replay
+		// connection itself proves nothing: it re-reads what lies before it.
+		if madeProgress && opts.From != "" {
+			c.replayedOffset = ""
+		}
 
 		switch {
 		case ctx.Err() != nil:
@@ -273,12 +300,29 @@ func (c *Consumer) Run(ctx context.Context) {
 		// minute, and buy a needless replay once it clears.
 		limited, isRateLimited := rateLimit(err)
 		if !refused(err) && !isRateLimited && c.barren(opts.From, madeProgress) {
+			if opts.From == c.replayedOffset {
+				// The replay already ran for this position and led straight
+				// back to it, so the window cannot cure it. Another replay
+				// would only re-read the window; the offset is held and
+				// retried slowly instead, and the offset-age gauge carries
+				// the stall.
+				slog.ErrorContext(ctx, "events offset still fails after a replay led back to it, holding it rather than replaying again",
+					"error", err,
+					"retry_in", c.stuckBackoff,
+				)
+				if !sleep(ctx, c.stuckBackoff) {
+					return
+				}
+				continue
+			}
+
 			slog.ErrorContext(ctx, "events offset has produced only failed connections, restarting from the replay window",
 				"error", err,
 				"attempts", maxBarrenReconnects,
 				"replay_window", c.replayWindow,
 			)
 			if c.restartFromReplayWindow(ctx) {
+				c.replayedOffset = opts.From
 				backoff = c.minBackoff
 				continue
 			}
