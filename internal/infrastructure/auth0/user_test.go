@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -1018,6 +1019,7 @@ func (f fakeTokenSource) Token() (*oauth2.Token, error) {
 type recordedCall struct {
 	method string
 	path   string
+	query  string
 	body   string
 }
 
@@ -1037,6 +1039,8 @@ type fakeAuth0Transport struct {
 	createStatuses []int
 	byEmailStatus  int    // status for GET /api/v2/users-by-email
 	byEmailResp    string // body for GET /api/v2/users-by-email
+	searchStatus   int    // status for GET /api/v2/users (identity-email search)
+	searchResp     string // body for GET /api/v2/users (identity-email search)
 	deleteStatus   int    // status for DELETE /api/v2/users/{id}; 0 means 204
 	linkStatus     int    // status for POST /api/v2/users/{id}/identities
 	patchStatus    int    // status for PATCH /api/v2/users/{id}
@@ -1055,6 +1059,8 @@ func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
 		patchStatus:   http.StatusOK,
 		byEmailStatus: http.StatusOK,
 		byEmailResp:   "[]",
+		searchStatus:  http.StatusOK,
+		searchResp:    "[]",
 	}
 }
 
@@ -1064,7 +1070,7 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		bodyBytes, _ = io.ReadAll(req.Body)
 		_ = req.Body.Close()
 	}
-	f.calls = append(f.calls, recordedCall{method: req.Method, path: req.URL.Path, body: string(bodyBytes)})
+	f.calls = append(f.calls, recordedCall{method: req.Method, path: req.URL.Path, query: req.URL.RawQuery, body: string(bodyBytes)})
 
 	// Routes are scoped to the exact Auth0 Management API paths the adapter is
 	// expected to hit; anything else returns 404 so a wrong-path regression fails
@@ -1076,6 +1082,8 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		body = f.getUserResp
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users-by-email":
 		status, body = f.byEmailStatus, f.byEmailResp
+	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users":
+		status, body = f.searchStatus, f.searchResp
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		// GET of any other user id is the rollback stub verification.
 		status, body = f.stubGetStatus, f.stubGetResp
@@ -1504,6 +1512,8 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Equal(t, "email|stub123", stubID)
 
 		assert.Equal(t, []string{
+			"GET /api/v2/users-by-email",
+			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
 		}, ft.methodPaths())
@@ -1538,12 +1548,134 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to link email identity")
 
 		assert.Equal(t, []string{
+			"GET /api/v2/users-by-email",
+			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
 			"GET /api/v2/users/email|stub123",
 			"DELETE /api/v2/users/email|stub123",
 		}, ft.methodPaths())
 	})
+}
+
+func TestUserReaderWriter_AddSystemManagedEmail_ExistingClaimOnAnyConnection(t *testing.T) {
+	ctx := context.Background()
+
+	byRootEmail := []struct {
+		name string
+		resp string
+	}{
+		{
+			name: "google-oauth2 primary",
+			resp: `[{"user_id":"google-oauth2|v1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"google-oauth2","provider":"google-oauth2","isSocial":true}]}]`,
+		},
+		{
+			name: "github primary",
+			resp: `[{"user_id":"github|v1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"github","provider":"github","isSocial":true}]}]`,
+		},
+		{
+			name: "enterprise (SAML) primary",
+			resp: `[{"user_id":"samlp|corp|v1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"corp","provider":"samlp"}]}]`,
+		},
+		{
+			name: "unverified social primary with mixed-case email",
+			resp: `[{"user_id":"linkedin|v1","email":"Alias@Linux.com","email_verified":false,` +
+				`"identities":[{"connection":"linkedin","provider":"linkedin","isSocial":true}]}]`,
+		},
+		{
+			name: "database primary",
+			resp: `[{"user_id":"auth0|v1","email":"alias@linux.com","email_verified":true,` +
+				`"identities":[{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"v1"}]}]`,
+		},
+	}
+	for _, tc := range byRootEmail {
+		t.Run("root email held via "+tc.name+" blocks the claim", func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.byEmailResp = tc.resp
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			var validationErr errors.Validation
+			assert.ErrorAs(t, err, &validationErr)
+			assert.Contains(t, err.Error(), "email already linked")
+			assert.Equal(t, 0, ft.countFor(http.MethodPost, ""), "no stub may be created or linked")
+		})
+	}
+
+	t.Run("identity email on a linked social identity blocks the claim", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.searchResp = `[{"user_id":"auth0|v1","email":"someone@example.org","email_verified":true,"identities":[` +
+			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"v1"},` +
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"ALIAS@linux.com","email_verified":true}}]}]`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		var validationErr errors.Validation
+		assert.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
+	})
+
+	t.Run("identity-email search queries profileData.email with a quoted value", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "Alias@Linux.com")
+		require.NoError(t, err)
+
+		var query string
+		for _, c := range ft.calls {
+			if c.method == http.MethodGet && c.path == "/api/v2/users" {
+				query = c.query
+			}
+		}
+		values, errParse := url.ParseQuery(query)
+		require.NoError(t, errParse)
+		assert.Equal(t, `identities.profileData.email:"alias@linux.com"`, values.Get("q"))
+		assert.Equal(t, "v3", values.Get("search_engine"))
+	})
+
+	t.Run("unrelated users returned by the lookups do not block the claim", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.byEmailResp = `[{"user_id":"google-oauth2|v1","email":"other@linux.com","identities":[{"connection":"google-oauth2"}]}]`
+		ft.searchResp = `[{"user_id":"auth0|v2","email":"x@example.org","identities":[` +
+			`{"connection":"github","profileData":{"email":"aliasx@linux.com"}}]}]`
+		rw := newTestReaderWriter(ft)
+
+		stubID, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, "email|stub123", stubID)
+	})
+
+	lookupFailures := []struct {
+		name string
+		set  func(ft *fakeAuth0Transport)
+	}{
+		{name: "root email lookup", set: func(ft *fakeAuth0Transport) {
+			ft.byEmailStatus, ft.byEmailResp = http.StatusInternalServerError, `{"error":"boom"}`
+		}},
+		{name: "identity email lookup", set: func(ft *fakeAuth0Transport) {
+			ft.searchStatus, ft.searchResp = http.StatusInternalServerError, `{"error":"boom"}`
+		}},
+	}
+	for _, tc := range lookupFailures {
+		t.Run(tc.name+" failure fails closed as an unexpected error", func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			tc.set(ft)
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			var validationErr errors.Validation
+			assert.NotErrorAs(t, err, &validationErr, "infra failure must not look like a claim conflict")
+			assert.Contains(t, err.Error(), "failed to check email availability")
+			assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
+		})
+	}
 }
 
 func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.T) {
@@ -1565,6 +1697,8 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		assert.Equal(t, "email|stub123", stubID)
 
 		assert.Equal(t, []string{
+			"GET /api/v2/users-by-email",
+			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"GET /api/v2/users-by-email",
 			"GET /api/v2/users/email|orphan1",
@@ -1620,7 +1754,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			ft.byEmailResp = tc.resp
 			rw := newTestReaderWriter(ft)
 
-			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			_, err := rw.createAndLinkEmailIdentity(ctx, testPrimaryUserID, "alias@linux.com", true, &Auth0AppMetadata{SystemManaged: true})
 			require.Error(t, err)
 			var validationErr errors.Validation
 			assert.ErrorAs(t, err, &validationErr)
@@ -1654,7 +1788,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			ft.stubGetResp = tc.record
 			rw := newTestReaderWriter(ft)
 
-			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			_, err := rw.createAndLinkEmailIdentity(ctx, testPrimaryUserID, "alias@linux.com", true, &Auth0AppMetadata{SystemManaged: true})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "email already linked")
 			assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
@@ -1669,7 +1803,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		ft.byEmailResp = `{"error":"boom"}`
 		rw := newTestReaderWriter(ft)
 
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		_, err := rw.createAndLinkEmailIdentity(ctx, testPrimaryUserID, "alias@linux.com", true, &Auth0AppMetadata{SystemManaged: true})
 		require.Error(t, err)
 		var validationErr errors.Validation
 		assert.NotErrorAs(t, err, &validationErr, "infra failure must not look like a claim conflict")
@@ -1774,7 +1908,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			`"identities":[{"connection":"email","provider":"email"}]}`
 		rw := newTestReaderWriter(ft)
 
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		_, err := rw.createAndLinkEmailIdentity(ctx, testPrimaryUserID, "alias@linux.com", true, &Auth0AppMetadata{SystemManaged: true})
 		require.NoError(t, err)
 		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/api/v2/users/email|orphan2"))
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/api/v2/users/auth0|db1"))
@@ -1787,7 +1921,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 		ft.stubGetResp = orphanRecord
 		rw := newTestReaderWriter(ft)
 
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		_, err := rw.createAndLinkEmailIdentity(ctx, testPrimaryUserID, "alias@linux.com", true, &Auth0AppMetadata{SystemManaged: true})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "email already linked")
 		assert.Equal(t, 2, ft.countFor(http.MethodPost, "/api/v2/users"))
