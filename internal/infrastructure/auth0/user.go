@@ -587,6 +587,12 @@ func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mT
 	normalized := strings.ToLower(strings.TrimSpace(email))
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(normalized)
 
+	// users-by-email is case-sensitive and social/enterprise connections may
+	// keep the provider's casing, so the root email is also searched through
+	// the normalized (case-insensitive) v3 "email" field. users-by-email is kept
+	// because, unlike the search index, it is not eventually consistent.
+	// identities.profileData.email has no case-insensitive search; results are
+	// still compared case-insensitively by holdsEmail.
 	lookups := []struct {
 		description string
 		endpoint    string
@@ -594,6 +600,10 @@ func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mT
 		{
 			description: "look up users by root email",
 			endpoint:    "users-by-email?email=" + url.QueryEscape(normalized),
+		},
+		{
+			description: "search users by root email",
+			endpoint:    "users?q=" + url.QueryEscape(`email:"`+escaped+`"`) + "&search_engine=v3",
 		},
 		{
 			description: "look up users by identity email",

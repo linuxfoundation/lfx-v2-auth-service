@@ -1036,31 +1036,35 @@ type fakeAuth0Transport struct {
 	createResp    string // body for POST /api/v2/users
 	// createStatuses, when non-empty, is consumed one entry per POST
 	// /api/v2/users call before falling back to createStatus.
-	createStatuses []int
-	byEmailStatus  int    // status for GET /api/v2/users-by-email
-	byEmailResp    string // body for GET /api/v2/users-by-email
-	searchStatus   int    // status for GET /api/v2/users (identity-email search)
-	searchResp     string // body for GET /api/v2/users (identity-email search)
-	deleteStatus   int    // status for DELETE /api/v2/users/{id}; 0 means 204
-	linkStatus     int    // status for POST /api/v2/users/{id}/identities
-	patchStatus    int    // status for PATCH /api/v2/users/{id}
-	calls          []recordedCall
+	createStatuses   []int
+	byEmailStatus    int    // status for GET /api/v2/users-by-email
+	byEmailResp      string // body for GET /api/v2/users-by-email
+	rootSearchStatus int    // status for GET /api/v2/users?q=email:... (root-email search)
+	rootSearchResp   string // body for GET /api/v2/users?q=email:... (root-email search)
+	searchStatus     int    // status for GET /api/v2/users (identity-email search)
+	searchResp       string // body for GET /api/v2/users (identity-email search)
+	deleteStatus     int    // status for DELETE /api/v2/users/{id}; 0 means 204
+	linkStatus       int    // status for POST /api/v2/users/{id}/identities
+	patchStatus      int    // status for PATCH /api/v2/users/{id}
+	calls            []recordedCall
 }
 
 func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
 	return &fakeAuth0Transport{
-		primaryUserID: primaryUserID,
-		getUserResp:   getUserResp,
-		stubGetStatus: http.StatusOK,
-		stubGetResp:   `{"user_id":"email|stub123","identities":[{"connection":"email","provider":"email"}]}`,
-		createStatus:  http.StatusCreated,
-		createResp:    `{"user_id":"email|stub123"}`,
-		linkStatus:    http.StatusCreated,
-		patchStatus:   http.StatusOK,
-		byEmailStatus: http.StatusOK,
-		byEmailResp:   "[]",
-		searchStatus:  http.StatusOK,
-		searchResp:    "[]",
+		primaryUserID:    primaryUserID,
+		getUserResp:      getUserResp,
+		stubGetStatus:    http.StatusOK,
+		stubGetResp:      `{"user_id":"email|stub123","identities":[{"connection":"email","provider":"email"}]}`,
+		createStatus:     http.StatusCreated,
+		createResp:       `{"user_id":"email|stub123"}`,
+		linkStatus:       http.StatusCreated,
+		patchStatus:      http.StatusOK,
+		byEmailStatus:    http.StatusOK,
+		byEmailResp:      "[]",
+		rootSearchStatus: http.StatusOK,
+		rootSearchResp:   "[]",
+		searchStatus:     http.StatusOK,
+		searchResp:       "[]",
 	}
 }
 
@@ -1082,6 +1086,9 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		body = f.getUserResp
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users-by-email":
 		status, body = f.byEmailStatus, f.byEmailResp
+	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users" &&
+		strings.HasPrefix(req.URL.Query().Get("q"), "email:"):
+		status, body = f.rootSearchStatus, f.rootSearchResp
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users":
 		status, body = f.searchStatus, f.searchResp
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
@@ -1514,6 +1521,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Equal(t, []string{
 			"GET /api/v2/users-by-email",
 			"GET /api/v2/users",
+			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
 		}, ft.methodPaths())
@@ -1549,6 +1557,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 
 		assert.Equal(t, []string{
 			"GET /api/v2/users-by-email",
+			"GET /api/v2/users",
 			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
@@ -1610,7 +1619,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_ExistingClaimOnAnyConnection(t *
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.searchResp = `[{"user_id":"auth0|v1","email":"someone@example.org","email_verified":true,"identities":[` +
 			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"v1"},` +
-			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"ALIAS@linux.com","email_verified":true}}]}]`
+			`{"connection":"google-oauth2","provider":"google-oauth2","profileData":{"email":"alias@linux.com","email_verified":true}}]}]`
 		rw := newTestReaderWriter(ft)
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
@@ -1620,23 +1629,56 @@ func TestUserReaderWriter_AddSystemManagedEmail_ExistingClaimOnAnyConnection(t *
 		assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
 	})
 
-	t.Run("identity-email search queries profileData.email with a quoted value", func(t *testing.T) {
+	t.Run("searches query the root and identity emails with quoted values", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		rw := newTestReaderWriter(ft)
 
 		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "Alias@Linux.com")
 		require.NoError(t, err)
 
-		var query string
+		var queries []string
 		for _, c := range ft.calls {
 			if c.method == http.MethodGet && c.path == "/api/v2/users" {
-				query = c.query
+				values, errParse := url.ParseQuery(c.query)
+				require.NoError(t, errParse)
+				assert.Equal(t, "v3", values.Get("search_engine"))
+				queries = append(queries, values.Get("q"))
 			}
 		}
-		values, errParse := url.ParseQuery(query)
-		require.NoError(t, errParse)
-		assert.Equal(t, `identities.profileData.email:"alias@linux.com"`, values.Get("q"))
-		assert.Equal(t, "v3", values.Get("search_engine"))
+		assert.Equal(t, []string{
+			`email:"alias@linux.com"`,
+			`identities.profileData.email:"alias@linux.com"`,
+		}, queries)
+	})
+
+	t.Run("root email stored with provider casing is found by the case-insensitive search", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		// users-by-email is case-sensitive and misses this user; the v3
+		// email search is case-insensitive and returns it.
+		ft.rootSearchResp = `[{"user_id":"samlp|corp|v1","email":"Alias@Linux.com","email_verified":true,` +
+			`"identities":[{"connection":"corp","provider":"samlp"}]}]`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		var validationErr errors.Validation
+		assert.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
+	})
+
+	t.Run("an orphaned stub does not hide another holder of the address", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.byEmailResp = `[` +
+			`{"user_id":"email|orphan1","email":"alias@linux.com","created_at":"2020-01-01T00:00:00.000Z","email_verified":false,"identities":[{"connection":"email","provider":"email"}]},` +
+			`{"user_id":"auth0|db1","email":"alias@linux.com","email_verified":false,"identities":[{"connection":"Username-Password-Authentication"}]}]`
+		rw := newTestReaderWriter(ft)
+
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.Error(t, err)
+		var validationErr errors.Validation
+		assert.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, ""))
 	})
 
 	t.Run("unrelated users returned by the lookups do not block the claim", func(t *testing.T) {
@@ -1657,6 +1699,9 @@ func TestUserReaderWriter_AddSystemManagedEmail_ExistingClaimOnAnyConnection(t *
 	}{
 		{name: "root email lookup", set: func(ft *fakeAuth0Transport) {
 			ft.byEmailStatus, ft.byEmailResp = http.StatusInternalServerError, `{"error":"boom"}`
+		}},
+		{name: "root email search", set: func(ft *fakeAuth0Transport) {
+			ft.rootSearchStatus, ft.rootSearchResp = http.StatusInternalServerError, `{"error":"boom"}`
 		}},
 		{name: "identity email lookup", set: func(ft *fakeAuth0Transport) {
 			ft.searchStatus, ft.searchResp = http.StatusInternalServerError, `{"error":"boom"}`
@@ -1698,6 +1743,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 
 		assert.Equal(t, []string{
 			"GET /api/v2/users-by-email",
+			"GET /api/v2/users",
 			"GET /api/v2/users",
 			"POST /api/v2/users",
 			"GET /api/v2/users-by-email",
