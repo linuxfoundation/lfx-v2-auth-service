@@ -95,8 +95,9 @@ const metadataFieldMaxLength = 255
 const addressMaxLength = 1000
 
 // pictureMaxLength is the maximum number of characters allowed in the picture
-// URL. Longer values are truncated during sanitization.
-const pictureMaxLength = 2048
+// URL. It is generous so that long signed URLs still fit; longer values are
+// truncated during sanitization.
+const pictureMaxLength = 4096
 
 // Validate validates the user data and returns an error if validation fails
 func (u *User) Validate() error {
