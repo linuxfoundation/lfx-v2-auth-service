@@ -1007,20 +1007,7 @@ type addAliasResponse struct {
 // isAllowedAliasDomain reports whether domain is listed in ALLOWED_ALIAS_DOMAINS
 // (comma-separated, case-insensitive). Empty/unset env means no alias domains.
 func isAllowedAliasDomain(domain string) bool {
-	domain = strings.TrimSpace(domain)
-	if domain == "" {
-		return false
-	}
-	raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey))
-	if raw == "" {
-		return false
-	}
-	for _, d := range strings.Split(raw, ",") {
-		if strings.EqualFold(domain, strings.TrimSpace(d)) {
-			return true
-		}
-	}
-	return false
+	return model.IsAllowedAliasDomain(domain, os.Getenv(constants.AllowedAliasDomainsEnvKey))
 }
 
 // isAliasDomainAddress reports whether address (in any form net/mail accepts)

@@ -622,25 +622,16 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 }
 
 // isAliasDomainEmail reports whether email's domain is listed in
-// ALLOWED_ALIAS_DOMAINS (comma-separated, case-insensitive). Addresses on these
-// domains can only be claimed through add_alias, so any linked email identity
-// on one is a system-managed alias.
+// ALLOWED_ALIAS_DOMAINS, using the same matching rule as alias claims and
+// email linking. Addresses on these domains can only be claimed through
+// add_alias, so any linked email identity on one is a system-managed alias.
 func isAliasDomainEmail(email string) bool {
 	email = strings.TrimSpace(email)
 	at := strings.LastIndex(email, "@")
 	if at < 0 {
 		return false
 	}
-	domain := strings.TrimSuffix(strings.TrimSpace(email[at+1:]), ".")
-	if domain == "" {
-		return false
-	}
-	for _, d := range strings.Split(os.Getenv(constants.AllowedAliasDomainsEnvKey), ",") {
-		if strings.EqualFold(domain, strings.TrimSuffix(strings.TrimSpace(d), ".")) {
-			return true
-		}
-	}
-	return false
+	return model.IsAllowedAliasDomain(email[at+1:], os.Getenv(constants.AllowedAliasDomainsEnvKey))
 }
 
 // AddSystemManagedEmail creates a stub Auth0 passwordless user for email,
