@@ -859,7 +859,7 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 
 	// JWT verification config is required
 	if auth0Config.JWTVerificationConfig == nil {
-		jwtConfig, errNewJWTVerificationConfig := NewJWTVerificationConfig(ctx, auth0Config.Domain, httpClient)
+		jwtConfig, errNewJWTVerificationConfig := NewJWTVerificationConfig(ctx, auth0Config.Domain)
 		if errNewJWTVerificationConfig != nil {
 			return nil, errors.NewUnexpected("failed to create JWT verification config", errNewJWTVerificationConfig)
 		}
