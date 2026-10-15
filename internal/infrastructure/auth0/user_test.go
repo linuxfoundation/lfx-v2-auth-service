@@ -1013,7 +1013,9 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 		wantNotFound  bool
 		wantErr       bool
 		wantCalls     []string // when set, the exact calls the guard must make
-		wantBackfill  bool     // the guard must backfill the marker for this identity
+		wantBackfill  bool     // the guard must backfill (attempt to PATCH) the marker; otherwise no PATCH may be sent
+		// wantBackfillBody overrides the expected backfill PATCH body.
+		wantBackfillBody string
 	}{
 		{
 			name:          "marked alias is refused after its domain is retired and the stub is gone",
@@ -1044,6 +1046,26 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			stubGetStatus: http.StatusNotFound,
 			patchStatus:   http.StatusInternalServerError,
 			wantForbidden: true,
+			wantBackfill:  true, // the PATCH must have been attempted
+		},
+		{
+			name:          "alias-domain identity is refused when the stub lookup fails",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "backfill appends to existing marker without re-reading the primary",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identities":["older1"]},"identities":[` + aliasIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
+			wantForbidden: true,
+			wantCalls: []string{
+				"GET /api/v2/users/auth0|test123",
+				"GET /api/v2/users/email|stub123",
+				"PATCH /api/v2/users/auth0|test123",
+			},
+			wantBackfillBody: `{"app_metadata":{"system_managed_identities":["older1","stub123"]}}`,
 		},
 		{
 			name:          "unmarked alias without its domain or stub is unlinked",
@@ -1058,6 +1080,7 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			stubGetStatus: http.StatusNotFound,
 			stubGetResp:   `{"error":"not found"}`,
 			wantForbidden: true,
+			wantBackfill:  true,
 		},
 		{
 			name:          "case and whitespace variants of the email provider are guarded",
@@ -1066,9 +1089,10 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			stubGetStatus: http.StatusNotFound,
 			stubGetResp:   `{"error":"not found"}`,
 			wantForbidden: true,
+			wantBackfill:  true,
 		},
 		{
-			name:          "alias identity is refused when the stub has lost its app_metadata",
+			name:          "alias-domain identity whose stub lacks system_managed is refused but not recorded",
 			getUserResp:   primaryWith(aliasIdentity),
 			stubGetStatus: http.StatusOK,
 			stubGetResp:   `{"user_id":"email|stub123"}`,
@@ -1158,15 +1182,22 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			default:
 				require.NoError(t, err)
 				assert.Equal(t, 1, ft.countFor(http.MethodDelete, unlinkPath))
+				assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "a permitted unlink must not mark the identity")
 				return
 			}
 			if tt.wantCalls != nil {
 				assert.Equal(t, tt.wantCalls, ft.methodPaths())
 			}
-			if tt.wantBackfill {
+			if tt.wantBackfill || tt.wantBackfillBody != "" {
+				want := backfillBody
+				if tt.wantBackfillBody != "" {
+					want = tt.wantBackfillBody
+				}
 				patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
 				require.True(t, ok, "the guard must backfill the system-managed marker")
-				assert.JSONEq(t, backfillBody, patchBody)
+				assert.JSONEq(t, want, patchBody)
+			} else {
+				assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "this identity must not be recorded as system-managed")
 			}
 			assert.Zero(t, ft.countFor(http.MethodDelete, unlinkPath), "a refused unlink must never reach Auth0")
 		})

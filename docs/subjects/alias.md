@@ -99,10 +99,7 @@ The `system_managed` flag is also written to the **stub user record** at claim t
 
 The linked identity reports `provider: "email"` because Auth0's `provider` field maps to a fixed set of connection **strategies** (`auth0`, `email`, `sms`, `google-oauth2`, etc.) — it is not a free-form label this service controls. The passwordless `email` strategy is the right fit for system-managed aliases (no password, pre-verified, linkable as a secondary).
 
-To distinguish a system-managed alias from a regular email identity, callers should either:
-
-- Check whether the identity id is listed in the primary user's `app_metadata.system_managed_identities`, **or**
-- Check the email suffix against `ALLOWED_ALIAS_DOMAINS`.
+To distinguish a system-managed alias from a regular email identity, callers should check whether the identity id is listed in the primary user's `app_metadata.system_managed_identities`, **and** fall back to checking the email suffix against `ALLOWED_ALIAS_DOMAINS` (aliases claimed before the marker existed, or whose marker write failed, are not listed until backfilled).
 
 ### Unlink Guard
 
@@ -113,7 +110,7 @@ A subsequent `lfx.auth-service.user_identity.unlink` call targeting an `email`-c
 3. If that `identity_id` is listed in the primary user's `app_metadata.system_managed_identities`, the adapter returns `errors.NewForbidden("system_managed_identity")`. This holds regardless of `ALLOWED_ALIAS_DOMAINS` (so removing a domain from the allow-list does not expose aliases already claimed on it) and regardless of whether the stub record is still retrievable.
 4. Otherwise, if the entry's `profileData.email` is on an `ALLOWED_ALIAS_DOMAINS` domain, the adapter returns `system_managed_identity`.
 5. Otherwise the adapter also fetches the stub user record (`GET /api/v2/users/email|<id>`) and returns `system_managed_identity` if it still carries `app_metadata.system_managed == true`. A 404 here is not, on its own, permission to unlink: the identity was already classified in steps 3–4.
-6. **Backfill**: an alias recognised in step 4 or 5 but not yet listed in `system_managed_identities` (e.g. claimed before the marker existed) is added to it on a best-effort basis, so it stays protected if its domain is later retired.
+6. **Backfill**: an alias not yet listed in `system_managed_identities` (e.g. claimed before the marker existed) is added to it on a best-effort basis when its stub carries `system_managed == true`, or when it is on an `ALLOWED_ALIAS_DOMAINS` domain and its stub is gone. An alias-domain identity whose stub exists without the flag (e.g. a preserved former primary address) is still refused by domain, but is not recorded.
 7. **Fail-closed**: a failed primary-user lookup, an identity that is not linked to the caller, an identity with no `profileData.email` to classify, or any non-404 stub lookup error blocks the unlink, so a flaky Auth0 cannot silently allow it.
 
 The mock backend never reaches this guard: it cannot verify tokens, so it refuses every unlink request before dispatch.

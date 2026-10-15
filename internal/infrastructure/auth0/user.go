@@ -589,7 +589,11 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 	if linked == nil {
 		return false, errors.NewNotFound("identity not found")
 	}
-	if primary.AppMetadata != nil && slices.Contains(primary.AppMetadata.SystemManagedIdentities, identityID) {
+	var markedIDs []string
+	if primary.AppMetadata != nil {
+		markedIDs = primary.AppMetadata.SystemManagedIdentities
+	}
+	if slices.Contains(markedIDs, identityID) {
 		return true, nil
 	}
 	if linked.ProfileData == nil || strings.TrimSpace(linked.ProfileData.Email) == "" {
@@ -598,16 +602,14 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 		)
 		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard")
 	}
-	if isAliasDomainEmail(linked.ProfileData.Email) {
-		u.backfillSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
-		return true, nil
-	}
+	aliasDomain := isAliasDomainEmail(linked.ProfileData.Email)
 
 	// Defense in depth: honour the system_managed marker on the stub record
 	// when it is still retrievable (e.g. an alias on a domain that has since
 	// been removed from ALLOWED_ALIAS_DOMAINS). Absence of the stub is not
 	// treated as permission on its own: the identity was already classified
-	// above from the primary user's record.
+	// above from the primary user's record. The stub is also consulted for
+	// alias-domain identities, only to decide whether to backfill the marker.
 	stubUserID := fmt.Sprintf("%s|%s", constants.EmailConnection, identityID)
 	apiStub := httpclient.NewAPIRequest(
 		u.httpClient,
@@ -617,30 +619,42 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 		httpclient.WithDescription("get stub user for unlink guard"),
 	)
 	var rawStub Auth0User
+	stubExists := true
 	if statusCode, callErr := apiStub.Call(ctx, &rawStub); callErr != nil {
-		if statusCode == http.StatusNotFound {
-			return false, nil
+		if statusCode != http.StatusNotFound {
+			if aliasDomain {
+				// Already refused by domain; only the backfill decision is lost.
+				return true, nil
+			}
+			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
+				"stub_user_id", redaction.Redact(stubUserID),
+				"status_code", statusCode,
+				"error", callErr,
+			)
+			return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
 		}
-		slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
-			"stub_user_id", redaction.Redact(stubUserID),
-			"status_code", statusCode,
-			"error", callErr,
-		)
-		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+		stubExists = false
 	}
-	if rawStub.AppMetadata == nil || !rawStub.AppMetadata.SystemManaged {
-		return false, nil
+	stubManaged := stubExists && rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged
+
+	// Backfill the durable marker only for genuine aliases: a stub flagged
+	// system_managed, or an alias-domain identity whose stub is gone. An
+	// alias-domain identity whose stub exists without the flag (e.g. a
+	// preserved former primary) is refused by domain policy but not recorded,
+	// so it is not locked permanently if the domain is later retired.
+	if stubManaged || (aliasDomain && !stubExists) {
+		u.backfillSystemManagedIdentity(ctx, primaryUserID, markedIDs, identityID, m2mToken)
+		return true, nil
 	}
-	u.backfillSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
-	return true, nil
+	return aliasDomain, nil
 }
 
 // backfillSystemManagedIdentity records identityID in the primary user's
 // system_managed_identities marker for an alias the unlink guard recognised by
 // domain or stub. It is best-effort: the unlink is refused either way, so a
 // failure is only logged.
-func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) {
-	if errRecord := u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken); errRecord != nil {
+func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID string, markedIDs []string, identityID, m2mToken string) {
+	if errRecord := u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(markedIDs), identityID), m2mToken); errRecord != nil {
 		slog.WarnContext(ctx, "failed to backfill system-managed identity marker",
 			"user_id", redaction.Redact(primaryUserID),
 			"error", errRecord,
@@ -676,7 +690,12 @@ func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, prim
 	if slices.Contains(ids, identityID) {
 		return nil
 	}
+	return u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(ids), identityID), m2mToken)
+}
 
+// writeSystemManagedIdentities PATCHes the primary user's
+// app_metadata.system_managed_identities to ids, sending only that key.
+func (u *userReaderWriter) writeSystemManagedIdentities(ctx context.Context, primaryUserID string, ids []string, m2mToken string) error {
 	apiPatch := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
@@ -684,10 +703,9 @@ func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, prim
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("record system-managed identity marker"),
 		httpclient.WithBody(systemManagedIdentitiesPatch{
-			AppMetadata: systemManagedIdentitiesMetadata{
-				SystemManagedIdentities: append(slices.Clone(ids), identityID),
-			},
+			AppMetadata: systemManagedIdentitiesMetadata{SystemManagedIdentities: ids},
 		}),
+		httpclient.WithSensitiveBody(),
 	)
 	if _, errPatch := apiPatch.Call(ctx, nil); errPatch != nil {
 		return errors.NewUnexpected("failed to record system-managed identity marker", errPatch)
