@@ -554,6 +554,8 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
 
+			// SearchUser only resolves verified matches (the Auth0 adapter skips
+			// unverified root emails), so an unverified record never blocks here.
 			if strings.EqualFold(user.PrimaryEmail, email) {
 				return errs.NewValidation("email already linked")
 			}
