@@ -958,6 +958,33 @@ func TestUserReaderWriter_GetUser_EscapesUserID(t *testing.T) {
 	}
 }
 
+func TestUserReaderWriter_UpdateUser_EscapesUserID(t *testing.T) {
+	ctx := context.Background()
+	jwtConfig, privateKey := createTestJWTVerificationConfig(t)
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub":   "auth0|x/roles?per_page=1",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": constants.UserUpdateMetadataRequiredScope,
+		"iss":   "https://test.auth0.com/",
+		"aud":   "https://test.auth0.com/api/v2/",
+	}).SignedString(privateKey)
+	require.NoError(t, err)
+
+	transport := &pathRecordingTransport{}
+	rw := newTestReaderWriter(transport)
+	rw.config.JWTVerificationConfig = jwtConfig
+
+	_, err = rw.UpdateUser(ctx, &model.User{
+		Token:        token,
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Test")},
+	})
+	require.NoError(t, err)
+	require.Len(t, transport.escapedPaths, 1)
+	assert.Equal(t, "/api/v2/users/auth0%7Cx%2Froles%3Fper_page=1", transport.escapedPaths[0])
+	assert.Empty(t, transport.rawQueries[0], "user id must not leak into the query string")
+}
+
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
 	ctx := context.Background()
 
