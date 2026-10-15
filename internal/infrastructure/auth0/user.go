@@ -643,7 +643,7 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 	// preserved former primary) is refused by domain policy but not recorded,
 	// so it is not locked permanently if the domain is later retired.
 	if stubManaged || (aliasDomain && !stubExists) {
-		u.backfillSystemManagedIdentity(ctx, primaryUserID, markedIDs, identityID, m2mToken)
+		u.backfillSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
 		return true, nil
 	}
 	return aliasDomain, nil
@@ -653,8 +653,8 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 // system_managed_identities marker for an alias the unlink guard recognised by
 // domain or stub. It is best-effort: the unlink is refused either way, so a
 // failure is only logged.
-func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID string, markedIDs []string, identityID, m2mToken string) {
-	if errRecord := u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(markedIDs), identityID), m2mToken); errRecord != nil {
+func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) {
+	if errRecord := u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken); errRecord != nil {
 		slog.WarnContext(ctx, "failed to backfill system-managed identity marker",
 			"user_id", redaction.Redact(primaryUserID),
 			"error", errRecord,
@@ -667,10 +667,43 @@ func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, pr
 // app_metadata.system_managed_identities, the durable record the unlink guard
 // consults first. It is a no-op when the id is already present.
 //
-// This is a read-modify-write of a single array, so two concurrent alias claims
-// by the same user could drop one id. The domain check and the guard's
-// backfill remain as a second layer for such an alias.
+// Auth0 has no atomic append for app_metadata, so this is a read-modify-write
+// of a single array: a concurrent writer for the same user (another claim or a
+// guard backfill) can overwrite the id just written. Each write is therefore
+// confirmed by a fresh read and re-applied if the id is missing, up to
+// systemManagedMarkerAttempts times. Every writer does the same, so concurrent
+// writers converge on an array holding all of their ids.
 func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) error {
+	for attempt := 0; attempt < systemManagedMarkerAttempts; attempt++ {
+		ids, errRead := u.readSystemManagedIdentities(ctx, primaryUserID, m2mToken)
+		if errRead != nil {
+			return errRead
+		}
+		if slices.Contains(ids, identityID) {
+			return nil
+		}
+		if errWrite := u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(ids), identityID), m2mToken); errWrite != nil {
+			return errWrite
+		}
+	}
+
+	ids, errRead := u.readSystemManagedIdentities(ctx, primaryUserID, m2mToken)
+	if errRead != nil {
+		return errRead
+	}
+	if !slices.Contains(ids, identityID) {
+		return errors.NewUnexpected("system-managed identity marker was overwritten by concurrent updates")
+	}
+	return nil
+}
+
+// systemManagedMarkerAttempts bounds how many times recordSystemManagedIdentity
+// re-applies a marker write that a concurrent writer overwrote.
+const systemManagedMarkerAttempts = 3
+
+// readSystemManagedIdentities returns the primary user's current
+// app_metadata.system_managed_identities.
+func (u *userReaderWriter) readSystemManagedIdentities(ctx context.Context, primaryUserID, m2mToken string) ([]string, error) {
 	apiGet := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodGet),
@@ -680,17 +713,12 @@ func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, prim
 	)
 	var primary Auth0User
 	if _, errGet := apiGet.Call(ctx, &primary); errGet != nil {
-		return errors.NewUnexpected("failed to read system-managed identity marker", errGet)
+		return nil, errors.NewUnexpected("failed to read system-managed identity marker", errGet)
 	}
-
-	var ids []string
-	if primary.AppMetadata != nil {
-		ids = primary.AppMetadata.SystemManagedIdentities
+	if primary.AppMetadata == nil {
+		return nil, nil
 	}
-	if slices.Contains(ids, identityID) {
-		return nil
-	}
-	return u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(ids), identityID), m2mToken)
+	return primary.AppMetadata.SystemManagedIdentities, nil
 }
 
 // writeSystemManagedIdentities PATCHes the primary user's
