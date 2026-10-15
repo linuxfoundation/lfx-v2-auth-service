@@ -191,7 +191,9 @@ The OTP verification system uses a dedicated NATS Key-Value bucket with TTL (Tim
 - OTP codes are automatically expired after a configured time period (default: 5 minutes)
 - No manual cleanup is required - NATS handles expiration automatically
 - Storage is isolated from user data in a separate KV bucket
-- Verification codes are ephemeral and cannot be reused after expiration
+- Verification codes are single use: a code is deleted in the same revision-checked operation that accepts it
+- Each code allows at most 5 verification attempts; after that it is locked and even the correct code is rejected until it expires and a new one is requested
+- A new code for the same address can be requested at most once per minute, and not while the current code is locked
 
 ### OTP Verification Flow
 
@@ -208,23 +210,24 @@ sequenceDiagram
     User->>AuthService: Send verification (alternate email)
     AuthService->>AuthService: Check email not already linked
     AuthService->>AuthService: Generate 6-digit OTP
+    AuthService->>NATSKV: Store OTP record (refused during resend cooldown or lockout)<br/>Key: email<br/>Value: OTP, attempts, expiry
+    NATSKV-->>AuthService: Success
     AuthService->>SMTP: Send OTP email
     SMTP-->>User: Email with OTP code
-    
-    AuthService->>NATSKV: Store OTP with TTL<br/>Key: email<br/>Value: OTP code<br/>TTL: 5 minutes
-    NATSKV-->>AuthService: Success
     AuthService-->>User: Verification sent
 
     Note over User,Storage: Step 2: Verify OTP Code
     
     User->>AuthService: Verify OTP (email + code)
     AuthService->>AuthService: Check email not already linked
-    AuthService->>NATSKV: Get OTP by email key
+    AuthService->>NATSKV: Get OTP record by email key
     
-    alt OTP Found and Valid
-        NATSKV-->>AuthService: OTP code
+    alt OTP Found, Not Expired and Not Locked
+        NATSKV-->>AuthService: OTP record + revision
+        AuthService->>NATSKV: Record the attempt (revision-checked update)
         AuthService->>AuthService: Compare submitted vs stored OTP
         alt OTP Matches
+            AuthService->>NATSKV: Delete OTP record (revision-checked)
             AuthService->>AuthService: Generate identity tokens<br/>(ID token + Access token)
             AuthService-->>User: Success + tokens
         else OTP Mismatch
@@ -253,7 +256,7 @@ sequenceDiagram
 - **Bucket Name**: `authelia-email-otp` (`constants.KVBucketNameAutheliaEmailOTP`)
 - **TTL**: 5 minutes (configurable at bucket creation)
 - **Key Format**: Email address (used as alternate email index key)
-- **Value Format**: 6-digit numeric OTP code (stored as plain string)
+- **Value Format**: JSON record with the 6-digit numeric OTP code, the attempt count, and the issue and expiry times
 - **Auto-Expiration**: NATS automatically removes expired entries after TTL
 
 ### Token Generation After Verification
