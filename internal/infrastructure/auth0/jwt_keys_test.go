@@ -241,6 +241,10 @@ func TestNewJWTVerificationConfig_FailsWithoutJWKS(t *testing.T) {
 	if _, err := NewJWTVerificationConfig(context.Background(), testImpersonationDomain); err == nil {
 		t.Fatal("expected an error when the JWKS cannot be loaded")
 	}
+	// One prefetch plus the initial attempt and each retry.
+	if want := jwksStartupRetries + 2; fa.jwksFetches() != want {
+		t.Errorf("expected %d JWKS fetches, got %d", want, fa.jwksFetches())
+	}
 }
 
 // TestRemovedSigningKeyRejectedByAllVerifiers asserts that the impersonation
@@ -294,11 +298,12 @@ func TestRemovedSigningKeyRejectedByAllVerifiers(t *testing.T) {
 	fa.publish(t, map[string]*rsa.PrivateKey{"new": newKey})
 	clock.advance(jwksRefreshAfter)
 
-	if _, err := flow.ImpersonateUser(ctx, oldSubject, "victim@example.com"); err == nil {
-		t.Fatal("expected impersonation to reject a removed key")
+	var unauthorized errors.Unauthorized
+	if _, err := flow.ImpersonateUser(ctx, oldSubject, "victim@example.com"); !stderrors.As(err, &unauthorized) {
+		t.Fatalf("expected impersonation to reject a removed key as unauthorized, got %v", err)
 	}
-	if _, err := cfg.JWTVerify(ctx, oldUser); err == nil {
-		t.Fatal("expected JWTVerify to reject a key the impersonation verifier rejects")
+	if _, err := cfg.JWTVerify(ctx, oldUser); !stderrors.As(err, &unauthorized) {
+		t.Fatalf("expected JWTVerify to reject a key the impersonation verifier rejects as unauthorized, got %v", err)
 	}
 	if _, err := flow.ImpersonateUser(ctx, signRS256(t, newKey, "new", subjectClaims(nil)), "victim@example.com"); err != nil {
 		t.Fatalf("expected impersonation to accept the remaining key: %v", err)

@@ -10,12 +10,17 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	jwtparser "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
+
+// jwksStartupRetries is how many times NewJWTVerificationConfig retries the
+// initial JWKS load before failing.
+const jwksStartupRetries = 2
 
 // signingKeySource resolves tenant signing keys by key ID.
 type signingKeySource interface {
@@ -114,7 +119,18 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 // within jwksTTL without a restart.
 func NewJWTVerificationConfig(ctx context.Context, domain string) (*JWTVerificationConfig, error) {
 	keys := sharedTenantKeys(domain)
-	if err := keys.ensure(ctx); err != nil {
+	// The shared cache fetches without retries, so retry the startup load here
+	// to tolerate a transient JWKS failure without holding the cache lock.
+	err := keys.ensure(ctx)
+	for attempt := 1; err != nil && attempt <= jwksStartupRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, errors.NewUnexpected("failed to fetch JWKS", ctx.Err())
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
+		err = keys.ensure(ctx)
+	}
+	if err != nil {
 		return nil, errors.NewUnexpected("failed to fetch JWKS", err)
 	}
 
