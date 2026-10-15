@@ -153,7 +153,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	const key = "email-key"
 
 	t.Run("a correct code is accepted exactly once", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage(t)
+		storage, _, _ := newOTPTestStorage(t)
 		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -162,7 +162,6 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		err = storage.ConsumeVerificationCode(ctx, key, "123456")
 		var notFound errs.NotFound
 		require.ErrorAs(t, err, &notFound, "a consumed code must not be replayable")
-		assert.Zero(t, kv.unconditionalDeletes, "the consume must be revision-checked")
 	})
 
 	t.Run("the code is locked after the attempt limit, even for the correct value", func(t *testing.T) {
@@ -293,7 +292,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("an expired code is rejected", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage(t)
+		storage, kv, clock := newOTPTestStorage(t)
 		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -302,6 +301,9 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		err = storage.ConsumeVerificationCode(ctx, key, "123456")
 		var notFound errs.NotFound
 		require.ErrorAs(t, err, &notFound)
+		_, stillStored := kv.values[key]
+		assert.False(t, stillStored, "an expired code is cleaned up")
+		assert.Zero(t, kv.unconditionalDeletes, "the cleanup delete must be revision-checked")
 	})
 
 	t.Run("expiry is not extended by failed attempts", func(t *testing.T) {
