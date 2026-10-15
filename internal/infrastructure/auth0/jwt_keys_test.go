@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	stderrors "errors"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
@@ -244,6 +246,29 @@ func TestNewJWTVerificationConfig_FailsWithoutJWKS(t *testing.T) {
 	// One prefetch plus the initial attempt and each retry.
 	if want := jwksStartupRetries + 2; fa.jwksFetches() != want {
 		t.Errorf("expected %d JWKS fetches, got %d", want, fa.jwksFetches())
+	}
+}
+
+func TestNewJWTVerificationConfig_FailsWithoutUsableSigningKey(t *testing.T) {
+	encKey, err := jwk.FromRaw(&generateKey(t).PublicKey)
+	if err != nil {
+		t.Fatalf("failed to build JWK: %v", err)
+	}
+	_ = encKey.Set(jwk.KeyIDKey, "enc")
+	_ = encKey.Set(jwk.KeyUsageKey, jwk.ForEncryption)
+	set := jwk.NewSet()
+	if err := set.AddKey(encKey); err != nil {
+		t.Fatalf("failed to add JWK: %v", err)
+	}
+	data, err := json.Marshal(set)
+	if err != nil {
+		t.Fatalf("failed to marshal JWKS: %v", err)
+	}
+	fa := &fakeAuth0{jwks: data}
+	registerTestTenantKeys(t, testImpersonationDomain, fa, newTestClock())
+
+	if _, err := NewJWTVerificationConfig(context.Background(), testImpersonationDomain); err == nil {
+		t.Fatal("expected an error when the JWKS has no usable signing key")
 	}
 }
 

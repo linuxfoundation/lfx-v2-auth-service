@@ -135,6 +135,25 @@ func (k *subjectTokenKeys) ensure(ctx context.Context) error {
 	return nil
 }
 
+// hasSigningKey reports whether the cached JWKS holds at least one key usable
+// for RS256 signature verification.
+func (k *subjectTokenKeys) hasSigningKey() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	if k.set == nil {
+		return false
+	}
+	for i := 0; i < k.set.Len(); i++ {
+		if key, ok := k.set.Key(i); ok {
+			if _, err := rsaSigningKey(key); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // key returns the RSA signing key published under kid. It fails closed when no
 // JWKS fetched within jwksTTL is available.
 func (k *subjectTokenKeys) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {

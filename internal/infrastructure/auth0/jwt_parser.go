@@ -133,6 +133,9 @@ func NewJWTVerificationConfig(ctx context.Context, domain string) (*JWTVerificat
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to fetch JWKS", err)
 	}
+	if !keys.hasSigningKey() {
+		return nil, errors.NewUnexpected("no suitable RSA key found in JWKS for signature verification")
+	}
 
 	expectedIssuer := fmt.Sprintf("https://%s/", domain)
 	expectedAudience := fmt.Sprintf("https://%s/api/v2/", domain)
