@@ -47,6 +47,13 @@ type Auth0AppMetadata struct {
 	// not be unlinked through the normal user-initiated unlink flow.
 	SystemManaged bool `json:"system_managed,omitempty"`
 
+	// SystemManagedIdentities lists the email-connection identity ids (the
+	// provider-local part, without the "email|" prefix) linked to this primary
+	// user as system-managed aliases. It is the durable record the unlink guard
+	// relies on, since a linked secondary's own stub record may not survive the
+	// link. Written only via systemManagedIdentitiesPatch.
+	SystemManagedIdentities []string `json:"system_managed_identities,omitempty"`
+
 	// CDPUUID is the user's resolved CDP member id. Once set it is permanent:
 	// absent to present is the only legal transition, except the scheduled
 	// merge-repair job's compare-and-swap overwrite.
@@ -69,6 +76,18 @@ type systemManagedUserPayload struct {
 	Email         string            `json:"email"`
 	EmailVerified bool              `json:"email_verified"`
 	AppMetadata   *Auth0AppMetadata `json:"app_metadata,omitempty"`
+}
+
+// systemManagedIdentitiesPatch is the body for PATCH /api/v2/users/{id} when
+// recording a system-managed alias on the primary user. Auth0 merges top-level
+// app_metadata keys, so sending only this key leaves every other key (CDP
+// enrichment, system_managed) untouched.
+type systemManagedIdentitiesPatch struct {
+	AppMetadata systemManagedIdentitiesMetadata `json:"app_metadata"`
+}
+
+type systemManagedIdentitiesMetadata struct {
+	SystemManagedIdentities []string `json:"system_managed_identities"`
 }
 
 // linkSubIdentityPayload is the body for POST /api/v2/users/{id}/identities when
