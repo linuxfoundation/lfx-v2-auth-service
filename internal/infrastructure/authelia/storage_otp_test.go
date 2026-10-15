@@ -238,13 +238,31 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		storage, kv, _ := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
-		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &interleavingDeleteKV{fakeOTPKV: kv}
+		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &interleavingConsumeKV{fakeOTPKV: kv}
 
 		err = storage.ConsumeVerificationCode(ctx, key, "123456")
 		var conflict errs.Conflict
 		require.ErrorAs(t, err, &conflict)
-		_, stillStored := kv.values[key]
-		assert.True(t, stillStored, "the code must not be consumed by the losing request")
+
+		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = kv
+		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "123456"),
+			"the code must not be consumed by the losing request")
+	})
+
+	t.Run("a resend right after a successful verification is still rate limited", func(t *testing.T) {
+		storage, _, clock := newOTPTestStorage(t)
+		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		require.NoError(t, err)
+		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "123456"))
+
+		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		var rateLimited errs.RateLimited
+		require.ErrorAs(t, err, &rateLimited)
+
+		clock.advance(otpResendCooldown)
+		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		require.NoError(t, err)
+		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "654321"))
 	})
 
 	t.Run("KV failures are not reported as conflicts and do not leak details", func(t *testing.T) {
@@ -334,6 +352,18 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		require.NoError(t, storage.DeleteVerificationCode(ctx, key, revision))
 		assert.Zero(t, kv.unconditionalDeletes)
 	})
+
+	t.Run("a rollback with a stale revision keeps the newer code", func(t *testing.T) {
+		storage, _, clock := newOTPTestStorage(t)
+		staleRevision, err := storage.CreateVerificationCode(ctx, key, "123456")
+		require.NoError(t, err)
+		clock.advance(otpResendCooldown)
+		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		require.NoError(t, err)
+
+		require.Error(t, storage.DeleteVerificationCode(ctx, key, staleRevision))
+		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "654321"))
+	})
 }
 
 // staleRevisionKV simulates another writer changing the key between the read
@@ -347,13 +377,18 @@ func (s *staleRevisionKV) Update(ctx context.Context, key string, value []byte, 
 	return s.fakeOTPKV.Update(ctx, key, value, revision)
 }
 
-// interleavingDeleteKV simulates another attempt being recorded between the
-// attempt reservation and the consuming delete.
-type interleavingDeleteKV struct {
+// interleavingConsumeKV simulates another attempt being recorded between the
+// attempt reservation (the first update) and the consuming update.
+type interleavingConsumeKV struct {
 	*fakeOTPKV
+
+	updates int
 }
 
-func (i *interleavingDeleteKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
-	i.write(key, i.values[key])
-	return i.fakeOTPKV.Delete(ctx, key, opts...)
+func (i *interleavingConsumeKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	i.updates++
+	if i.updates == 2 {
+		i.write(key, i.values[key])
+	}
+	return i.fakeOTPKV.Update(ctx, key, value, revision)
 }

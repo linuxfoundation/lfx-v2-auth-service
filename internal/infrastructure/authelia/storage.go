@@ -248,6 +248,9 @@ type verificationCodeRecord struct {
 	Attempts  int       `json:"attempts"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// Consumed marks a code that was accepted. The record is kept until it expires so
+	// the resend cooldown still applies, but it can never be accepted again.
+	Consumed bool `json:"consumed,omitempty"`
 }
 
 func (r *verificationCodeRecord) expired(now time.Time) bool {
@@ -297,7 +300,7 @@ func (n *natsUserStorage) getVerificationCodeRecord(ctx context.Context, key str
 	}
 
 	var record verificationCodeRecord
-	if errUnmarshal := json.Unmarshal(entry.Value(), &record); errUnmarshal != nil || record.OTP == "" {
+	if errUnmarshal := json.Unmarshal(entry.Value(), &record); errUnmarshal != nil || (record.OTP == "" && !record.Consumed) {
 		return nil, entry.Revision(), nil
 	}
 	return &record, entry.Revision(), nil
@@ -326,7 +329,7 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 	}
 
 	if existing != nil && !existing.expired(now) {
-		if existing.locked() {
+		if existing.locked() && !existing.Consumed {
 			return 0, errs.NewRateLimited("too many failed verification attempts, please try again later", existing.ExpiresAt.Sub(now))
 		}
 		if resendAt := existing.CreatedAt.Add(otpResendCooldown); now.Before(resendAt) {
@@ -341,7 +344,7 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 	}
 	// Failed attempts carry over to a replacement code, so resending cannot be used
 	// to reset the attempt budget before the current code expires.
-	if existing != nil && !existing.expired(now) {
+	if existing != nil && !existing.expired(now) && !existing.Consumed {
 		record.Attempts = existing.Attempts
 	}
 
@@ -373,8 +376,8 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 
 // ConsumeVerificationCode checks a submitted verification code (OTP) for an email address.
 // Each check spends one of a bounded number of attempts before the comparison is made, and
-// a matching code is deleted in the same revision-checked operation that accepts it, so a
-// code can be accepted at most once.
+// a matching code is marked consumed in the same revision-checked operation that accepts it,
+// so a code can be accepted at most once.
 func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, otp string) error {
 	if email == "" {
 		return errs.NewUnexpected("email is required")
@@ -394,6 +397,9 @@ func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, ot
 				"error", errDelete,
 			)
 		}
+		return errs.NewNotFound("verification code not found or expired")
+	}
+	if record.Consumed {
 		return errs.NewNotFound("verification code not found or expired")
 	}
 	if record.locked() {
@@ -420,8 +426,17 @@ func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, ot
 		return errs.NewValidation("invalid verification code")
 	}
 
-	if errDelete := kv.Delete(ctx, email, jetstream.LastRevision(reservedRevision)); errDelete != nil {
-		return verificationCodeWriteError(ctx, email, errDelete)
+	consumed, errMarshal := json.Marshal(&verificationCodeRecord{
+		Attempts:  record.Attempts,
+		CreatedAt: record.CreatedAt,
+		ExpiresAt: record.ExpiresAt,
+		Consumed:  true,
+	})
+	if errMarshal != nil {
+		return errs.NewUnexpected("failed to marshal verification code", errMarshal)
+	}
+	if _, errConsume := kv.Update(ctx, email, consumed, reservedRevision); errConsume != nil {
+		return verificationCodeWriteError(ctx, email, errConsume)
 	}
 
 	slog.InfoContext(ctx, "verification code consumed successfully",
