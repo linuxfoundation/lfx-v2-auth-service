@@ -116,6 +116,52 @@ func (m *stuckFrameEventsClient) replays() int {
 	return count
 }
 
+// routedEventsClient answers each connection by where it resumed from, so a
+// test can lay out a stream position by position. A route missing from the
+// map fails at once with fallback.
+type routedEventsClient struct {
+	routes   map[string]eventsRoute
+	fallback error
+
+	// stopAfter cancels the run once this many connections have been made.
+	stopAfter int
+	cancel    context.CancelFunc
+
+	mu    sync.Mutex
+	calls []auth0.SubscribeOptions
+}
+
+type eventsRoute struct {
+	messages []auth0.EventMessage
+	err      error
+}
+
+func (m *routedEventsClient) Subscribe(ctx context.Context, opts auth0.SubscribeOptions, handle func(context.Context, auth0.EventMessage) error) error {
+	m.mu.Lock()
+	m.calls = append(m.calls, opts)
+	if m.stopAfter > 0 && len(m.calls) >= m.stopAfter && m.cancel != nil {
+		m.cancel()
+	}
+	m.mu.Unlock()
+
+	route, ok := m.routes[opts.From]
+	if !ok {
+		return m.fallback
+	}
+	for _, message := range route.messages {
+		if err := handle(ctx, message); err != nil {
+			return err
+		}
+	}
+	return route.err
+}
+
+func (m *routedEventsClient) subscribeCalls() []auth0.SubscribeOptions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.calls)
+}
+
 // cancelAfterEventsClient cancels the run once a set number of connections
 // have ended, so a test can stop Run at an exact point. Run drives Subscribe
 // from a single goroutine, so the count needs no guard.
@@ -760,6 +806,93 @@ func TestConsumerRun(t *testing.T) {
 		consumer.Run(ctx)
 
 		assert.Equal(t, 1, offsets.clears, "a lapsed hold must allow the replay again")
+	})
+
+	t.Run("a replay split across connections does not lift the hold early", func(t *testing.T) {
+		// The replay saves an earlier position and Auth0 recycles the
+		// connection. Resuming from there saves the held offset and fails on
+		// the same frame: a different offset was saved, but the frame was
+		// never passed, so a second replay would be wasted.
+		poison := auth0.ErrStreamTerminated
+		events := &routedEventsClient{
+			routes: map[string]eventsRoute{
+				"":  {messages: []auth0.EventMessage{userEvent("B", "auth0|1")}},
+				"B": {messages: []auth0.EventMessage{userEvent("P", "auth0|2")}, err: poison},
+				"P": {err: poison},
+			},
+			stopAfter: 3*maxBarrenReconnects + 10,
+		}
+		offsets := &mockOffsetStore{offset: "P"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+		consumer.stuckBackoff = time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		events.cancel = cancel
+		consumer.Run(ctx)
+
+		replays := 0
+		for _, call := range events.subscribeCalls() {
+			if call.From == "" {
+				replays++
+			}
+		}
+		require.GreaterOrEqual(t, len(events.subscribeCalls()), events.stopAfter,
+			"the point of this test is many failed connections")
+		assert.Equal(t, 1, replays, "one replay per position, however many connections it spans")
+		assert.Equal(t, "P", offsets.offset)
+	})
+
+	t.Run("a held offset is not released into the fast loop by a repeating marker", func(t *testing.T) {
+		// Every connection delivers a marker repeating the held offset and
+		// then fails. The marker is a message, but the cursor never moved, so
+		// the consumer must stay on the slow retry.
+		events := &mockEventsClient{
+			alwaysMessages: []auth0.EventMessage{{Offset: "P", Type: auth0.EventTypeOffsetOnly}},
+			alwaysErr:      auth0.ErrStreamTerminated,
+		}
+		offsets := &mockOffsetStore{offset: "P"}
+		consumer := newTestConsumer(t, events, &mockProvisioner{}, offsets)
+		consumer.stuckBackoff = time.Hour
+		consumer.replayedOffset, consumer.replayedAt = "P", consumer.now()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			consumer.Run(ctx)
+		}()
+
+		require.Eventually(t, func() bool { return len(events.subscribeCalls()) >= maxBarrenReconnects },
+			2*time.Second, time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		<-done
+
+		assert.Equal(t, maxBarrenReconnects, len(events.subscribeCalls()),
+			"the barren count must reach the hold, not reset on every marker")
+		assert.Zero(t, offsets.clears)
+	})
+
+	t.Run("a lapsed hold replays even when every connection repeats a marker", func(t *testing.T) {
+		events := &mockEventsClient{
+			alwaysMessages: []auth0.EventMessage{{Offset: "P", Type: auth0.EventTypeOffsetOnly}},
+			alwaysErr:      auth0.ErrStreamTerminated,
+		}
+		offsets := &mockOffsetStore{offset: "P"}
+		// Bounded, so a regression that never trips fails rather than
+		// spinning until the test binary times out.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		consumer := newTestConsumer(t, &cancelAfterEventsClient{EventsClient: events, after: maxBarrenReconnects + 1, cancel: cancel},
+			&mockProvisioner{}, offsets)
+		consumer.stuckBackoff = time.Hour
+		consumer.replayedOffset = "P"
+		consumer.replayedAt = consumer.now().Add(-consumer.replayWindow - time.Minute)
+
+		consumer.Run(ctx)
+
+		assert.Equal(t, 1, offsets.clears, "a lapsed hold must still be able to replay")
 	})
 
 	t.Run("a terminal error frame does not count as progress", func(t *testing.T) {

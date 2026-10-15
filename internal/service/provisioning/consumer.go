@@ -132,17 +132,17 @@ type Consumer struct {
 	processed    int
 
 	// replayedOffset is the stored offset that last sent the consumer back to
-	// the replay window, and replayedAt when. It is held until a connection
-	// resumed from a stored offset saves a different one, or until a whole
-	// replay window has passed. Touched only by Run's goroutine.
+	// the replay window, and replayedAt when. It is held until a position
+	// after it is saved, or until a whole replay window has passed. Touched
+	// only by Run's goroutine.
 	replayedOffset string
 	replayedAt     time.Time
 
-	// resumedFrom is the offset the current connection resumed from, and
-	// movedPast whether it has since saved a different one. Touched only by
-	// Run's goroutine.
-	resumedFrom string
-	movedPast   bool
+	// atReplayedOffset reports whether the current connection has stood on
+	// replayedOffset — resumed from it or saved it — so that the next
+	// position it saves is known to lie beyond it. Touched only by Run's
+	// goroutine.
+	atReplayedOffset bool
 
 	// lastAdvance is the local-clock time the offset last moved, as UnixNano.
 	// The age reporter reads it from another goroutine.
@@ -232,20 +232,24 @@ func (c *Consumer) Run(ctx context.Context) {
 			"offset_age_seconds", int64(c.offsetAge().Seconds()),
 		)
 
+		held := opts.From != "" && opts.From == c.replayedOffset
+		c.atReplayedOffset = held
+
 		processedBefore := c.processed
-		c.resumedFrom, c.movedPast = opts.From, false
 		openedAt := c.now()
 		err = c.events.Subscribe(ctx, opts, c.handle)
 		madeProgress := c.processed > processedBefore
 		lasted := c.now().Sub(openedAt)
 
-		// Saving a new position after resuming from a stored one is the only
-		// proof the position the last replay was taken for is behind us. Any
-		// message is not enough — a marker can repeat the offset it resumed
-		// from — and progress on the replay connection proves nothing at all,
-		// because it re-reads what lies before that position.
-		if opts.From != "" && c.movedPast {
-			c.forgetReplayedOffset()
+		// While the offset is held, only getting past it counts as progress
+		// for the barren guard. A marker that repeats it, or an event that
+		// fails without advancing, leaves the cursor exactly where the replay
+		// already proved it cannot get past, and counting either would drop
+		// the consumer out of the hold and back into the fast reconnect loop.
+		// advance lifts the hold the moment a later position is saved.
+		progressed := madeProgress
+		if held && c.replayedOffset != "" {
+			progressed = false
 		}
 
 		switch {
@@ -310,7 +314,7 @@ func (c *Consumer) Run(ctx context.Context) {
 		// away a perfectly good position over a missing grant or a busy
 		// minute, and buy a needless replay once it clears.
 		limited, isRateLimited := rateLimit(err)
-		if !refused(err) && !isRateLimited && c.barren(opts.From, madeProgress) {
+		if !refused(err) && !isRateLimited && c.barren(opts.From, progressed) {
 			if opts.From == c.replayedOffset && c.now().Sub(c.replayedAt) < c.replayWindow {
 				// The replay already ran for this position and led straight
 				// back to it, so the window cannot cure it. Another replay
@@ -589,6 +593,7 @@ func (c *Consumer) forgetBarrenOffset() {
 func (c *Consumer) forgetReplayedOffset() {
 	c.replayedOffset = ""
 	c.replayedAt = time.Time{}
+	c.atReplayedOffset = false
 }
 
 // rateLimit returns the rate-limit error carried by err, if it carries one.
@@ -650,8 +655,17 @@ func (c *Consumer) advance(ctx context.Context, offset string) error {
 	if err := c.offsets.Save(ctx, offset); err != nil {
 		return err
 	}
-	if offset != "" && offset != c.resumedFrom {
-		c.movedPast = true
+	// Only a position saved after standing on the held offset proves the
+	// frame behind it was passed. Merely saving a different offset does not:
+	// a replay, or a connection resumed from an earlier position, saves
+	// offsets before it on the way to meeting the same failure again.
+	if c.replayedOffset != "" && offset != "" {
+		switch {
+		case offset == c.replayedOffset:
+			c.atReplayedOffset = true
+		case c.atReplayedOffset:
+			c.forgetReplayedOffset()
+		}
 	}
 	c.recordAdvance()
 	return nil
