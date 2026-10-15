@@ -55,8 +55,9 @@ var aliasSeparators = strings.NewReplacer(".", "", "-", "", "_", "")
 // look-alikes such as `adrnin`, `adm1n` or `r00t` are matched against the
 // reserved list. They are applied to both the alias and the reserved names.
 // Single characters are folded first so that sequences they form (e.g. `c1` →
-// `cl`) are seen by the second stage; neither stage emits a character the
-// sequence stage matches on, so the result is a fixed point.
+// `cl`) are seen by the second stage. The first stage leaves no `0`, `1` or
+// `i`, and the second emits only `m`, `w` and `d`, which neither stage matches
+// on, so the result is a fixed point.
 var aliasASCIIConfusableChars = strings.NewReplacer(
 	"0", "o",
 	"1", "l",
