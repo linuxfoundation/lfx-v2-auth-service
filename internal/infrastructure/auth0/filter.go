@@ -92,12 +92,34 @@ func (e *emailFilter) Args(ctx context.Context) []any {
 	return []any{url.QueryEscape(e.user.PrimaryEmail)}
 }
 
+// hasVerifiedEmail reports whether auth0User has proven ownership of email:
+// either Auth0's root email_verified flag is set for a matching root email, or
+// a linked passwordless email identity (OTP-proven) reports email_verified for
+// it. Social and enterprise identities are login methods, not proof of an
+// address, so they are not accepted here. Matching is case-insensitive.
+func hasVerifiedEmail(auth0User *Auth0User, email string) bool {
+	if strings.TrimSpace(email) == "" {
+		return false
+	}
+	if auth0User.EmailVerified && strings.EqualFold(auth0User.Email, email) {
+		return true
+	}
+	for _, identity := range auth0User.Identities {
+		if identity.Connection == emailAuthenticationFilter &&
+			identity.ProfileData != nil &&
+			identity.ProfileData.EmailVerified &&
+			strings.EqualFold(identity.ProfileData.Email, email) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *emailFilter) Filter(ctx context.Context, auth0User *Auth0User) (bool, error) {
 	// A root email can be set by anyone at signup and is only proof of ownership
 	// once verified, so an unverified match must never resolve to this user.
-	if !isPrimaryEmailVerified(auth0User.ToUser(), e.user.PrimaryEmail) {
+	if !hasVerifiedEmail(auth0User, e.user.PrimaryEmail) {
 		slog.DebugContext(ctx, "user found, but the email is not verified",
-			"filter", usernamePasswordAuthenticationFilter,
 			"email", redaction.RedactEmail(e.user.PrimaryEmail),
 		)
 		return false, nil

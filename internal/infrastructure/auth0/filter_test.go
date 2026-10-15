@@ -433,6 +433,30 @@ func Test_emailFilter_Filter(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			name: "no match when only a linked social identity verifies the email",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: false,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+					{
+						Connection: "google-oauth2",
+						UserID:     "1234567890",
+						ProfileData: &Auth0ProfileData{
+							Email:         "test@example.com",
+							EmailVerified: true,
+						},
+					},
+				},
+			},
+			wantMatch: false,
+			wantErr:   false,
+		},
+		{
 			name: "no match when only a linked identity for a different email is verified",
 			user: &model.User{PrimaryEmail: "test@example.com"},
 			auth0User: &Auth0User{
