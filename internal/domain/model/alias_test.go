@@ -244,6 +244,16 @@ func TestValidateAlias(t *testing.T) {
 			alias:       "aclmin",
 			wantErrCode: "alias_reserved",
 		},
+		{
+			name:        "c1 composes into cl look-alike of d",
+			alias:       "ac1min",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "ci composes into cl look-alike of d",
+			alias:       "acimin",
+			wantErrCode: "alias_reserved",
+		},
 
 		// Extra reserved
 		{
@@ -351,4 +361,24 @@ var aliasTestHomoglyphs = map[byte][]rune{
 	'w': {'ѡ'},      // Cyrillic ѡ
 	'x': {'х', 'χ'}, // Cyrillic х, Greek χ
 	'y': {'у'},      // Cyrillic у
+}
+
+// TestAliasReservedKeyIsFixedPoint guards against composed look-alikes (e.g.
+// `ac1min`) slipping past the fold: canonicalising an already-canonical key
+// must not change it.
+func TestAliasReservedKeyIsFixedPoint(t *testing.T) {
+	const alphabet = "rnvcli10omwd"
+	var walk func(prefix string)
+	walk = func(prefix string) {
+		if key := aliasReservedKey(prefix); aliasReservedKey(key) != key {
+			t.Fatalf("aliasReservedKey(%q) = %q is not a fixed point (refolds to %q)", prefix, key, aliasReservedKey(key))
+		}
+		if len(prefix) == 5 {
+			return
+		}
+		for i := 0; i < len(alphabet); i++ {
+			walk(prefix + alphabet[i:i+1])
+		}
+	}
+	walk("")
 }

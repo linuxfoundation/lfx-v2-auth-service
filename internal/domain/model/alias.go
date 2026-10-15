@@ -50,18 +50,23 @@ const aliasSubaddressDelimiter = "+"
 // as `no_reply`, `post.master` or `-admin` match their reserved counterparts.
 var aliasSeparators = strings.NewReplacer(".", "", "-", "", "_", "")
 
-// aliasASCIIConfusables folds ASCII sequences that render alike onto a single
-// representative, so that look-alikes such as `adrnin`, `adm1n` or `r00t` are
-// matched against the reserved list. It is applied to both the alias and the
-// reserved names. Order matters: multi-character sequences are replaced before
-// single characters.
-var aliasASCIIConfusables = strings.NewReplacer(
-	"rn", "m",
-	"vv", "w",
-	"cl", "d",
+// aliasASCIIConfusableChars and aliasASCIIConfusableSeqs fold ASCII characters
+// and sequences that render alike onto a single representative, so that
+// look-alikes such as `adrnin`, `adm1n` or `r00t` are matched against the
+// reserved list. They are applied to both the alias and the reserved names.
+// Single characters are folded first so that sequences they form (e.g. `c1` →
+// `cl`) are seen by the second stage; neither stage emits a character the
+// sequence stage matches on, so the result is a fixed point.
+var aliasASCIIConfusableChars = strings.NewReplacer(
 	"0", "o",
 	"1", "l",
 	"i", "l",
+)
+
+var aliasASCIIConfusableSeqs = strings.NewReplacer(
+	"rn", "m",
+	"vv", "w",
+	"cl", "d",
 )
 
 // isAllowedAliasChar reports whether c may appear in a normalised alias.
@@ -78,7 +83,7 @@ func isAllowedAliasChar(c byte) bool {
 // confusables folded.
 func aliasReservedKey(localPart string) string {
 	base, _, _ := strings.Cut(localPart, aliasSubaddressDelimiter)
-	return aliasASCIIConfusables.Replace(aliasSeparators.Replace(base))
+	return aliasASCIIConfusableSeqs.Replace(aliasASCIIConfusableChars.Replace(aliasSeparators.Replace(base)))
 }
 
 // ValidateAlias normalises alias (lowercases + trims) and validates it as a
