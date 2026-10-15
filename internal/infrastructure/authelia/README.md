@@ -192,7 +192,7 @@ The OTP verification system uses a dedicated NATS Key-Value bucket with TTL (Tim
 - No manual cleanup is required - NATS handles expiration automatically
 - Storage is isolated from user data in a separate KV bucket
 - Verification codes are single use: a code is deleted in the same revision-checked operation that accepts it
-- Each code allows at most 5 verification attempts; after that it is locked and even the correct code is rejected until it expires and a new one is requested
+- Each code allows at most 5 verification attempts, and failed attempts carry over when a code is resent before it expires; after that the code is locked and even the correct code is rejected until it expires and a new one is requested
 - A new code for the same address can be requested at most once per minute, and not while the current code is locked
 
 ### OTP Verification Flow

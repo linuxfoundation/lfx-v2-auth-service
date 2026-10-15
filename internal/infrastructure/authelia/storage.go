@@ -25,7 +25,9 @@ const (
 
 	// otpMaxAttempts is the number of verification attempts allowed per code.
 	otpMaxAttempts = 5
-	// otpLifetime is how long a verification code is valid after it is issued.
+	// otpLifetime is how long a verification code is valid after it is issued. The
+	// email OTP bucket TTL must be at least this long, otherwise a locked record
+	// could be dropped (and its attempt count reset) before it expires.
 	otpLifetime = 5 * time.Minute
 	// otpResendCooldown is the minimum time between codes sent to the same address.
 	otpResendCooldown = time.Minute
@@ -256,6 +258,26 @@ func (r *verificationCodeRecord) locked() bool {
 	return r.Attempts >= otpMaxAttempts
 }
 
+// isRevisionMismatch reports whether a revision-checked KV write lost to another writer.
+func isRevisionMismatch(err error) bool {
+	var jsErr jetstream.JetStreamError
+	return errors.As(err, &jsErr) && jsErr.APIError() != nil &&
+		jsErr.APIError().ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+}
+
+// verificationCodeWriteError maps a failed revision-checked write to a client-facing error
+// without exposing KV internals in the message.
+func verificationCodeWriteError(ctx context.Context, email string, err error) error {
+	slog.WarnContext(ctx, "failed to write verification code",
+		"email", redaction.RedactEmail(email),
+		"error", err,
+	)
+	if isRevisionMismatch(err) {
+		return errs.NewConflict("verification code was modified concurrently, please retry")
+	}
+	return errs.NewUnexpected("failed to write verification code")
+}
+
 func (n *natsUserStorage) clock() time.Time {
 	if n.now != nil {
 		return n.now()
@@ -312,11 +334,18 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 		}
 	}
 
-	data, errMarshal := json.Marshal(&verificationCodeRecord{
+	record := &verificationCodeRecord{
 		OTP:       otp,
 		CreatedAt: now,
 		ExpiresAt: now.Add(otpLifetime),
-	})
+	}
+	// Failed attempts carry over to a replacement code, so resending cannot be used
+	// to reset the attempt budget before the current code expires.
+	if existing != nil && !existing.expired(now) {
+		record.Attempts = existing.Attempts
+	}
+
+	data, errMarshal := json.Marshal(record)
 	if errMarshal != nil {
 		return 0, errs.NewUnexpected("failed to marshal verification code", errMarshal)
 	}
@@ -332,7 +361,7 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 		newRevision, errWrite = kv.Update(ctx, email, data, revision)
 	}
 	if errWrite != nil {
-		return 0, errs.NewConflict("verification code was modified concurrently, please retry", errWrite)
+		return 0, verificationCodeWriteError(ctx, email, errWrite)
 	}
 
 	slog.InfoContext(ctx, "verification code stored successfully",
@@ -368,7 +397,7 @@ func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, ot
 		return errs.NewNotFound("verification code not found or expired")
 	}
 	if record.locked() {
-		return errs.NewValidation("too many failed verification attempts, please request a new code")
+		return errs.NewValidation("too many failed verification attempts, please try again later")
 	}
 
 	// Reserve the attempt before comparing so that concurrent guesses against the
@@ -380,7 +409,7 @@ func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, ot
 	}
 	reservedRevision, errUpdate := kv.Update(ctx, email, data, revision)
 	if errUpdate != nil {
-		return errs.NewConflict("verification code was modified concurrently, please retry", errUpdate)
+		return verificationCodeWriteError(ctx, email, errUpdate)
 	}
 
 	if subtle.ConstantTimeCompare([]byte(record.OTP), []byte(otp)) != 1 {
@@ -392,7 +421,7 @@ func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, ot
 	}
 
 	if errDelete := kv.Delete(ctx, email, jetstream.LastRevision(reservedRevision)); errDelete != nil {
-		return errs.NewConflict("verification code was modified concurrently, please retry", errDelete)
+		return verificationCodeWriteError(ctx, email, errDelete)
 	}
 
 	slog.InfoContext(ctx, "verification code consumed successfully",

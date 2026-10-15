@@ -6,6 +6,7 @@ package authelia
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,16 +24,34 @@ import (
 type fakeOTPKV struct {
 	jetstream.KeyValue
 
+	t testing.TB
+
 	values    map[string][]byte
 	revisions map[string]uint64
 	seq       uint64
 
 	// unconditionalDeletes counts deletes made without a revision guard.
 	unconditionalDeletes int
+	// writeErr, when set, fails every write with this error.
+	writeErr error
 }
 
-func newFakeOTPKV() *fakeOTPKV {
-	return &fakeOTPKV{values: map[string][]byte{}, revisions: map[string]uint64{}}
+var errWrongLastSequence = &jetstream.APIError{Code: 400, ErrorCode: jetstream.JSErrCodeStreamWrongLastSequence}
+
+// deleteRevision extracts the revision from a jetstream.LastRevision option. The
+// option type is unexported, so it is applied by reflection to a zero options value.
+func deleteRevision(t testing.TB, opt jetstream.KVDeleteOpt) uint64 {
+	fn := reflect.ValueOf(opt)
+	if fn.Kind() != reflect.Func || fn.Type().NumIn() != 1 {
+		t.Fatalf("unexpected delete option type %T", opt)
+	}
+	opts := reflect.New(fn.Type().In(0).Elem())
+	fn.Call([]reflect.Value{opts})
+	return opts.Elem().FieldByName("revision").Uint()
+}
+
+func newFakeOTPKV(t testing.TB) *fakeOTPKV {
+	return &fakeOTPKV{t: t, values: map[string][]byte{}, revisions: map[string]uint64{}}
 }
 
 func (f *fakeOTPKV) Get(_ context.Context, key string) (jetstream.KeyValueEntry, error) {
@@ -44,6 +63,9 @@ func (f *fakeOTPKV) Get(_ context.Context, key string) (jetstream.KeyValueEntry,
 }
 
 func (f *fakeOTPKV) Create(_ context.Context, key string, value []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
 	if _, ok := f.values[key]; ok {
 		return 0, jetstream.ErrKeyExists
 	}
@@ -51,15 +73,27 @@ func (f *fakeOTPKV) Create(_ context.Context, key string, value []byte, _ ...jet
 }
 
 func (f *fakeOTPKV) Update(_ context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
 	if f.revisions[key] != revision {
-		return 0, errors.New("wrong last sequence")
+		return 0, errWrongLastSequence
 	}
 	return f.write(key, value), nil
 }
 
 func (f *fakeOTPKV) Delete(_ context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
-	if len(opts) == 0 {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
+	revision := uint64(0)
+	for _, opt := range opts {
+		revision = deleteRevision(f.t, opt)
+	}
+	if revision == 0 {
 		f.unconditionalDeletes++
+	} else if f.revisions[key] != revision {
+		return errWrongLastSequence
 	}
 	delete(f.values, key)
 	f.seq++
@@ -89,8 +123,8 @@ type fakeClock struct{ t time.Time }
 func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
-func newOTPTestStorage() (*natsUserStorage, *fakeOTPKV, *fakeClock) {
-	kv := newFakeOTPKV()
+func newOTPTestStorage(t testing.TB) (*natsUserStorage, *fakeOTPKV, *fakeClock) {
+	kv := newFakeOTPKV(t)
 	clock := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	storage := &natsUserStorage{
 		kvStore: map[string]jetstream.KeyValue{constants.KVBucketNameAutheliaEmailOTP: kv},
@@ -104,7 +138,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	const key = "email-key"
 
 	t.Run("a correct code is accepted exactly once", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage()
+		storage, kv, _ := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -117,7 +151,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("the code is locked after the attempt limit, even for the correct value", func(t *testing.T) {
-		storage, _, _ := newOTPTestStorage()
+		storage, _, _ := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -136,7 +170,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("a locked code can be replaced once it expires", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage()
+		storage, _, clock := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		for i := 0; i < otpMaxAttempts; i++ {
@@ -151,7 +185,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("resending is rate limited per address", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage()
+		storage, _, clock := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -171,7 +205,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("a resend does not extend the attempt budget during the cooldown", func(t *testing.T) {
-		storage, _, _ := newOTPTestStorage()
+		storage, _, _ := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
@@ -180,8 +214,53 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("failed attempts carry over to a resent code", func(t *testing.T) {
+		storage, _, clock := newOTPTestStorage(t)
+		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		require.NoError(t, err)
+		for i := 0; i < otpMaxAttempts-1; i++ {
+			require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
+		}
+
+		clock.advance(otpResendCooldown)
+		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		require.NoError(t, err)
+		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
+
+		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "654321"),
+			"resending must not reset the attempt budget")
+		_, err = storage.CreateVerificationCode(ctx, key, "111111")
+		var rateLimited errs.RateLimited
+		require.ErrorAs(t, err, &rateLimited)
+	})
+
+	t.Run("a correct code is not accepted if another attempt lands before it is consumed", func(t *testing.T) {
+		storage, kv, _ := newOTPTestStorage(t)
+		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		require.NoError(t, err)
+		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &interleavingDeleteKV{fakeOTPKV: kv}
+
+		err = storage.ConsumeVerificationCode(ctx, key, "123456")
+		var conflict errs.Conflict
+		require.ErrorAs(t, err, &conflict)
+		_, stillStored := kv.values[key]
+		assert.True(t, stillStored, "the code must not be consumed by the losing request")
+	})
+
+	t.Run("KV failures are not reported as conflicts and do not leak details", func(t *testing.T) {
+		storage, kv, _ := newOTPTestStorage(t)
+		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		require.NoError(t, err)
+		kv.writeErr = errors.New("nats: internal detail")
+
+		err = storage.ConsumeVerificationCode(ctx, key, "123456")
+		var unexpected errs.Unexpected
+		require.ErrorAs(t, err, &unexpected)
+		assert.NotContains(t, err.Error(), "internal detail")
+	})
+
 	t.Run("an expired code is rejected", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage()
+		storage, _, clock := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -193,7 +272,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("expiry is not extended by failed attempts", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage()
+		storage, _, clock := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -207,7 +286,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("a legacy plain-text value never verifies", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage()
+		storage, kv, _ := newOTPTestStorage(t)
 		kv.write(key, []byte("123456"))
 
 		err := storage.ConsumeVerificationCode(ctx, key, "123456")
@@ -219,14 +298,14 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("a missing code is not found", func(t *testing.T) {
-		storage, _, _ := newOTPTestStorage()
+		storage, _, _ := newOTPTestStorage(t)
 		err := storage.ConsumeVerificationCode(ctx, key, "123456")
 		var notFound errs.NotFound
 		require.ErrorAs(t, err, &notFound)
 	})
 
 	t.Run("a concurrent send is reported as a conflict", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage()
+		storage, kv, _ := newOTPTestStorage(t)
 		kv.write(key, []byte(`{"otp":"999999","created_at":"2000-01-01T00:00:00Z","expires_at":"2000-01-01T00:05:00Z"}`))
 		staleKV := &staleRevisionKV{fakeOTPKV: kv}
 		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = staleKV
@@ -237,7 +316,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("a guess is not compared unless its attempt was recorded", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage()
+		storage, kv, _ := newOTPTestStorage(t)
 		_, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &staleRevisionKV{fakeOTPKV: kv}
@@ -248,7 +327,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 	})
 
 	t.Run("the rollback delete is revision-checked", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage()
+		storage, kv, _ := newOTPTestStorage(t)
 		revision, err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
@@ -266,4 +345,15 @@ type staleRevisionKV struct {
 func (s *staleRevisionKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
 	s.write(key, []byte(`{}`))
 	return s.fakeOTPKV.Update(ctx, key, value, revision)
+}
+
+// interleavingDeleteKV simulates another attempt being recorded between the
+// attempt reservation and the consuming delete.
+type interleavingDeleteKV struct {
+	*fakeOTPKV
+}
+
+func (i *interleavingDeleteKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	i.write(key, i.values[key])
+	return i.fakeOTPKV.Delete(ctx, key, opts...)
 }
