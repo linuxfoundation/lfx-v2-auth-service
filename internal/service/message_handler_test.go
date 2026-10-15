@@ -3729,6 +3729,47 @@ func TestMessageHandlerOrchestrator_AddAlias(t *testing.T) {
 		}
 	})
 
+	t.Run("alias_reserved — subaddressed reserved name", func(t *testing.T) {
+		alias := &mockAliasManager{}
+		handler := NewMessageHandlerOrchestrator(
+			WithUserReaderForMessageHandler(defaultReader()),
+			WithAliasManagerForMessageHandler(alias),
+		)
+		result, err := handler.AddAlias(ctx, msgFor(validToken, "admin+anything"))
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		reply := parseReply(t, result)
+		if reply["error"] != "alias_reserved" {
+			t.Errorf("expected alias_reserved, got %v", reply["error"])
+		}
+		if len(alias.calledWith) != 0 {
+			t.Error("AddSystemManagedEmail must not be called for a reserved alias")
+		}
+	})
+
+	t.Run("homoglyph of reserved name is refused", func(t *testing.T) {
+		// "ѕupport" (U+0455) and "аdmin" (U+0430) render like reserved names.
+		for _, spoof := range []string{"ѕupport", "аdmin", "ѕecurity", "іnfo"} {
+			alias := &mockAliasManager{}
+			handler := NewMessageHandlerOrchestrator(
+				WithUserReaderForMessageHandler(defaultReader()),
+				WithAliasManagerForMessageHandler(alias),
+			)
+			result, err := handler.AddAlias(ctx, msgFor(validToken, spoof))
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+			reply := parseReply(t, result)
+			if reply["success"] == true || reply["error"] != "alias_invalid" {
+				t.Errorf("alias %q: expected alias_invalid, got %v", spoof, reply)
+			}
+			if len(alias.calledWith) != 0 {
+				t.Errorf("alias %q: AddSystemManagedEmail must not be called", spoof)
+			}
+		}
+	})
+
 	t.Run("alias_not_available — email already claimed in Auth0", func(t *testing.T) {
 		alias := &mockAliasManager{}
 		reader := &mockUserServiceReader{

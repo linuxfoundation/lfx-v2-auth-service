@@ -41,6 +41,46 @@ var aliasReservedNames = map[string]struct{}{
 // to `admin@<domain>`, slipping past the reserved-name check on the raw alias).
 const aliasBannedChars = `/*$^:()<>[];@\, "`
 
+// aliasSubaddressDelimiter separates the mailbox from an optional subaddress
+// tag (e.g. `admin+tag` is delivered to `admin`). The reserved-name check is
+// applied to the part before the delimiter.
+const aliasSubaddressDelimiter = "+"
+
+// aliasSeparators are stripped from the reserved-name key so that variants such
+// as `no_reply`, `post.master` or `-admin` match their reserved counterparts.
+var aliasSeparators = strings.NewReplacer(".", "", "-", "", "_", "")
+
+// aliasASCIIConfusables folds ASCII sequences that render alike onto a single
+// representative, so that look-alikes such as `adrnin`, `adm1n` or `r00t` are
+// matched against the reserved list. It is applied to both the alias and the
+// reserved names. Order matters: multi-character sequences are replaced before
+// single characters.
+var aliasASCIIConfusables = strings.NewReplacer(
+	"rn", "m",
+	"vv", "w",
+	"cl", "d",
+	"0", "o",
+	"1", "l",
+	"i", "l",
+)
+
+// isAllowedAliasChar reports whether c may appear in a normalised alias.
+// Restricting the local part to this ASCII alphabet rejects Unicode homoglyphs
+// (e.g. Cyrillic `ѕupport`) that net/mail would otherwise accept as RFC 6532
+// atext and that would render identically to a reserved name.
+func isAllowedAliasChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		c == '.' || c == '_' || c == '-' || c == '+'
+}
+
+// aliasReservedKey returns the canonical form of a local part used for the
+// reserved-name comparison: subaddress tag and separators stripped and ASCII
+// confusables folded.
+func aliasReservedKey(localPart string) string {
+	base, _, _ := strings.Cut(localPart, aliasSubaddressDelimiter)
+	return aliasASCIIConfusables.Replace(aliasSeparators.Replace(base))
+}
+
 // ValidateAlias normalises alias (lowercases + trims) and validates it as a
 // local part that can be safely appended to "@<domain>". Returns
 // ("", "alias_invalid") or ("", "alias_reserved") on failure, or
@@ -59,6 +99,12 @@ func ValidateAlias(alias, domain string, extraReserved []string) (string, string
 		return "", "alias_invalid"
 	}
 
+	for i := 0; i < len(alias); i++ {
+		if !isAllowedAliasChar(alias[i]) {
+			return "", "alias_invalid"
+		}
+	}
+
 	// Ensure the address parses and that net/mail's canonical form matches the
 	// input verbatim. This catches any other surface (escapes, encoded forms)
 	// that could let a normalised value differ from `alias`.
@@ -68,11 +114,20 @@ func ValidateAlias(alias, domain string, extraReserved []string) (string, string
 		return "", "alias_invalid"
 	}
 
-	if _, reserved := aliasReservedNames[alias]; reserved {
-		return "", "alias_reserved"
+	// A mailbox part made only of separators (e.g. `+tag`, `-`) is degenerate
+	// and could never be matched against the reserved list.
+	key := aliasReservedKey(alias)
+	if key == "" {
+		return "", "alias_invalid"
+	}
+	for name := range aliasReservedNames {
+		if key == aliasReservedKey(name) {
+			return "", "alias_reserved"
+		}
 	}
 	for _, extra := range extraReserved {
-		if strings.EqualFold(alias, strings.TrimSpace(extra)) {
+		extra = strings.ToLower(strings.TrimSpace(extra))
+		if extra != "" && key == aliasReservedKey(extra) {
 			return "", "alias_reserved"
 		}
 	}

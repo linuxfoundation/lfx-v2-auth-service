@@ -137,6 +137,114 @@ func TestValidateAlias(t *testing.T) {
 			wantErrCode: "alias_invalid",
 		},
 
+		// Invalid — outside the restricted ASCII alphabet
+		{
+			name:        "non-ASCII letter",
+			alias:       "jöhn",
+			wantErrCode: "alias_invalid",
+		},
+		{
+			name:        "ASCII punctuation outside allowlist",
+			alias:       "jane|doe",
+			wantErrCode: "alias_invalid",
+		},
+		{
+			name:        "apostrophe outside allowlist",
+			alias:       "o'brien",
+			wantErrCode: "alias_invalid",
+		},
+
+		// Reserved — subaddressing and ASCII look-alikes
+		{
+			name:        "subaddressed reserved name",
+			alias:       "admin+anything",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "subaddressed reserved name uppercase",
+			alias:       "SUPPORT+x",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "reserved name with empty subaddress",
+			alias:       "security+",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "rn look-alike of m",
+			alias:       "adrnin",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "zero look-alike of o",
+			alias:       "r00t",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "one look-alike of l",
+			alias:       "1inux",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "vv look-alike of w",
+			alias:       "vvebmaster",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "subaddress on non-reserved name allowed",
+			alias:       "adminton+x",
+			wantNorm:    "adminton+x",
+			wantErrCode: "",
+		},
+		{
+			name:          "subaddressed extra reserved name",
+			alias:         "cncf+x",
+			extraReserved: []string{"cncf"},
+			wantErrCode:   "alias_reserved",
+		},
+		{
+			name:          "empty extra reserved entry is ignored",
+			alias:         "jdoe",
+			extraReserved: []string{"  "},
+			wantNorm:      "jdoe",
+			wantErrCode:   "",
+		},
+		{
+			name:        "empty mailbox before subaddress",
+			alias:       "+admin",
+			wantErrCode: "alias_invalid",
+		},
+		{
+			name:        "separators only",
+			alias:       "-",
+			wantErrCode: "alias_invalid",
+		},
+		{
+			name:        "underscore variant of reserved name",
+			alias:       "no_reply",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "dot variant of reserved name",
+			alias:       "post.master",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "leading hyphen variant of reserved name",
+			alias:       "-admin",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "one look-alike of i",
+			alias:       "adm1n",
+			wantErrCode: "alias_reserved",
+		},
+		{
+			name:        "cl look-alike of d",
+			alias:       "aclmin",
+			wantErrCode: "alias_reserved",
+		},
+
 		// Extra reserved
 		{
 			name:          "extra reserved name blocked",
@@ -199,5 +307,48 @@ func TestValidateAlias(t *testing.T) {
 				t.Errorf("expected alias_reserved for upper-cased built-in reserved name %q, got %q", strings.ToUpper(name), code)
 			}
 		})
+		t.Run(name+" reserved subaddressed (builtin)", func(t *testing.T) {
+			_, code := ValidateAlias(name+"+tag", testDomain, nil)
+			if code != "alias_reserved" {
+				t.Errorf("expected alias_reserved for subaddressed built-in reserved name %q, got %q", name+"+tag", code)
+			}
+		})
+		// Every Cyrillic/Greek homoglyph substitution of a reserved name must
+		// be refused; none may be returned as a valid alias.
+		for i := 0; i < len(name); i++ {
+			for _, glyph := range aliasTestHomoglyphs[name[i]] {
+				spoof := name[:i] + string(glyph) + name[i+1:]
+				t.Run(name+" homoglyph "+spoof, func(t *testing.T) {
+					norm, code := ValidateAlias(spoof, testDomain, nil)
+					if code == "" || norm != "" {
+						t.Errorf("expected homoglyph %q of reserved name %q to be rejected, got norm=%q code=%q", spoof, name, norm, code)
+					}
+				})
+			}
+		}
 	}
+}
+
+// aliasTestHomoglyphs maps ASCII letters to Cyrillic and Greek code points
+// that render identically (or near-identically) in common fonts.
+var aliasTestHomoglyphs = map[byte][]rune{
+	'a': {'а', 'α'}, // Cyrillic а, Greek α
+	'c': {'с', 'ϲ'}, // Cyrillic с, Greek lunate sigma ϲ
+	'd': {'ԁ'},      // Cyrillic ԁ
+	'e': {'е', 'ε'}, // Cyrillic е, Greek ε
+	'h': {'һ'},      // Cyrillic һ
+	'i': {'і', 'ι'}, // Cyrillic і, Greek ι
+	'j': {'ј'},      // Cyrillic ј
+	'l': {'ӏ'},      // Cyrillic ӏ
+	'n': {'ո'},      // Armenian ո
+	'o': {'о', 'ο'}, // Cyrillic о, Greek ο
+	'p': {'р', 'ρ'}, // Cyrillic р, Greek ρ
+	'r': {'г'},      // Cyrillic г
+	's': {'ѕ'},      // Cyrillic ѕ
+	't': {'τ'},      // Greek τ
+	'u': {'υ'},      // Greek υ
+	'v': {'ν'},      // Greek ν
+	'w': {'ѡ'},      // Cyrillic ѡ
+	'x': {'х', 'χ'}, // Cyrillic х, Greek χ
+	'y': {'у'},      // Cyrillic у
 }

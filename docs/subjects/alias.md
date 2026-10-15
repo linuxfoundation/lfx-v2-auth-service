@@ -80,9 +80,11 @@ The alias is normalised by trimming whitespace and lower-casing, then validated 
 
 - **Length**: 1–64 characters after trimming
 - **Banned characters**: `"`, `/`, `*`, `$`, `^`, `:`, `@`, space, `;`, and other characters that would break RFC 5322 local parts or allow quoted-form bypass
+- **Allowed alphabet**: after normalisation the alias may contain only ASCII `a`–`z`, `0`–`9`, `.`, `_`, `-` and `+`. Any other character, including all non-ASCII code points, is rejected with `alias_invalid`. This prevents Unicode look-alikes of reserved names (e.g. Cyrillic `ѕupport`)
 - **RFC 5322 round-trip**: the input is reconstructed as `<norm>@<domain>` and parsed with `net/mail.ParseAddress`; the canonical form must equal the reconstructed string. This guards against the quoted-local-part bypass (e.g. `"admin"`)
 - **Reserved names** (case-insensitive, applied on every domain): `postmaster`, `abuse`, `hostmaster`, `admin`, `administrator`, `noreply`, `no-reply`, `root`, `mailer-daemon`, `linux`, `linuxfoundation`, `lf`, `security`, `support`, `info`, `webmaster`, `ops`, `devops`, `itx-system`
 - **Extra reserved names**: any entry in the comma-separated `AUTH0_ALIAS_RESERVED_EXTRA` environment variable is added to the reserved list (case-insensitive)
+- **Reserved-name canonical form**: the reserved comparison ignores any `+` subaddress tag (`admin+tag` is reserved), ignores `.`, `-` and `_` (`no_reply`, `post.master` are reserved), and folds ASCII look-alikes (`rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`, `1`/`i`→`l`), so `adrnin`, `adm1n` and `r00t` are also reserved. An alias whose mailbox part is empty under this form (e.g. `+tag`, `-`) is rejected with `alias_invalid`
 
 ### System-Managed Semantics
 
