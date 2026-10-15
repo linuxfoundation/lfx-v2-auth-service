@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -585,14 +587,22 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 // Lookup failures are returned as unexpected errors so the claim fails closed.
 func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mToken string) error {
 	normalized := strings.ToLower(strings.TrimSpace(email))
-	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(normalized)
+	escaper := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	escaped := escaper.Replace(normalized)
+
+	identityTerms := make([]string, 0, 12)
+	for _, variant := range emailCasingVariants(normalized) {
+		identityTerms = append(identityTerms, `identities.profileData.email:"`+escaper.Replace(variant)+`"`)
+	}
 
 	// users-by-email is case-sensitive and social/enterprise connections may
 	// keep the provider's casing, so the root email is also searched through
 	// the normalized (case-insensitive) v3 "email" field. users-by-email is kept
 	// because, unlike the search index, it is not eventually consistent.
-	// identities.profileData.email has no case-insensitive search; results are
-	// still compared case-insensitively by holdsEmail.
+	// identities.profileData.email has no case-insensitive search, so the
+	// common casings a provider may have stored are searched together (see
+	// emailCasingVariants); results are compared case-insensitively by
+	// holdsEmail.
 	lookups := []struct {
 		description string
 		endpoint    string
@@ -607,7 +617,7 @@ func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mT
 		},
 		{
 			description: "look up users by identity email",
-			endpoint:    "users?q=" + url.QueryEscape(`identities.profileData.email:"`+escaped+`"`) + "&search_engine=v3",
+			endpoint:    "users?q=" + url.QueryEscape(strings.Join(identityTerms, " OR ")) + "&search_engine=v3",
 		},
 	}
 
@@ -645,6 +655,53 @@ func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mT
 	}
 
 	return nil
+}
+
+// emailCasingVariants returns the casings of a lowercased email that identity
+// providers commonly store: lowercase, uppercase, and the local part and domain
+// each either lowercase, capitalized, or (local part only) capitalized per
+// segment, e.g. "First.Last@Linux.com". Auth0 cannot search identity emails
+// case-insensitively, so these are what the identity-email lookup can cover.
+func emailCasingVariants(email string) []string {
+	local, domain, found := strings.Cut(email, "@")
+	if !found {
+		return []string{email}
+	}
+
+	capitalize := func(s string) string {
+		r, size := utf8.DecodeRuneInString(s)
+		if size == 0 {
+			return s
+		}
+		return string(unicode.ToUpper(r)) + s[size:]
+	}
+	capitalizeSegments := func(s string) string {
+		var b strings.Builder
+		start := true
+		for _, r := range s {
+			if start {
+				b.WriteRune(unicode.ToUpper(r))
+			} else {
+				b.WriteRune(r)
+			}
+			start = r == '.' || r == '_' || r == '-'
+		}
+		return b.String()
+	}
+
+	variants := []string{email, strings.ToUpper(email)}
+	seen := map[string]struct{}{email: {}, strings.ToUpper(email): {}}
+	for _, l := range []string{local, capitalize(local), capitalizeSegments(local)} {
+		for _, d := range []string{domain, capitalize(domain)} {
+			v := l + "@" + d
+			if _, dup := seen[v]; dup {
+				continue
+			}
+			seen[v] = struct{}{}
+			variants = append(variants, v)
+		}
+	}
+	return variants
 }
 
 // holdsEmail reports whether user carries email, case-insensitively, as its

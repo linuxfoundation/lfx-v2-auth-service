@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1090,7 +1091,7 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		strings.HasPrefix(req.URL.Query().Get("q"), "email:"):
 		status, body = f.rootSearchStatus, f.rootSearchResp
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users":
-		status, body = f.searchStatus, f.searchResp
+		status, body = f.searchStatus, filterByIdentityEmail(f.searchResp, req.URL.Query().Get("q"))
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		// GET of any other user id is the rollback stub verification.
 		status, body = f.stubGetStatus, f.stubGetResp
@@ -1118,6 +1119,36 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil
+}
+
+// filterByIdentityEmail mimics Auth0's case-sensitive identities.profileData.email
+// search: it keeps only the users in resp with an identity whose profile email
+// exactly equals one of the quoted terms in q. resp is returned unchanged when
+// it is not a JSON array of users (e.g. an error body).
+func filterByIdentityEmail(resp, q string) string {
+	var raw []json.RawMessage
+	if json.Unmarshal([]byte(resp), &raw) != nil {
+		return resp
+	}
+	terms := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`).FindAllStringSubmatch(q, -1) {
+		terms[m[1]] = true
+	}
+	kept := []json.RawMessage{}
+	for _, r := range raw {
+		var user Auth0User
+		if json.Unmarshal(r, &user) != nil {
+			continue
+		}
+		for _, identity := range user.Identities {
+			if identity.ProfileData != nil && terms[identity.ProfileData.Email] {
+				kept = append(kept, r)
+				break
+			}
+		}
+	}
+	out, _ := json.Marshal(kept)
+	return string(out)
 }
 
 // methodPaths returns the recorded calls as "METHOD path" strings, in order.
@@ -1645,11 +1676,28 @@ func TestUserReaderWriter_AddSystemManagedEmail_ExistingClaimOnAnyConnection(t *
 				queries = append(queries, values.Get("q"))
 			}
 		}
-		assert.Equal(t, []string{
-			`email:"alias@linux.com"`,
-			`identities.profileData.email:"alias@linux.com"`,
-		}, queries)
+		require.Len(t, queries, 2)
+		assert.Equal(t, `email:"alias@linux.com"`, queries[0])
+		assert.True(t, strings.HasPrefix(queries[1], `identities.profileData.email:"alias@linux.com" OR `), queries[1])
+		assert.Contains(t, queries[1], `identities.profileData.email:"Alias@Linux.com"`)
 	})
+
+	mixedCaseLinked := []string{"Alias@Linux.com", "Alias@linux.com", "ALIAS@LINUX.COM", "alias@Linux.com"}
+	for _, stored := range mixedCaseLinked {
+		t.Run("linked identity stored as "+stored+" blocks the claim", func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.searchResp = `[{"user_id":"auth0|v1","email":"someone@example.org","identities":[` +
+				`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"v1"},` +
+				`{"connection":"github","provider":"github","profileData":{"email":"` + stored + `"}}]}]`
+			rw := newTestReaderWriter(ft)
+
+			_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+			require.Error(t, err)
+			var validationErr errors.Validation
+			assert.ErrorAs(t, err, &validationErr)
+			assert.Equal(t, 0, ft.countFor(http.MethodPost, ""))
+		})
+	}
 
 	t.Run("root email stored with provider casing is found by the case-insensitive search", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
@@ -2128,4 +2176,26 @@ func TestUserReaderWriter_DeleteEmailConnectionStub(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to verify email-connection stub before delete")
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
 	})
+}
+
+func TestEmailCasingVariants(t *testing.T) {
+	assert.ElementsMatch(t, []string{
+		"first.last@linux.com",
+		"FIRST.LAST@LINUX.COM",
+		"first.last@Linux.com",
+		"First.last@linux.com",
+		"First.last@Linux.com",
+		"First.Last@linux.com",
+		"First.Last@Linux.com",
+	}, emailCasingVariants("first.last@linux.com"))
+
+	assert.ElementsMatch(t, []string{
+		"alias@linux.com",
+		"ALIAS@LINUX.COM",
+		"alias@Linux.com",
+		"Alias@linux.com",
+		"Alias@Linux.com",
+	}, emailCasingVariants("alias@linux.com"))
+
+	assert.Equal(t, []string{"no-at-sign"}, emailCasingVariants("no-at-sign"))
 }
