@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -283,9 +284,12 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 
 // isValidAuth0UserID reports whether s has the Auth0 user_id shape
 // "provider|id": a non-empty provider of letters, digits, '-' or '_', a
-// non-empty id, and no URL path/query metacharacters, whitespace or control
-// characters anywhere, so the value can only ever name a single user record.
+// non-empty id, valid UTF-8, and no URL path/query metacharacters, whitespace
+// or control characters anywhere, so the value can only ever name a single user record.
 func isValidAuth0UserID(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
 	provider, id, found := strings.Cut(s, "|")
 	if !found || provider == "" || id == "" {
 		return false

@@ -884,6 +884,7 @@ func TestUserReaderWriter_MetadataLookup_RejectsMalformedSub(t *testing.T) {
 		"auth0|a b",
 		"auth0|a\tb",
 		"auth0|a\x00b",
+		"auth0|a\xffb",
 		"|abc",
 		"auth0|",
 		"bad/prov|x",
