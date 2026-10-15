@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -154,7 +155,7 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, user.UserID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(user.UserID))),
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("get user details"),
 	)
@@ -263,6 +264,10 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	switch {
 	case strings.Contains(input, "|"):
 		// Input contains "|", use as sub for canonical lookup
+		if !isValidAuth0UserID(input) {
+			slog.WarnContext(ctx, "canonical lookup rejected: invalid user_id format", "sub", redaction.Redact(input))
+			return nil, errors.NewValidation("invalid user_id format")
+		}
 		user.UserID = input
 		slog.DebugContext(ctx, "canonical lookup strategy", "sub", redaction.Redact(input))
 
@@ -274,6 +279,31 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	}
 
 	return user, nil
+}
+
+// isValidAuth0UserID reports whether s has the Auth0 user_id shape
+// "provider|id": a non-empty provider of letters, digits, '-' or '_', a
+// non-empty id, and no URL path/query metacharacters, whitespace or control
+// characters anywhere, so the value can only ever name a single user record.
+func isValidAuth0UserID(s string) bool {
+	provider, id, found := strings.Cut(s, "|")
+	if !found || provider == "" || id == "" {
+		return false
+	}
+	for _, r := range provider {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r == '/', r == '?', r == '#', r == '%', r == '\\':
+			return false
+		case unicode.IsSpace(r), unicode.IsControl(r):
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateUser applies the provided changes to the Auth0 user via PATCH.
@@ -306,7 +336,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, user.UserID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(user.UserID))),
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("update user metadata"),
 		httpclient.WithBody(updateRequest),
