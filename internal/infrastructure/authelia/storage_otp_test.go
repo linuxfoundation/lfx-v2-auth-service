@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 )
@@ -34,7 +35,21 @@ type fakeOTPKV struct {
 	unconditionalDeletes int
 	// writeErr, when set, fails every write with this error.
 	writeErr error
+	// ttl is the bucket TTL reported by Status.
+	ttl time.Duration
 }
+
+func (f *fakeOTPKV) Status(context.Context) (jetstream.KeyValueStatus, error) {
+	return fakeOTPStatus{ttl: f.ttl}, nil
+}
+
+type fakeOTPStatus struct {
+	jetstream.KeyValueStatus
+
+	ttl time.Duration
+}
+
+func (s fakeOTPStatus) TTL() time.Duration { return s.ttl }
 
 var errWrongLastSequence = &jetstream.APIError{Code: 400, ErrorCode: jetstream.JSErrCodeStreamWrongLastSequence}
 
@@ -139,7 +154,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("a correct code is accepted exactly once", func(t *testing.T) {
 		storage, kv, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
 		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "123456"))
@@ -152,7 +167,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("the code is locked after the attempt limit, even for the correct value", func(t *testing.T) {
 		storage, _, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
 		for i := 0; i < otpMaxAttempts; i++ {
@@ -164,14 +179,14 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		err = storage.ConsumeVerificationCode(ctx, key, "123456")
 		require.Error(t, err, "the correct code must be rejected once the attempt limit is reached")
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited, "a locked code must not be replaced before it expires")
 	})
 
 	t.Run("a locked code can be replaced once it expires", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		for i := 0; i < otpMaxAttempts; i++ {
 			require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
@@ -179,25 +194,25 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 		clock.advance(otpLifetime)
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.NoError(t, err)
 		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "654321"))
 	})
 
 	t.Run("resending is rate limited per address", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 
-		_, err = storage.CreateVerificationCode(ctx, "other-key", "111111")
+		err = storage.CreateVerificationCode(ctx, "other-key", "111111")
 		require.NoError(t, err, "the limit applies per address")
 
 		clock.advance(otpResendCooldown)
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.NoError(t, err)
 
 		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "123456"), "the replaced code must no longer verify")
@@ -206,37 +221,37 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("a resend does not extend the attempt budget during the cooldown", func(t *testing.T) {
 		storage, _, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.Error(t, err)
 	})
 
 	t.Run("failed attempts carry over to a resent code", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		for i := 0; i < otpMaxAttempts-1; i++ {
 			require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
 		}
 
 		clock.advance(otpResendCooldown)
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.NoError(t, err)
 		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
 
 		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "654321"),
 			"resending must not reset the attempt budget")
-		_, err = storage.CreateVerificationCode(ctx, key, "111111")
+		err = storage.CreateVerificationCode(ctx, key, "111111")
 		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 	})
 
 	t.Run("a correct code is not accepted if another attempt lands before it is consumed", func(t *testing.T) {
 		storage, kv, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &interleavingConsumeKV{fakeOTPKV: kv}
 
@@ -251,23 +266,23 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("a resend right after a successful verification is still rate limited", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "123456"))
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		var rateLimited errs.RateLimited
 		require.ErrorAs(t, err, &rateLimited)
 
 		clock.advance(otpResendCooldown)
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.NoError(t, err)
 		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "654321"))
 	})
 
 	t.Run("KV failures are not reported as conflicts and do not leak details", func(t *testing.T) {
 		storage, kv, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		kv.writeErr = errors.New("nats: internal detail")
 
@@ -279,7 +294,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("an expired code is rejected", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
 		clock.advance(otpLifetime)
@@ -291,7 +306,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 
 	t.Run("expiry is not extended by failed attempts", func(t *testing.T) {
 		storage, _, clock := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 
 		clock.advance(otpLifetime - time.Second)
@@ -311,7 +326,7 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		var notFound errs.NotFound
 		require.ErrorAs(t, err, &notFound)
 
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
+		err = storage.CreateVerificationCode(ctx, key, "654321")
 		require.NoError(t, err)
 	})
 
@@ -328,41 +343,20 @@ func TestNATSUserStorage_VerificationCode(t *testing.T) {
 		staleKV := &staleRevisionKV{fakeOTPKV: kv}
 		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = staleKV
 
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		var conflict errs.Conflict
 		require.ErrorAs(t, err, &conflict)
 	})
 
 	t.Run("a guess is not compared unless its attempt was recorded", func(t *testing.T) {
 		storage, kv, _ := newOTPTestStorage(t)
-		_, err := storage.CreateVerificationCode(ctx, key, "123456")
+		err := storage.CreateVerificationCode(ctx, key, "123456")
 		require.NoError(t, err)
 		storage.kvStore[constants.KVBucketNameAutheliaEmailOTP] = &staleRevisionKV{fakeOTPKV: kv}
 
 		err = storage.ConsumeVerificationCode(ctx, key, "123456")
 		var conflict errs.Conflict
 		require.ErrorAs(t, err, &conflict, "a correct code must not be accepted without recording the attempt")
-	})
-
-	t.Run("the rollback delete is revision-checked", func(t *testing.T) {
-		storage, kv, _ := newOTPTestStorage(t)
-		revision, err := storage.CreateVerificationCode(ctx, key, "123456")
-		require.NoError(t, err)
-
-		require.NoError(t, storage.DeleteVerificationCode(ctx, key, revision))
-		assert.Zero(t, kv.unconditionalDeletes)
-	})
-
-	t.Run("a rollback with a stale revision keeps the newer code", func(t *testing.T) {
-		storage, _, clock := newOTPTestStorage(t)
-		staleRevision, err := storage.CreateVerificationCode(ctx, key, "123456")
-		require.NoError(t, err)
-		clock.advance(otpResendCooldown)
-		_, err = storage.CreateVerificationCode(ctx, key, "654321")
-		require.NoError(t, err)
-
-		require.Error(t, storage.DeleteVerificationCode(ctx, key, staleRevision))
-		require.NoError(t, storage.ConsumeVerificationCode(ctx, key, "654321"))
 	})
 }
 
@@ -391,4 +385,58 @@ func (i *interleavingConsumeKV) Update(ctx context.Context, key string, value []
 		i.write(key, i.values[key])
 	}
 	return i.fakeOTPKV.Update(ctx, key, value, revision)
+}
+
+func TestValidateEmailOTPBucketTTL(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name    string
+		ttl     time.Duration
+		wantErr bool
+	}{
+		{name: "no expiry", ttl: 0},
+		{name: "equal to the code lifetime", ttl: otpLifetime},
+		{name: "longer than the code lifetime", ttl: time.Hour},
+		{name: "shorter than the code lifetime", ttl: 30 * time.Second, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			kv := newFakeOTPKV(t)
+			kv.ttl = tt.ttl
+			err := validateEmailOTPBucketTTL(ctx, kv)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+type failingEmailFlow struct{}
+
+func (failingEmailFlow) SendEmail(context.Context, string, string) error {
+	return errors.New("smtp unavailable")
+}
+
+func (failingEmailFlow) LoginWithEmail(context.Context) error { return nil }
+
+func TestUserReaderWriter_SendVerificationAlternateEmail_FailedSendKeepsAttempts(t *testing.T) {
+	ctx := context.Background()
+	storage, _, clock := newOTPTestStorage(t)
+	rw := &userReaderWriter{storage: storage, emailLinkingFlow: failingEmailFlow{}}
+	const address = "someone@example.com"
+	key := (&model.User{}).BuildAlternateEmailIndexKey(ctx, address)
+
+	require.NoError(t, storage.CreateVerificationCode(ctx, key, "123456"))
+	for i := 0; i < otpMaxAttempts-1; i++ {
+		require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
+	}
+	clock.advance(otpResendCooldown)
+
+	require.Error(t, rw.SendVerificationAlternateEmail(ctx, address))
+
+	require.Error(t, storage.ConsumeVerificationCode(ctx, key, "000000"))
+	err := storage.CreateVerificationCode(ctx, key, "654321")
+	var rateLimited errs.RateLimited
+	require.ErrorAs(t, err, &rateLimited, "a failed send must not reset the attempt count")
 }

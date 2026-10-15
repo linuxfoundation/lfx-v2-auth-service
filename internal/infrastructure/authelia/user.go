@@ -297,18 +297,17 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	// before any email goes out.
 	user := &model.User{}
 	key := user.BuildAlternateEmailIndexKey(ctx, alternateEmail)
-	revision, errCreateVerificationCode := a.storage.CreateVerificationCode(ctx, key, otp)
+	errCreateVerificationCode := a.storage.CreateVerificationCode(ctx, key, otp)
 	if errCreateVerificationCode != nil {
 		slog.ErrorContext(ctx, "failed to create verification code", "error", errCreateVerificationCode)
 		return errCreateVerificationCode
 	}
 
+	// If the send fails, the stored code is left in place rather than removed, so the
+	// attempt count and resend cooldown it carries are not reset.
 	errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail, otp)
 	if errSendEmail != nil {
 		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
-		if errDelete := a.storage.DeleteVerificationCode(ctx, key, revision); errDelete != nil {
-			slog.WarnContext(ctx, "failed to remove unsent verification code", "error", errDelete)
-		}
 		return errs.NewUnexpected("failed to send email", errSendEmail)
 	}
 

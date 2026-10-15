@@ -254,7 +254,7 @@ sequenceDiagram
 
 **NATS KV Bucket Configuration:**
 - **Bucket Name**: `authelia-email-otp` (`constants.KVBucketNameAutheliaEmailOTP`)
-- **TTL**: 5 minutes (configurable at bucket creation)
+- **TTL**: 5 minutes (configurable at bucket creation; must not be shorter than the 5-minute code lifetime, or the service refuses to start)
 - **Key Format**: Email address (used as alternate email index key)
 - **Value Format**: JSON record with the 6-digit numeric OTP code, the attempt count, and the issue and expiry times
 - **Auto-Expiration**: NATS automatically removes expired entries after TTL

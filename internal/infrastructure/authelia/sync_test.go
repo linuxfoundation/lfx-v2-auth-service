@@ -75,15 +75,11 @@ func (m *mockStorageReaderWriter) UpdateUserWithRevision(ctx context.Context, us
 	return nil
 }
 
-func (m *mockStorageReaderWriter) CreateVerificationCode(ctx context.Context, email, otp string) (uint64, error) {
-	return 1, nil
-}
-
-func (m *mockStorageReaderWriter) ConsumeVerificationCode(ctx context.Context, email, otp string) error {
+func (m *mockStorageReaderWriter) CreateVerificationCode(ctx context.Context, email, otp string) error {
 	return nil
 }
 
-func (m *mockStorageReaderWriter) DeleteVerificationCode(ctx context.Context, email string, revision uint64) error {
+func (m *mockStorageReaderWriter) ConsumeVerificationCode(ctx context.Context, email, otp string) error {
 	return nil
 }
 
