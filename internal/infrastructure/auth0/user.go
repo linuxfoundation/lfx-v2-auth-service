@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -546,8 +545,8 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 // surviving the link: Auth0 may merge or discard a linked secondary's profile,
 // so the stub's app_metadata is only consulted as an additional signal.
 //
-// An identity is system-managed when its id is recorded in the primary user's
-// app_metadata.system_managed_identities (written at claim time, so it holds
+// An identity is system-managed when the primary user's app_metadata carries
+// its system_managed_identity_<id> marker (written at claim time, so it holds
 // even after the alias domain is removed from ALLOWED_ALIAS_DOMAINS), when its
 // email is on an ALLOWED_ALIAS_DOMAINS domain (those addresses can only be
 // claimed through add_alias), or when its stub record still exists and carries
@@ -565,7 +564,7 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("get primary user for unlink guard"),
 	)
-	var primary Auth0User
+	var primary unlinkGuardUser
 	if statusCode, callErr := apiPrimary.Call(ctx, &primary); callErr != nil {
 		slog.ErrorContext(ctx, "failed to fetch primary user for system-managed unlink guard",
 			"user_id", redaction.Redact(primaryUserID),
@@ -589,11 +588,7 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 	if linked == nil {
 		return false, errors.NewNotFound("identity not found")
 	}
-	var markedIDs []string
-	if primary.AppMetadata != nil {
-		markedIDs = primary.AppMetadata.SystemManagedIdentities
-	}
-	if slices.Contains(markedIDs, identityID) {
+	if primary.hasSystemManagedIdentityMarker(identityID) {
 		return true, nil
 	}
 	if linked.ProfileData == nil || strings.TrimSpace(linked.ProfileData.Email) == "" {
@@ -649,8 +644,8 @@ func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, pri
 	return aliasDomain, nil
 }
 
-// backfillSystemManagedIdentity records identityID in the primary user's
-// system_managed_identities marker for an alias the unlink guard recognised by
+// backfillSystemManagedIdentity records identityID's system-managed marker on
+// the primary user for an alias the unlink guard recognised by
 // domain or stub. It is best-effort: the unlink is refused either way, so a
 // failure is only logged.
 func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) {
@@ -662,76 +657,29 @@ func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, pr
 	}
 }
 
-// recordSystemManagedIdentity adds identityID (the provider-local id, without
-// the "email|" prefix) to the primary user's
-// app_metadata.system_managed_identities, the durable record the unlink guard
-// consults first. It is a no-op when the id is already present.
+// recordSystemManagedIdentity marks identityID (the provider-local id, without
+// the "email|" prefix) as system-managed on the primary user by setting
+// app_metadata.system_managed_identity_<id> = true, the durable record the
+// unlink guard consults first.
 //
-// Auth0 has no atomic append for app_metadata, so this is a read-modify-write
-// of a single array: a concurrent writer for the same user (another claim or a
-// guard backfill) can overwrite the id just written. Each write is therefore
-// confirmed by a fresh read and re-applied if the id is missing, up to
-// systemManagedMarkerAttempts times. Every writer does the same, so concurrent
-// writers converge on an array holding all of their ids.
+// It is a single PATCH of one top-level key: Auth0 merges top-level
+// app_metadata keys, so no read-modify-write is involved and concurrent marker
+// writes for different aliases on the same user cannot drop each other, and
+// other app_metadata keys are left untouched.
 func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) error {
-	for attempt := 0; attempt < systemManagedMarkerAttempts; attempt++ {
-		ids, errRead := u.readSystemManagedIdentities(ctx, primaryUserID, m2mToken)
-		if errRead != nil {
-			return errRead
-		}
-		if slices.Contains(ids, identityID) {
-			return nil
-		}
-		if errWrite := u.writeSystemManagedIdentities(ctx, primaryUserID, append(slices.Clone(ids), identityID), m2mToken); errWrite != nil {
-			return errWrite
-		}
+	// Auth0 rejects metadata field names containing "." or "$"; real identity
+	// ids never do, so refuse rather than send a malformed key.
+	if identityID == "" || strings.ContainsAny(identityID, ".$") {
+		return errors.NewValidation("invalid identity id for system-managed marker")
 	}
-
-	ids, errRead := u.readSystemManagedIdentities(ctx, primaryUserID, m2mToken)
-	if errRead != nil {
-		return errRead
-	}
-	if !slices.Contains(ids, identityID) {
-		return errors.NewUnexpected("system-managed identity marker was overwritten by concurrent updates")
-	}
-	return nil
-}
-
-// systemManagedMarkerAttempts bounds how many times recordSystemManagedIdentity
-// re-applies a marker write that a concurrent writer overwrote.
-const systemManagedMarkerAttempts = 3
-
-// readSystemManagedIdentities returns the primary user's current
-// app_metadata.system_managed_identities.
-func (u *userReaderWriter) readSystemManagedIdentities(ctx context.Context, primaryUserID, m2mToken string) ([]string, error) {
-	apiGet := httpclient.NewAPIRequest(
-		u.httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s?fields=app_metadata", u.config.Domain, url.PathEscape(primaryUserID))),
-		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("get primary user app_metadata for system-managed marker"),
-	)
-	var primary Auth0User
-	if _, errGet := apiGet.Call(ctx, &primary); errGet != nil {
-		return nil, errors.NewUnexpected("failed to read system-managed identity marker", errGet)
-	}
-	if primary.AppMetadata == nil {
-		return nil, nil
-	}
-	return primary.AppMetadata.SystemManagedIdentities, nil
-}
-
-// writeSystemManagedIdentities PATCHes the primary user's
-// app_metadata.system_managed_identities to ids, sending only that key.
-func (u *userReaderWriter) writeSystemManagedIdentities(ctx context.Context, primaryUserID string, ids []string, m2mToken string) error {
 	apiPatch := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
 		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(primaryUserID))),
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("record system-managed identity marker"),
-		httpclient.WithBody(systemManagedIdentitiesPatch{
-			AppMetadata: systemManagedIdentitiesMetadata{SystemManagedIdentities: ids},
+		httpclient.WithBody(map[string]map[string]bool{
+			"app_metadata": {systemManagedIdentityKey(identityID): true},
 		}),
 		httpclient.WithSensitiveBody(),
 	)
@@ -761,7 +709,7 @@ func isAliasDomainEmail(email string) bool {
 // is attempted before the error is returned.
 //
 // After a successful link the identity is recorded in the primary user's
-// app_metadata.system_managed_identities so the unlink guard keeps refusing it
+// app_metadata (system_managed_identity_<id>) so the unlink guard keeps refusing it
 // even if the alias domain is later removed from ALLOWED_ALIAS_DOMAINS. That
 // write is best-effort: the alias is already linked and remains protected by
 // the domain check, which also backfills the marker on the next unlink attempt.

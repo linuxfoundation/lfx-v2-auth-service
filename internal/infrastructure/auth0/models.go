@@ -47,13 +47,6 @@ type Auth0AppMetadata struct {
 	// not be unlinked through the normal user-initiated unlink flow.
 	SystemManaged bool `json:"system_managed,omitempty"`
 
-	// SystemManagedIdentities lists the email-connection identity ids (the
-	// provider-local part, without the "email|" prefix) linked to this primary
-	// user as system-managed aliases. It is the durable record the unlink guard
-	// relies on, since a linked secondary's own stub record may not survive the
-	// link. Written only via systemManagedIdentitiesPatch.
-	SystemManagedIdentities []string `json:"system_managed_identities,omitempty"`
-
 	// CDPUUID is the user's resolved CDP member id. Once set it is permanent:
 	// absent to present is the only legal transition, except the scheduled
 	// merge-repair job's compare-and-swap overwrite.
@@ -78,16 +71,39 @@ type systemManagedUserPayload struct {
 	AppMetadata   *Auth0AppMetadata `json:"app_metadata,omitempty"`
 }
 
-// systemManagedIdentitiesPatch is the body for PATCH /api/v2/users/{id} when
-// recording a system-managed alias on the primary user. Auth0 merges top-level
-// app_metadata keys, so sending only this key leaves every other key (CDP
-// enrichment, system_managed) untouched.
-type systemManagedIdentitiesPatch struct {
-	AppMetadata systemManagedIdentitiesMetadata `json:"app_metadata"`
+// systemManagedIdentityKeyPrefix prefixes the per-identity app_metadata key
+// that marks a linked email identity as a system-managed alias on the primary
+// user, e.g. app_metadata.system_managed_identity_<id> = true.
+//
+// Each alias gets its own top-level key rather than a shared array: Auth0
+// merges top-level app_metadata keys natively (see cdpMetadataPatch), so a
+// marker is added with a single PATCH that cannot overwrite, or be overwritten
+// by, a concurrent marker write for another alias on the same user.
+const systemManagedIdentityKeyPrefix = "system_managed_identity_"
+
+// systemManagedIdentityKey returns the app_metadata key that marks identityID
+// (the provider-local id, without the "email|" prefix) as system-managed.
+func systemManagedIdentityKey(identityID string) string {
+	return systemManagedIdentityKeyPrefix + identityID
 }
 
-type systemManagedIdentitiesMetadata struct {
-	SystemManagedIdentities []string `json:"system_managed_identities"`
+// unlinkGuardUser is the subset of the primary user the unlink guard reads.
+// app_metadata is kept raw because system-managed markers use per-identity
+// keys that a fixed struct cannot model.
+type unlinkGuardUser struct {
+	Identities  []Auth0Identity            `json:"identities"`
+	AppMetadata map[string]json.RawMessage `json:"app_metadata"`
+}
+
+// hasSystemManagedIdentityMarker reports whether appMetadata marks identityID
+// as system-managed (its marker key is present and set to true).
+func (g *unlinkGuardUser) hasSystemManagedIdentityMarker(identityID string) bool {
+	raw, ok := g.AppMetadata[systemManagedIdentityKey(identityID)]
+	if !ok {
+		return false
+	}
+	var marked bool
+	return json.Unmarshal(raw, &marked) == nil && marked
 }
 
 // linkSubIdentityPayload is the body for POST /api/v2/users/{id}/identities when

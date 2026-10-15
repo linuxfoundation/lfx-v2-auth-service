@@ -993,12 +993,12 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"test123"},` + identity + `]}`
 	}
 	primaryMarkedWith := func(identity string) string {
-		return `{"user_id":"auth0|test123","email":"jane@example.com","app_metadata":{"cdp_uuid":"c1","system_managed_identities":["stub123"]},"identities":[` +
+		return `{"user_id":"auth0|test123","email":"jane@example.com","app_metadata":{"cdp_uuid":"c1","system_managed_identity_stub123":true},"identities":[` +
 			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"test123"},` + identity + `]}`
 	}
 	aliasIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@Linux.com","email_verified":true}}`
 	regularIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@gmail.com","email_verified":true}}`
-	const backfillBody = `{"app_metadata":{"system_managed_identities":["stub123"]}}`
+	const backfillBody = `{"app_metadata":{"system_managed_identity_stub123":true}}`
 
 	tests := []struct {
 		name          string
@@ -1014,8 +1014,6 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 		wantErr       bool
 		wantCalls     []string // when set, the exact calls the guard must make
 		wantBackfill  bool     // the guard must backfill (attempt to PATCH) the marker; otherwise no PATCH may be sent
-		// wantBackfillBody overrides the expected backfill PATCH body.
-		wantBackfillBody string
 	}{
 		{
 			name:          "marked alias is refused after its domain is retired and the stub is gone",
@@ -1056,18 +1054,26 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			wantForbidden: true,
 		},
 		{
-			name:          "backfill appends to the existing marker and confirms the write",
-			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identities":["older1"]},"identities":[` + aliasIdentity + `]}`,
+			name:          "backfill writes only its own marker key alongside existing markers",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_older1":true},"identities":[` + aliasIdentity + `]}`,
 			stubGetStatus: http.StatusNotFound,
 			wantForbidden: true,
 			wantCalls: []string{
 				"GET /api/v2/users/auth0|test123",
 				"GET /api/v2/users/email|stub123",
-				"GET /api/v2/users/auth0|test123",
 				"PATCH /api/v2/users/auth0|test123",
-				"GET /api/v2/users/auth0|test123",
 			},
-			wantBackfillBody: `{"app_metadata":{"system_managed_identities":["older1","stub123"]}}`,
+			wantBackfill: true,
+		},
+		{
+			name:          "a marker set to false does not protect the identity",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_stub123":false},"identities":[` + regularIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
+		},
+		{
+			name:          "a malformed marker value does not protect the identity",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_stub123":"yes"},"identities":[` + regularIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
 		},
 		{
 			name:          "unmarked alias without its domain or stub is unlinked",
@@ -1190,14 +1196,10 @@ func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
 			if tt.wantCalls != nil {
 				assert.Equal(t, tt.wantCalls, ft.methodPaths())
 			}
-			if tt.wantBackfill || tt.wantBackfillBody != "" {
-				want := backfillBody
-				if tt.wantBackfillBody != "" {
-					want = tt.wantBackfillBody
-				}
+			if tt.wantBackfill {
 				patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
 				require.True(t, ok, "the guard must backfill the system-managed marker")
-				assert.JSONEq(t, want, patchBody)
+				assert.JSONEq(t, backfillBody, patchBody)
 			} else {
 				assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "this identity must not be recorded as system-managed")
 			}
@@ -1265,14 +1267,9 @@ type fakeAuth0Transport struct {
 	linkStatus     int    // status for POST /api/v2/users/{id}/identities
 	patchStatus    int    // status for PATCH /api/v2/users/{id}
 	calls          []recordedCall
-	// marker holds the primary's system_managed_identities once a successful
-	// PATCH has written it; GET ?fields=app_metadata then serves it instead of
-	// getUserResp, so marker writes can be confirmed by a fresh read.
-	marker    []string
-	markerSet bool
-	// onMarkerPatch, when set, runs after each successful marker PATCH, e.g. to
-	// simulate a concurrent writer overwriting the array.
-	onMarkerPatch func(f *fakeAuth0Transport)
+	// appMetadata accumulates the app_metadata keys written by successful
+	// PATCHes to the primary, merged at the top level as Auth0 does.
+	appMetadata map[string]json.RawMessage
 }
 
 func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
@@ -1306,10 +1303,6 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 	switch {
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		body = f.getUserResp
-		if f.markerSet && req.URL.Query().Get("fields") == "app_metadata" {
-			raw, _ := json.Marshal(map[string]any{"app_metadata": map[string]any{"system_managed_identities": f.marker}})
-			body = string(raw)
-		}
 	case req.Method == http.MethodGet && req.URL.Path == "/api/v2/users-by-email":
 		status, body = f.byEmailStatus, f.byEmailResp
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
@@ -1325,14 +1318,14 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 	case req.Method == http.MethodPatch && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		status, body = f.patchStatus, "{}"
 		var patch struct {
-			AppMetadata struct {
-				SystemManagedIdentities []string `json:"system_managed_identities"`
-			} `json:"app_metadata"`
+			AppMetadata map[string]json.RawMessage `json:"app_metadata"`
 		}
-		if status < 300 && json.Unmarshal(bodyBytes, &patch) == nil && strings.Contains(string(bodyBytes), "system_managed_identities") {
-			f.marker, f.markerSet = patch.AppMetadata.SystemManagedIdentities, true
-			if f.onMarkerPatch != nil {
-				f.onMarkerPatch(f)
+		if status < 300 && json.Unmarshal(bodyBytes, &patch) == nil && patch.AppMetadata != nil {
+			if f.appMetadata == nil {
+				f.appMetadata = map[string]json.RawMessage{}
+			}
+			for k, v := range patch.AppMetadata {
+				f.appMetadata[k] = v
 			}
 		}
 	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
@@ -1753,9 +1746,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Equal(t, []string{
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
-			"GET /api/v2/users/auth0|test123",
 			"PATCH /api/v2/users/auth0|test123",
-			"GET /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
 
 		// Unlike the preservation path, this stub IS system-managed.
@@ -1764,60 +1755,41 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Contains(t, createBody, `"email_verified":true`)
 		assert.Contains(t, createBody, `"system_managed":true`)
 
-		// The durable marker is recorded on the primary user, and only that
-		// app_metadata key is sent so other keys are left untouched.
+		// The durable marker is recorded on the primary user as its own
+		// top-level app_metadata key, with no read-modify-write.
 		patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
 		require.True(t, ok)
-		assert.JSONEq(t, `{"app_metadata":{"system_managed_identities":["stub123"]}}`, patchBody)
+		assert.JSONEq(t, `{"app_metadata":{"system_managed_identity_stub123":true}}`, patchBody)
 	})
 
-	t.Run("marker is appended to existing system-managed identities", func(t *testing.T) {
-		ft := newFakeAuth0(testPrimaryUserID, `{"user_id":"auth0|test123","app_metadata":{"system_managed_identities":["older1"]}}`)
-		rw := newTestReaderWriter(ft)
-
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
-		require.NoError(t, err)
-
-		patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
-		require.True(t, ok)
-		assert.JSONEq(t, `{"app_metadata":{"system_managed_identities":["older1","stub123"]}}`, patchBody)
-	})
-
-	t.Run("marker already present sends no patch", func(t *testing.T) {
-		ft := newFakeAuth0(testPrimaryUserID, `{"user_id":"auth0|test123","app_metadata":{"system_managed_identities":["stub123"]}}`)
-		rw := newTestReaderWriter(ft)
-
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
-		require.NoError(t, err)
-		assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
-	})
-
-	t.Run("marker overwritten by a concurrent writer is re-applied", func(t *testing.T) {
+	t.Run("overlapping claim and backfill markers both survive", func(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
-		// Simulate a concurrent claim for the same user that read the array
-		// before our write and then wrote its own id over ours, once.
-		ft.onMarkerPatch = func(f *fakeAuth0Transport) {
-			f.onMarkerPatch = nil
-			f.marker = []string{"concurrent1"}
+		ft.appMetadata = map[string]json.RawMessage{"cdp_uuid": json.RawMessage(`"c1"`)}
+		rw := newTestReaderWriter(ft)
+
+		// A guard backfill for another alias and a new claim for the same user,
+		// in either order: each writes only its own key, so neither can drop
+		// the other's marker (nor any other app_metadata key).
+		require.NoError(t, rw.recordSystemManagedIdentity(ctx, testPrimaryUserID, "older1", "test-m2m-token"))
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, map[string]json.RawMessage{
+			"cdp_uuid":                        json.RawMessage(`"c1"`),
+			"system_managed_identity_older1":  json.RawMessage(`true`),
+			"system_managed_identity_stub123": json.RawMessage(`true`),
+		}, ft.appMetadata)
+		assert.Zero(t, ft.countFor(http.MethodGet, "/api/v2/users/auth0|test123"), "marker writes must not read-modify-write")
+	})
+
+	t.Run("marker key rejects identity ids Auth0 cannot store", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		for _, id := range []string{"", "a.b", "a$b"} {
+			require.Error(t, rw.recordSystemManagedIdentity(ctx, testPrimaryUserID, id, "test-m2m-token"))
 		}
-		rw := newTestReaderWriter(ft)
-
-		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
-		require.NoError(t, err)
-
-		assert.Equal(t, 2, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
-		assert.Equal(t, []string{"concurrent1", "stub123"}, ft.marker, "both writers' ids must survive")
-	})
-
-	t.Run("marker that keeps being overwritten gives up after bounded retries", func(t *testing.T) {
-		ft := newFakeAuth0(testPrimaryUserID, "{}")
-		ft.onMarkerPatch = func(f *fakeAuth0Transport) { f.marker = []string{"concurrent1"} }
-		rw := newTestReaderWriter(ft)
-
-		err := rw.recordSystemManagedIdentity(ctx, testPrimaryUserID, "stub123", "test-m2m-token")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "overwritten by concurrent updates")
-		assert.Equal(t, systemManagedMarkerAttempts, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
+		assert.Empty(t, ft.methodPaths())
 	})
 
 	t.Run("marker write failure does not fail an already-linked claim", func(t *testing.T) {
@@ -1887,9 +1859,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			"DELETE /api/v2/users/email|orphan1",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
-			"GET /api/v2/users/auth0|test123",
 			"PATCH /api/v2/users/auth0|test123",
-			"GET /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
 	})
 
