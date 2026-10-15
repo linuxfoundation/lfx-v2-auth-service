@@ -92,7 +92,7 @@ When a claim succeeds, the Auth0 adapter:
 2. Links the stub onto the caller's primary user via `POST /api/v2/users/{primary}/identities`.
 3. If the link step fails, performs a best-effort rollback by deleting the orphaned stub.
 
-The `system_managed` flag lives on the **stub user record**, which continues to exist after the link (Auth0 transplants the identity entry into the primary's `identities` array but the stub record stays around at its original `user_id`).
+The `system_managed` flag is written to the **stub user record** at claim time. The service does not rely on that record surviving the link: Auth0 may merge a linked secondary's profile into the primary, so the unlink guard classifies the alias from the identity entry in the primary user's `identities` array instead (see [Unlink Guard](#unlink-guard)).
 
 ### Why `provider: "email"`?
 
@@ -108,9 +108,10 @@ To distinguish a system-managed alias from a regular email identity, callers sho
 A subsequent `lfx.auth-service.user_identity.unlink` call targeting an `email`-connection identity triggers the immutability guard in the Auth0 adapter:
 
 1. Non-`email` providers (oauth2/social) short-circuit and proceed normally.
-2. For `email` providers, the adapter fetches the stub user record via M2M (`GET /api/v2/users/email|<id>`).
-3. **Fail-closed**: any non-404 fetch error returns an `Unexpected` error so a flaky Auth0 cannot silently allow the unlink.
-4. If `app_metadata.system_managed == true`, the adapter returns `errors.NewForbidden("system_managed_identity")`.
+2. For `email` providers, the adapter fetches the caller's primary user via M2M (`GET /api/v2/users/{primary}`) and locates the `email` identity entry whose `user_id` matches the requested `identity_id`.
+3. If that entry's `profileData.email` is on an `ALLOWED_ALIAS_DOMAINS` domain, the adapter returns `errors.NewForbidden("system_managed_identity")`. This holds whether or not the standalone stub record is still retrievable.
+4. Otherwise the adapter also fetches the stub user record (`GET /api/v2/users/email|<id>`) and returns `system_managed_identity` if it still carries `app_metadata.system_managed == true`. A 404 here is not, on its own, permission to unlink: the identity was already classified in step 3.
+5. **Fail-closed**: a failed primary-user lookup, an identity that is not linked to the caller, an identity with no `profileData.email` to classify, or any non-404 stub lookup error blocks the unlink, so a flaky Auth0 cannot silently allow it.
 
 The mock backend never reaches this guard: it cannot verify tokens, so it refuses every unlink request before dispatch.
 
@@ -149,7 +150,7 @@ nats request lfx.auth-service.add_alias \
 
 The `lfx_v2_auth_service` M2M application must hold the following scopes on the Management API:
 
-- `read:users` — search for existing claims, fetch stub for the unlink guard
+- `read:users` — search for existing claims, fetch the primary user and stub for the unlink guard
 - `create:users` — create the stub
 - `update:users` — link the stub identity onto the primary user
 - `delete:users` — rollback an orphaned stub on link failure, and remove an unverified, unlinked passwordless user that holds the requested address
@@ -161,7 +162,7 @@ These scopes are provisioned via the companion `auth0-terraform` repository — 
 - Requires the `update:current_user_identities` scope in the JWT.
 - The domain is caller-supplied and validated against the server-side allow-list — there is no implicit default.
 - Each user may hold at most one alias **per allowed domain**. With multiple domains in the allow-list, a user could in principle claim one alias on each (e.g. `jane@linux.com` and `jane@dev.lfx.example`).
-- A successful claim is immutable from the user's perspective: only an administrator with direct Auth0 access can flip `app_metadata.system_managed` and remove the alias.
+- A successful claim is immutable from the user's perspective: only an administrator with direct Auth0 access can remove the alias.
 - For detailed Auth0-specific behavior and limitations, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ---

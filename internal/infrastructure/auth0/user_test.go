@@ -982,6 +982,140 @@ func TestUserReaderWriter_UnlinkIdentity_ValidationGuard(t *testing.T) {
 	}
 }
 
+func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, "linux.com")
+
+	const unlinkPath = "/api/v2/users/auth0|test123/identities/email/stub123"
+
+	primaryWith := func(identity string) string {
+		return `{"user_id":"auth0|test123","email":"jane@example.com","identities":[` +
+			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"test123"},` + identity + `]}`
+	}
+	aliasIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@Linux.com","email_verified":true}}`
+	regularIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@gmail.com","email_verified":true}}`
+
+	tests := []struct {
+		name          string
+		primaryUserID string // fake's primary route; differs from the request to force a primary GET failure
+		provider      string // defaults to "email"
+		getUserResp   string
+		stubGetStatus int
+		stubGetResp   string
+		wantForbidden bool
+		wantNotFound  bool
+		wantErr       bool
+		wantCalls     []string // when set, the exact calls the guard must make
+	}{
+		{
+			name:          "alias identity is refused when the stub record is gone",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "case and whitespace variants of the email provider are guarded",
+			provider:      " Email ",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "alias identity is refused when the stub has lost its app_metadata",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusOK,
+			stubGetResp:   `{"user_id":"email|stub123"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "non-alias identity whose stub is system_managed is refused",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusOK,
+			stubGetResp:   `{"user_id":"email|stub123","app_metadata":{"system_managed":true}}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "identity not linked to the caller is refused",
+			getUserResp:   primaryWith(`{"connection":"email","provider":"email","user_id":"other","profileData":{"email":"jane@gmail.com"}}`),
+			stubGetStatus: http.StatusNotFound,
+			wantNotFound:  true,
+		},
+		{
+			name:          "identity without an email to classify fails closed",
+			getUserResp:   primaryWith(`{"connection":"email","provider":"email","user_id":"stub123"}`),
+			stubGetStatus: http.StatusNotFound,
+			wantErr:       true,
+		},
+		{
+			name:          "primary user lookup failure fails closed",
+			primaryUserID: "auth0|someone-else",
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantErr:       true,
+			wantCalls:     []string{"GET /api/v2/users/auth0|test123"},
+		},
+		{
+			name:          "stub lookup failure fails closed",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantErr:       true,
+		},
+		{
+			name:          "non-alias identity without a stub is unlinked",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primaryUserID := tt.primaryUserID
+			if primaryUserID == "" {
+				primaryUserID = testPrimaryUserID
+			}
+			ft := newFakeAuth0(primaryUserID, tt.getUserResp)
+			ft.stubGetStatus, ft.stubGetResp = tt.stubGetStatus, tt.stubGetResp
+			rw := newTestReaderWriter(ft)
+			rw.identityLinkingFlow = newIdentityLinkingFlow(rw.config.Domain, rw.httpClient)
+
+			req := &model.UnlinkIdentity{}
+			req.User.UserID = testPrimaryUserID
+			req.User.AuthToken = "user-token"
+			req.Unlink.Provider = constants.EmailConnection
+			if tt.provider != "" {
+				req.Unlink.Provider = tt.provider
+			}
+			req.Unlink.IdentityID = "stub123"
+
+			err := rw.UnlinkIdentity(ctx, req)
+
+			switch {
+			case tt.wantForbidden:
+				var forbidden errors.Forbidden
+				require.ErrorAs(t, err, &forbidden)
+				assert.Contains(t, err.Error(), "system_managed_identity")
+			case tt.wantNotFound:
+				var notFound errors.NotFound
+				require.ErrorAs(t, err, &notFound)
+			case tt.wantErr:
+				require.Error(t, err)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, 1, ft.countFor(http.MethodDelete, unlinkPath))
+				return
+			}
+			if tt.wantCalls != nil {
+				assert.Equal(t, tt.wantCalls, ft.methodPaths())
+			}
+			assert.Zero(t, ft.countFor(http.MethodDelete, unlinkPath), "a refused unlink must never reach Auth0")
+		})
+	}
+}
+
 // Helper function to check if a string contains a substring
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
