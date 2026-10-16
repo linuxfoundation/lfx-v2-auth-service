@@ -554,6 +554,9 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
 
+			// The Auth0 adapter's SearchUser only resolves verified matches, so an
+			// unverified Auth0 record never blocks here. Authelia and mock users
+			// are provisioned by an operator and are matched as stored.
 			if strings.EqualFold(user.PrimaryEmail, email) {
 				return errs.NewValidation("email already linked")
 			}
