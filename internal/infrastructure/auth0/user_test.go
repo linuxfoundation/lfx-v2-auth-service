@@ -1098,6 +1098,232 @@ func TestUserReaderWriter_UnlinkIdentity_ValidationGuard(t *testing.T) {
 	}
 }
 
+func TestUserReaderWriter_UnlinkIdentity_SystemManagedGuard(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, "linux.com")
+
+	const unlinkPath = "/api/v2/users/auth0|test123/identities/email/stub123"
+
+	primaryWith := func(identity string) string {
+		return `{"user_id":"auth0|test123","email":"jane@example.com","identities":[` +
+			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"test123"},` + identity + `]}`
+	}
+	primaryMarkedWith := func(identity string) string {
+		return `{"user_id":"auth0|test123","email":"jane@example.com","app_metadata":{"cdp_uuid":"c1","system_managed_identity_stub123":true},"identities":[` +
+			`{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"test123"},` + identity + `]}`
+	}
+	aliasIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@Linux.com","email_verified":true}}`
+	regularIdentity := `{"connection":"email","provider":"email","user_id":"stub123","profileData":{"email":"jane@gmail.com","email_verified":true}}`
+	const backfillBody = `{"app_metadata":{"system_managed_identity_stub123":true}}`
+
+	tests := []struct {
+		name          string
+		primaryUserID string // fake's primary route; differs from the request to force a primary GET failure
+		provider      string // defaults to "email"
+		getUserResp   string
+		stubGetStatus int
+		stubGetResp   string
+		patchStatus   int  // status for the marker backfill PATCH; 0 keeps the fake's default
+		noAliasDomain bool // run with ALLOWED_ALIAS_DOMAINS unset, as after a domain is retired
+		wantForbidden bool
+		wantNotFound  bool
+		wantErr       bool
+		wantCalls     []string // when set, the exact calls the guard must make
+		wantBackfill  bool     // the guard must backfill (attempt to PATCH) the marker; otherwise no PATCH may be sent
+	}{
+		{
+			name:          "marked alias is refused after its domain is retired and the stub is gone",
+			noAliasDomain: true,
+			getUserResp:   primaryMarkedWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+			wantForbidden: true,
+			wantCalls:     []string{"GET /api/v2/users/auth0|test123"},
+		},
+		{
+			name:          "marked identity is refused even without profile data",
+			getUserResp:   primaryMarkedWith(`{"connection":"email","provider":"email","user_id":"stub123"}`),
+			stubGetStatus: http.StatusNotFound,
+			wantForbidden: true,
+			wantCalls:     []string{"GET /api/v2/users/auth0|test123"},
+		},
+		{
+			name:          "unmarked alias recognised by domain is refused and backfilled",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			wantForbidden: true,
+			wantBackfill:  true,
+		},
+		{
+			name:          "a failed backfill still refuses the unlink",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			patchStatus:   http.StatusInternalServerError,
+			wantForbidden: true,
+			wantBackfill:  true, // the PATCH must have been attempted
+		},
+		{
+			name:          "alias-domain identity is refused when the stub lookup fails",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "backfill writes only its own marker key alongside existing markers",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_older1":true},"identities":[` + aliasIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
+			wantForbidden: true,
+			wantCalls: []string{
+				"GET /api/v2/users/auth0|test123",
+				"GET /api/v2/users/email|stub123",
+				"PATCH /api/v2/users/auth0|test123",
+			},
+			wantBackfill: true,
+		},
+		{
+			name:          "a marker set to false does not protect the identity",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_stub123":false},"identities":[` + regularIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
+		},
+		{
+			name:          "a malformed marker value does not protect the identity",
+			getUserResp:   `{"user_id":"auth0|test123","app_metadata":{"system_managed_identity_stub123":"yes"},"identities":[` + regularIdentity + `]}`,
+			stubGetStatus: http.StatusNotFound,
+		},
+		{
+			name:          "unmarked alias without its domain or stub is unlinked",
+			noAliasDomain: true,
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+		},
+		{
+			name:          "alias identity is refused when the stub record is gone",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+			wantForbidden: true,
+			wantBackfill:  true,
+		},
+		{
+			name:          "case and whitespace variants of the email provider are guarded",
+			provider:      " Email ",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+			wantForbidden: true,
+			wantBackfill:  true,
+		},
+		{
+			name:          "alias-domain identity whose stub lacks system_managed is refused but not recorded",
+			getUserResp:   primaryWith(aliasIdentity),
+			stubGetStatus: http.StatusOK,
+			stubGetResp:   `{"user_id":"email|stub123"}`,
+			wantForbidden: true,
+		},
+		{
+			name:          "non-alias identity whose stub is system_managed is refused",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusOK,
+			stubGetResp:   `{"user_id":"email|stub123","app_metadata":{"system_managed":true}}`,
+			wantForbidden: true,
+			wantBackfill:  true,
+		},
+		{
+			name:          "identity not linked to the caller is refused",
+			getUserResp:   primaryWith(`{"connection":"email","provider":"email","user_id":"other","profileData":{"email":"jane@gmail.com"}}`),
+			stubGetStatus: http.StatusNotFound,
+			wantNotFound:  true,
+		},
+		{
+			name:          "identity without an email to classify fails closed",
+			getUserResp:   primaryWith(`{"connection":"email","provider":"email","user_id":"stub123"}`),
+			stubGetStatus: http.StatusNotFound,
+			wantErr:       true,
+		},
+		{
+			name:          "primary user lookup failure fails closed",
+			primaryUserID: "auth0|someone-else",
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantErr:       true,
+			wantCalls:     []string{"GET /api/v2/users/auth0|test123"},
+		},
+		{
+			name:          "stub lookup failure fails closed",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusInternalServerError,
+			stubGetResp:   `{"error":"boom"}`,
+			wantErr:       true,
+		},
+		{
+			name:          "non-alias identity without a stub is unlinked",
+			getUserResp:   primaryWith(regularIdentity),
+			stubGetStatus: http.StatusNotFound,
+			stubGetResp:   `{"error":"not found"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primaryUserID := tt.primaryUserID
+			if primaryUserID == "" {
+				primaryUserID = testPrimaryUserID
+			}
+			if tt.noAliasDomain {
+				t.Setenv(constants.AllowedAliasDomainsEnvKey, "")
+			}
+			ft := newFakeAuth0(primaryUserID, tt.getUserResp)
+			ft.stubGetStatus, ft.stubGetResp = tt.stubGetStatus, tt.stubGetResp
+			if tt.patchStatus != 0 {
+				ft.patchStatus = tt.patchStatus
+			}
+			rw := newTestReaderWriter(ft)
+			rw.identityLinkingFlow = newIdentityLinkingFlow(rw.config.Domain, rw.httpClient)
+
+			req := &model.UnlinkIdentity{}
+			req.User.UserID = testPrimaryUserID
+			req.User.AuthToken = "user-token"
+			req.Unlink.Provider = constants.EmailConnection
+			if tt.provider != "" {
+				req.Unlink.Provider = tt.provider
+			}
+			req.Unlink.IdentityID = "stub123"
+
+			err := rw.UnlinkIdentity(ctx, req)
+
+			switch {
+			case tt.wantForbidden:
+				var forbidden errors.Forbidden
+				require.ErrorAs(t, err, &forbidden)
+				assert.Contains(t, err.Error(), "system_managed_identity")
+			case tt.wantNotFound:
+				var notFound errors.NotFound
+				require.ErrorAs(t, err, &notFound)
+			case tt.wantErr:
+				require.Error(t, err)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, 1, ft.countFor(http.MethodDelete, unlinkPath))
+				assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "a permitted unlink must not mark the identity")
+				return
+			}
+			if tt.wantCalls != nil {
+				assert.Equal(t, tt.wantCalls, ft.methodPaths())
+			}
+			if tt.wantBackfill {
+				patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
+				require.True(t, ok, "the guard must backfill the system-managed marker")
+				assert.JSONEq(t, backfillBody, patchBody)
+			} else {
+				assert.Zero(t, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"), "this identity must not be recorded as system-managed")
+			}
+			assert.Zero(t, ft.countFor(http.MethodDelete, unlinkPath), "a refused unlink must never reach Auth0")
+		})
+	}
+}
+
 // Helper function to check if a string contains a substring
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
@@ -1157,6 +1383,9 @@ type fakeAuth0Transport struct {
 	linkStatus     int    // status for POST /api/v2/users/{id}/identities
 	patchStatus    int    // status for PATCH /api/v2/users/{id}
 	calls          []recordedCall
+	// appMetadata accumulates the app_metadata keys written by successful
+	// PATCHes to the primary, merged at the top level as Auth0 does.
+	appMetadata map[string]json.RawMessage
 }
 
 func newFakeAuth0(primaryUserID, getUserResp string) *fakeAuth0Transport {
@@ -1204,6 +1433,17 @@ func (f *fakeAuth0Transport) RoundTrip(req *http.Request) (*http.Response, error
 		status, body = f.linkStatus, "[]"
 	case req.Method == http.MethodPatch && req.URL.Path == "/api/v2/users/"+f.primaryUserID:
 		status, body = f.patchStatus, "{}"
+		var patch struct {
+			AppMetadata map[string]json.RawMessage `json:"app_metadata"`
+		}
+		if status < 300 && json.Unmarshal(bodyBytes, &patch) == nil && patch.AppMetadata != nil {
+			if f.appMetadata == nil {
+				f.appMetadata = map[string]json.RawMessage{}
+			}
+			for k, v := range patch.AppMetadata {
+				f.appMetadata[k] = v
+			}
+		}
 	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/api/v2/users/"):
 		status, body = http.StatusNoContent, ""
 		if f.deleteStatus != 0 {
@@ -1622,6 +1862,7 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Equal(t, []string{
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
+			"PATCH /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
 
 		// Unlike the preservation path, this stub IS system-managed.
@@ -1629,6 +1870,53 @@ func TestUserReaderWriter_AddSystemManagedEmail_HTTPFlow(t *testing.T) {
 		assert.Contains(t, createBody, `"email":"alias@linux.com"`)
 		assert.Contains(t, createBody, `"email_verified":true`)
 		assert.Contains(t, createBody, `"system_managed":true`)
+
+		// The durable marker is recorded on the primary user as its own
+		// top-level app_metadata key, with no read-modify-write.
+		patchBody, ok := ft.firstBodyFor(http.MethodPatch, "/api/v2/users/auth0|test123")
+		require.True(t, ok)
+		assert.JSONEq(t, `{"app_metadata":{"system_managed_identity_stub123":true}}`, patchBody)
+	})
+
+	t.Run("overlapping claim and backfill markers both survive", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.appMetadata = map[string]json.RawMessage{"cdp_uuid": json.RawMessage(`"c1"`)}
+		rw := newTestReaderWriter(ft)
+
+		// A guard backfill for another alias and a new claim for the same user,
+		// in either order: each writes only its own key, so neither can drop
+		// the other's marker (nor any other app_metadata key).
+		require.NoError(t, rw.recordSystemManagedIdentity(ctx, testPrimaryUserID, "older1", "test-m2m-token"))
+		_, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+
+		assert.Equal(t, map[string]json.RawMessage{
+			"cdp_uuid":                        json.RawMessage(`"c1"`),
+			"system_managed_identity_older1":  json.RawMessage(`true`),
+			"system_managed_identity_stub123": json.RawMessage(`true`),
+		}, ft.appMetadata)
+		assert.Zero(t, ft.countFor(http.MethodGet, "/api/v2/users/auth0|test123"), "marker writes must not read-modify-write")
+	})
+
+	t.Run("marker key rejects identity ids Auth0 cannot store", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		for _, id := range []string{"", "a.b", "a$b"} {
+			require.Error(t, rw.recordSystemManagedIdentity(ctx, testPrimaryUserID, id, "test-m2m-token"))
+		}
+		assert.Empty(t, ft.methodPaths())
+	})
+
+	t.Run("marker write failure does not fail an already-linked claim", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.patchStatus = http.StatusInternalServerError
+		rw := newTestReaderWriter(ft)
+
+		stubID, err := rw.AddSystemManagedEmail(ctx, testPrimaryUserID, "alias@linux.com")
+		require.NoError(t, err)
+		assert.Equal(t, "email|stub123", stubID)
+		assert.Equal(t, 1, ft.countFor(http.MethodPatch, "/api/v2/users/auth0|test123"))
 	})
 
 	t.Run("conflict on create maps to a validation error", func(t *testing.T) {
@@ -1687,6 +1975,7 @@ func TestUserReaderWriter_CreateEmailIdentity_ReconcilesOrphanedStub(t *testing.
 			"DELETE /api/v2/users/email|orphan1",
 			"POST /api/v2/users",
 			"POST /api/v2/users/auth0|test123/identities",
+			"PATCH /api/v2/users/auth0|test123",
 		}, ft.methodPaths())
 	})
 

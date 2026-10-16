@@ -41,6 +41,24 @@ var aliasReservedNames = map[string]struct{}{
 // to `admin@<domain>`, slipping past the reserved-name check on the raw alias).
 const aliasBannedChars = `/*$^:()<>[];@\, "`
 
+// IsAllowedAliasDomain reports whether domain is listed in allowList, a
+// comma-separated list of alias domains (the ALLOWED_ALIAS_DOMAINS value).
+// Matching is case-insensitive and ignores surrounding whitespace. This is the
+// single matching rule shared by alias claims, email linking and the unlink
+// guard, so they always agree on which addresses are system-managed.
+func IsAllowedAliasDomain(domain, allowList string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	for _, d := range strings.Split(allowList, ",") {
+		if strings.EqualFold(domain, strings.TrimSpace(d)) {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateAlias normalises alias (lowercases + trims) and validates it as a
 // local part that can be safely appended to "@<domain>". Returns
 // ("", "alias_invalid") or ("", "alias_reserved") on failure, or

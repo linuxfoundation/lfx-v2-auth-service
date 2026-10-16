@@ -90,27 +90,28 @@ When a claim succeeds, the Auth0 adapter:
 
 1. Creates a passwordless **stub user** on the `email` connection with `email_verified: true` and `app_metadata.system_managed: true` via `POST /api/v2/users`.
 2. Links the stub onto the caller's primary user via `POST /api/v2/users/{primary}/identities`.
-3. If the link step fails, performs a best-effort rollback by deleting the orphaned stub.
+3. Marks the linked identity on the **primary user** by setting its own top-level key `app_metadata.system_managed_identity_<id>: true` via `PATCH /api/v2/users/{primary}`. Auth0 merges top-level `app_metadata` keys, so this single write needs no read-modify-write: concurrent marker writes for different aliases on the same user cannot drop each other, and other `app_metadata` keys are untouched. This write is best-effort: if it fails the claim still succeeds, the alias stays protected by the domain check, and the unlink guard backfills the marker on the next attempt.
+4. If the link step fails, performs a best-effort rollback by deleting the orphaned stub.
 
-The `system_managed` flag lives on the **stub user record**, which continues to exist after the link (Auth0 transplants the identity entry into the primary's `identities` array but the stub record stays around at its original `user_id`).
+The `system_managed` flag is also written to the **stub user record** at claim time, but the service does not rely on that record surviving the link: Auth0 may merge a linked secondary's profile into the primary. The durable record is the `system_managed_identity_<id>` marker on the primary user (see [Unlink Guard](#unlink-guard)).
 
 ### Why `provider: "email"`?
 
 The linked identity reports `provider: "email"` because Auth0's `provider` field maps to a fixed set of connection **strategies** (`auth0`, `email`, `sms`, `google-oauth2`, etc.) — it is not a free-form label this service controls. The passwordless `email` strategy is the right fit for system-managed aliases (no password, pre-verified, linkable as a secondary).
 
-To distinguish a system-managed alias from a regular email identity, callers should either:
-
-- Check the email suffix against `ALLOWED_ALIAS_DOMAINS`, **or**
-- Fetch the stub user record and check `app_metadata.system_managed == true`.
+To distinguish a system-managed alias from a regular email identity, callers should check whether the primary user's `app_metadata.system_managed_identity_<id>` is `true`, **and** fall back to checking the email suffix against `ALLOWED_ALIAS_DOMAINS` (aliases claimed before the marker existed, or whose marker write failed, are not listed until backfilled).
 
 ### Unlink Guard
 
 A subsequent `lfx.auth-service.user_identity.unlink` call targeting an `email`-connection identity triggers the immutability guard in the Auth0 adapter:
 
 1. Non-`email` providers (oauth2/social) short-circuit and proceed normally.
-2. For `email` providers, the adapter fetches the stub user record via M2M (`GET /api/v2/users/email|<id>`).
-3. **Fail-closed**: any non-404 fetch error returns an `Unexpected` error so a flaky Auth0 cannot silently allow the unlink.
-4. If `app_metadata.system_managed == true`, the adapter returns `errors.NewForbidden("system_managed_identity")`.
+2. For `email` providers, the adapter fetches the caller's primary user via M2M (`GET /api/v2/users/{primary}`) and locates the `email` identity entry whose `user_id` matches the requested `identity_id`.
+3. If the primary user's `app_metadata.system_managed_identity_<identity_id>` is `true`, the adapter returns `errors.NewForbidden("system_managed_identity")`. This holds regardless of `ALLOWED_ALIAS_DOMAINS` (so removing a domain from the allow-list does not expose aliases already claimed on it) and regardless of whether the stub record is still retrievable.
+4. Otherwise, if the entry's `profileData.email` is on an `ALLOWED_ALIAS_DOMAINS` domain, the adapter returns `system_managed_identity`.
+5. Otherwise the adapter also fetches the stub user record (`GET /api/v2/users/email|<id>`) and returns `system_managed_identity` if it still carries `app_metadata.system_managed == true`. A 404 here is not, on its own, permission to unlink: the identity was already classified in steps 3–4.
+6. **Backfill**: an alias without a marker (e.g. claimed before the marker existed) gets one on a best-effort basis when its stub carries `system_managed == true`, or when it is on an `ALLOWED_ALIAS_DOMAINS` domain and its stub is gone. An alias-domain identity whose stub exists without the flag (e.g. a preserved former primary address) is still refused by domain, but is not recorded.
+7. **Fail-closed**: a failed primary-user lookup, an identity that is not linked to the caller, an identity with no `profileData.email` to classify, or any non-404 stub lookup error blocks the unlink, so a flaky Auth0 cannot silently allow it.
 
 The mock backend never reaches this guard: it cannot verify tokens, so it refuses every unlink request before dispatch.
 
@@ -149,9 +150,9 @@ nats request lfx.auth-service.add_alias \
 
 The `lfx_v2_auth_service` M2M application must hold the following scopes on the Management API:
 
-- `read:users` — search for existing claims, fetch stub for the unlink guard
+- `read:users` — search for existing claims, fetch the primary user and stub for the unlink guard
 - `create:users` — create the stub
-- `update:users` — link the stub identity onto the primary user
+- `update:users` — link the stub identity onto the primary user, and set its `app_metadata.system_managed_identity_<id>` marker on the primary
 - `delete:users` — rollback an orphaned stub on link failure, and remove an unverified, unlinked passwordless user that holds the requested address
 
 These scopes are provisioned via the companion `auth0-terraform` repository — see `grants_auth0v2.tf` for the `lfx_v2_auth_service` grant.
@@ -161,7 +162,8 @@ These scopes are provisioned via the companion `auth0-terraform` repository — 
 - Requires the `update:current_user_identities` scope in the JWT.
 - The domain is caller-supplied and validated against the server-side allow-list — there is no implicit default.
 - Each user may hold at most one alias **per allowed domain**. With multiple domains in the allow-list, a user could in principle claim one alias on each (e.g. `jane@linux.com` and `jane@dev.lfx.example`).
-- A successful claim is immutable from the user's perspective: only an administrator with direct Auth0 access can flip `app_metadata.system_managed` and remove the alias.
+- A successful claim is immutable from the user's perspective: only an administrator with direct Auth0 access can remove the alias.
+- Aliases claimed before the `system_managed_identity_<id>` marker existed are protected by the domain check and are backfilled with a marker when an unlink is attempted. Before removing a domain from `ALLOWED_ALIAS_DOMAINS`, make sure every existing alias on it has its marker set on its primary user; otherwise an unmarked alias whose stub record is gone would become user-unlinkable.
 - For detailed Auth0-specific behavior and limitations, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
 ---

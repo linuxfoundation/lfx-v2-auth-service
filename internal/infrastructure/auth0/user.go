@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -523,11 +524,12 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	// Only the passwordless email connection can hold system-managed identities,
 	// so skip the guard entirely for other providers (google, github, etc.) to
 	// avoid making every social-identity unlink depend on the Management API.
-	// For email-connection unlinks, fetch the stub via M2M to read its
-	// app_metadata. The check fails closed: any error other than 404 (which
-	// means the stub never existed and there is nothing to protect) blocks the
-	// unlink so a transient Auth0 failure cannot be used to bypass immutability.
-	if request.Unlink.Provider != constants.EmailConnection {
+	// For email-connection unlinks, see isSystemManagedEmailIdentity. The check
+	// fails closed: any error, or an identity that cannot be classified, blocks
+	// the unlink so a transient Auth0 failure cannot be used to bypass
+	// immutability. The provider is compared leniently so a case or whitespace
+	// variant of "email" cannot skip the guard.
+	if !strings.EqualFold(strings.TrimSpace(request.Unlink.Provider), constants.EmailConnection) {
 		return u.identityLinkingFlow.UnlinkIdentityFromUser(
 			ctx,
 			request.User.UserID,
@@ -537,29 +539,15 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 		)
 	}
 
-	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
 		return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
 	}
-	apiRequest := httpclient.NewAPIRequest(
-		u.httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
-		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("get stub user for unlink guard"),
-	)
-	var rawStub Auth0User
-	if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
-		if statusCode != http.StatusNotFound {
-			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
-				"stub_user_id", redaction.Redact(stubUserID),
-				"status_code", statusCode,
-				"error", callErr,
-			)
-			return errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
-		}
-	} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
+	systemManaged, errGuard := u.isSystemManagedEmailIdentity(ctx, request.User.UserID, request.Unlink.IdentityID, m2mToken)
+	if errGuard != nil {
+		return errGuard
+	}
+	if systemManaged {
 		return errors.NewForbidden("system_managed_identity")
 	}
 
@@ -581,11 +569,184 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	return nil
 }
 
+// isSystemManagedEmailIdentity reports whether the email-connection identity
+// identityID linked to primaryUserID is system-managed and must not be
+// user-unlinked.
+//
+// The decision is anchored on the identity entry in the primary user's own
+// identities array (fetched with M2M), which is guaranteed to exist for as long
+// as the identity is linked. It does not depend on the standalone stub record
+// surviving the link: Auth0 may merge or discard a linked secondary's profile,
+// so the stub's app_metadata is only consulted as an additional signal.
+//
+// An identity is system-managed when the primary user's app_metadata carries
+// its system_managed_identity_<id> marker (written at claim time, so it holds
+// even after the alias domain is removed from ALLOWED_ALIAS_DOMAINS), when its
+// email is on an ALLOWED_ALIAS_DOMAINS domain (those addresses can only be
+// claimed through add_alias), or when its stub record still exists and carries
+// app_metadata.system_managed=true. An alias recognised by domain or stub but
+// not yet recorded (claimed before the marker existed) is backfilled into the
+// marker on a best-effort basis.
+//
+// The check fails closed: a lookup failure, an identity that is not linked to
+// the primary user, or an identity with no email to classify is an error.
+func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) (bool, error) {
+	apiPrimary := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get primary user for unlink guard"),
+	)
+	var primary unlinkGuardUser
+	if statusCode, callErr := apiPrimary.Call(ctx, &primary); callErr != nil {
+		slog.ErrorContext(ctx, "failed to fetch primary user for system-managed unlink guard",
+			"user_id", redaction.Redact(primaryUserID),
+			"status_code", statusCode,
+			"error", callErr,
+		)
+		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+	}
+
+	var linked *Auth0Identity
+	for i := range primary.Identities {
+		identity := &primary.Identities[i]
+		if identity.Provider != constants.EmailConnection {
+			continue
+		}
+		if id, ok := identity.UserID.(string); ok && id == identityID {
+			linked = identity
+			break
+		}
+	}
+	if linked == nil {
+		return false, errors.NewNotFound("identity not found")
+	}
+	if primary.hasSystemManagedIdentityMarker(identityID) {
+		return true, nil
+	}
+	if linked.ProfileData == nil || strings.TrimSpace(linked.ProfileData.Email) == "" {
+		slog.ErrorContext(ctx, "unable to classify email identity for system-managed unlink guard",
+			"user_id", redaction.Redact(primaryUserID),
+		)
+		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard")
+	}
+	aliasDomain := isAliasDomainEmail(linked.ProfileData.Email)
+
+	// Defense in depth: honour the system_managed marker on the stub record
+	// when it is still retrievable (e.g. an alias on a domain that has since
+	// been removed from ALLOWED_ALIAS_DOMAINS). Absence of the stub is not
+	// treated as permission on its own: the identity was already classified
+	// above from the primary user's record. The stub is also consulted for
+	// alias-domain identities, only to decide whether to backfill the marker.
+	stubUserID := fmt.Sprintf("%s|%s", constants.EmailConnection, identityID)
+	apiStub := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get stub user for unlink guard"),
+	)
+	var rawStub Auth0User
+	stubExists := true
+	if statusCode, callErr := apiStub.Call(ctx, &rawStub); callErr != nil {
+		if statusCode != http.StatusNotFound {
+			if aliasDomain {
+				// Already refused by domain; only the backfill decision is lost.
+				return true, nil
+			}
+			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
+				"stub_user_id", redaction.Redact(stubUserID),
+				"status_code", statusCode,
+				"error", callErr,
+			)
+			return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+		}
+		stubExists = false
+	}
+	stubManaged := stubExists && rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged
+
+	// Backfill the durable marker only for genuine aliases: a stub flagged
+	// system_managed, or an alias-domain identity whose stub is gone. An
+	// alias-domain identity whose stub exists without the flag (e.g. a
+	// preserved former primary) is refused by domain policy but not recorded,
+	// so it is not locked permanently if the domain is later retired.
+	if stubManaged || (aliasDomain && !stubExists) {
+		u.backfillSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
+		return true, nil
+	}
+	return aliasDomain, nil
+}
+
+// backfillSystemManagedIdentity records identityID's system-managed marker on
+// the primary user for an alias the unlink guard recognised by
+// domain or stub. It is best-effort: the unlink is refused either way, so a
+// failure is only logged.
+func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) {
+	if errRecord := u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken); errRecord != nil {
+		slog.WarnContext(ctx, "failed to backfill system-managed identity marker",
+			"user_id", redaction.Redact(primaryUserID),
+			"error", errRecord,
+		)
+	}
+}
+
+// recordSystemManagedIdentity marks identityID (the provider-local id, without
+// the "email|" prefix) as system-managed on the primary user by setting
+// app_metadata.system_managed_identity_<id> = true, the durable record the
+// unlink guard consults first.
+//
+// It is a single PATCH of one top-level key: Auth0 merges top-level
+// app_metadata keys, so no read-modify-write is involved and concurrent marker
+// writes for different aliases on the same user cannot drop each other, and
+// other app_metadata keys are left untouched.
+func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) error {
+	// Auth0 rejects metadata field names containing "." or "$"; real identity
+	// ids never do, so refuse rather than send a malformed key.
+	if identityID == "" || strings.ContainsAny(identityID, ".$") {
+		return errors.NewValidation("invalid identity id for system-managed marker")
+	}
+	apiPatch := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPatch),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("record system-managed identity marker"),
+		httpclient.WithBody(map[string]map[string]bool{
+			"app_metadata": {systemManagedIdentityKey(identityID): true},
+		}),
+		httpclient.WithSensitiveBody(),
+	)
+	if _, errPatch := apiPatch.Call(ctx, nil); errPatch != nil {
+		return errors.NewUnexpected("failed to record system-managed identity marker", errPatch)
+	}
+	return nil
+}
+
+// isAliasDomainEmail reports whether email's domain is listed in
+// ALLOWED_ALIAS_DOMAINS, using the same matching rule as alias claims and
+// email linking. Addresses on these domains can only be claimed through
+// add_alias, so any linked email identity on one is a system-managed alias.
+func isAliasDomainEmail(email string) bool {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return false
+	}
+	return model.IsAllowedAliasDomain(email[at+1:], os.Getenv(constants.AllowedAliasDomainsEnvKey))
+}
+
 // AddSystemManagedEmail creates a stub Auth0 passwordless user for email,
 // links it to primaryUserID via the Management API (M2M, no user-facing
 // magic-link), and marks it system_managed so it cannot be user-unlinked.
 // Returns the stub user_id. On link failure a best-effort cleanup of the stub
 // is attempted before the error is returned.
+//
+// After a successful link the identity is recorded in the primary user's
+// app_metadata (system_managed_identity_<id>) so the unlink guard keeps refusing it
+// even if the alias domain is later removed from ALLOWED_ALIAS_DOMAINS. That
+// write is best-effort: the alias is already linked and remains protected by
+// the domain check, which also backfills the marker on the next unlink attempt.
 func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error) {
 	if strings.TrimSpace(primaryUserID) == "" {
 		return "", errors.NewValidation("primary_user_id is required")
@@ -596,7 +757,28 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 
 	// Verified: system aliases are issued on LF-controlled domains, so ownership
 	// is established by the service itself rather than claimed by the user.
-	return u.createAndLinkEmailIdentity(ctx, primaryUserID, email, true, &Auth0AppMetadata{SystemManaged: true})
+	stubUserID, errLink := u.createAndLinkEmailIdentity(ctx, primaryUserID, email, true, &Auth0AppMetadata{SystemManaged: true})
+	if errLink != nil {
+		return "", errLink
+	}
+
+	identityID := stubUserID
+	if idx := strings.Index(identityID, "|"); idx >= 0 {
+		identityID = identityID[idx+1:]
+	}
+	m2mToken, errMarker := u.config.M2MTokenManager.GetToken(ctx)
+	if errMarker == nil {
+		errMarker = u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
+	}
+	if errMarker != nil {
+		slog.ErrorContext(ctx, "alias linked but system-managed identity marker was not recorded",
+			"user_id", redaction.Redact(primaryUserID),
+			"stub_user_id", redaction.Redact(stubUserID),
+			"error", errMarker,
+		)
+	}
+
+	return stubUserID, nil
 }
 
 // createAndLinkEmailIdentity creates a stub Auth0 passwordless email-connection
