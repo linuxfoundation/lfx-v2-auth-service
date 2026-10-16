@@ -554,6 +554,9 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
 
+			// The Auth0 adapter's SearchUser only resolves verified matches, so an
+			// unverified Auth0 record never blocks here. Authelia and mock users
+			// are provisioned by an operator and are matched as stored.
 			if strings.EqualFold(user.PrimaryEmail, email) {
 				return errs.NewValidation("email already linked")
 			}
@@ -1007,20 +1010,7 @@ type addAliasResponse struct {
 // isAllowedAliasDomain reports whether domain is listed in ALLOWED_ALIAS_DOMAINS
 // (comma-separated, case-insensitive). Empty/unset env means no alias domains.
 func isAllowedAliasDomain(domain string) bool {
-	domain = strings.TrimSpace(domain)
-	if domain == "" {
-		return false
-	}
-	raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey))
-	if raw == "" {
-		return false
-	}
-	for _, d := range strings.Split(raw, ",") {
-		if strings.EqualFold(domain, strings.TrimSpace(d)) {
-			return true
-		}
-	}
-	return false
+	return model.IsAllowedAliasDomain(domain, os.Getenv(constants.AllowedAliasDomainsEnvKey))
 }
 
 // isAliasDomainAddress reports whether address (in any form net/mail accepts)

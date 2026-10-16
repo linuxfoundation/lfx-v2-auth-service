@@ -8,6 +8,32 @@ import (
 	"testing"
 )
 
+func TestIsAllowedAliasDomain(t *testing.T) {
+	tests := []struct {
+		name      string
+		domain    string
+		allowList string
+		want      bool
+	}{
+		{name: "exact match", domain: "linux.com", allowList: "linux.com", want: true},
+		{name: "case and whitespace insensitive", domain: " Linux.COM ", allowList: "foo.org , LINUX.com", want: true},
+		{name: "not listed", domain: "example.com", allowList: "linux.com,foo.org", want: false},
+		{name: "subdomain is not a match", domain: "sub.linux.com", allowList: "linux.com", want: false},
+		{name: "trailing dot is not normalised", domain: "linux.com", allowList: "linux.com.", want: false},
+		{name: "empty domain", domain: "  ", allowList: "linux.com", want: false},
+		{name: "empty allow list", domain: "linux.com", allowList: "", want: false},
+		{name: "empty entries ignored", domain: "linux.com", allowList: ",,", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsAllowedAliasDomain(tt.domain, tt.allowList); got != tt.want {
+				t.Errorf("IsAllowedAliasDomain(%q, %q) = %v, want %v", tt.domain, tt.allowList, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateAlias(t *testing.T) {
 	const testDomain = "linux.com"
 
