@@ -869,6 +869,122 @@ func TestUserReaderWriter_MetadataLookup_ScopeGatedRejectsNonJWT(t *testing.T) {
 	})
 }
 
+func TestUserReaderWriter_MetadataLookup_RejectsMalformedSub(t *testing.T) {
+	ctx := context.Background()
+	writer := &userReaderWriter{}
+
+	for _, input := range []string{
+		"auth0|x/enrollments",
+		"auth0|x/roles?per_page=1",
+		"auth0|x/../../tenants/settings",
+		"auth0|x?fields=email",
+		"auth0|x#frag",
+		"auth0|x%2Froles",
+		`auth0|x\y`,
+		"auth0|a b",
+		"auth0|a\tb",
+		"auth0|a\x00b",
+		"auth0|a\xffb",
+		"|abc",
+		"auth0|",
+		"bad/prov|x",
+		"bad.prov|x",
+	} {
+		t.Run(input, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input)
+			require.Error(t, err)
+			assert.Nil(t, user)
+			var validation errors.Validation
+			assert.ErrorAs(t, err, &validation)
+		})
+	}
+
+	for _, input := range []string{
+		"auth0|123456789",
+		"google-oauth2|1234567890",
+		"samlp|conn|jdoe@example.com",
+		"oidc|lf_sso|abc-123",
+	} {
+		t.Run(input, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input)
+			require.NoError(t, err)
+			assert.Equal(t, input, user.UserID)
+		})
+	}
+}
+
+// pathRecordingTransport records the escaped path and raw query of each request
+// and returns an empty user object.
+type pathRecordingTransport struct {
+	escapedPaths []string
+	rawQueries   []string
+}
+
+func (p *pathRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	p.escapedPaths = append(p.escapedPaths, req.URL.EscapedPath())
+	p.rawQueries = append(p.rawQueries, req.URL.RawQuery)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"user_id":"auth0|x"}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestUserReaderWriter_GetUser_EscapesUserID(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		userID      string
+		escapedPath string
+	}{
+		{"auth0|test123", "/api/v2/users/auth0%7Ctest123"},
+		{"auth0|x/roles?per_page=1", "/api/v2/users/auth0%7Cx%2Froles%3Fper_page=1"},
+		{"auth0|x/../../tenants/settings", "/api/v2/users/auth0%7Cx%2F..%2F..%2Ftenants%2Fsettings"},
+		{"auth0|x#frag", "/api/v2/users/auth0%7Cx%23frag"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.userID, func(t *testing.T) {
+			transport := &pathRecordingTransport{}
+			rw := newTestReaderWriter(transport)
+
+			_, err := rw.GetUser(ctx, &model.User{UserID: tt.userID})
+			require.NoError(t, err)
+			require.Len(t, transport.escapedPaths, 1)
+			assert.Equal(t, tt.escapedPath, transport.escapedPaths[0])
+			assert.Empty(t, transport.rawQueries[0], "user id must not leak into the query string")
+		})
+	}
+}
+
+func TestUserReaderWriter_UpdateUser_EscapesUserID(t *testing.T) {
+	ctx := context.Background()
+	jwtConfig, privateKey := createTestJWTVerificationConfig(t)
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub":   "auth0|x/roles?per_page=1",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"scope": constants.UserUpdateMetadataRequiredScope,
+		"iss":   "https://test.auth0.com/",
+		"aud":   "https://test.auth0.com/api/v2/",
+	}).SignedString(privateKey)
+	require.NoError(t, err)
+
+	transport := &pathRecordingTransport{}
+	rw := newTestReaderWriter(transport)
+	rw.config.JWTVerificationConfig = jwtConfig
+
+	_, err = rw.UpdateUser(ctx, &model.User{
+		Token:        token,
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Test")},
+	})
+	require.NoError(t, err)
+	require.Len(t, transport.escapedPaths, 1)
+	assert.Equal(t, "/api/v2/users/auth0%7Cx%2Froles%3Fper_page=1", transport.escapedPaths[0])
+	assert.Empty(t, transport.rawQueries[0], "user id must not leak into the query string")
+}
+
 func TestUserReaderWriter_AddSystemManagedEmail_Validation(t *testing.T) {
 	ctx := context.Background()
 
