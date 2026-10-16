@@ -5,6 +5,7 @@ package authelia
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,15 @@ import (
 
 const (
 	kvLookupPrefix = "lookup/"
+
+	// otpMaxAttempts is the number of verification attempts allowed per code.
+	otpMaxAttempts = 5
+	// otpLifetime is how long a verification code is valid after it is issued. The
+	// email OTP bucket TTL must be at least this long, otherwise a locked record
+	// could be dropped (and its attempt count reset) before it expires.
+	otpLifetime = 5 * time.Minute
+	// otpResendCooldown is the minimum time between codes sent to the same address.
+	otpResendCooldown = time.Minute
 )
 
 type internalStorageReaderWriter interface {
@@ -43,13 +53,14 @@ type internalStorageWriter interface {
 
 type emailHandler interface {
 	CreateVerificationCode(ctx context.Context, email, otp string) error
-	GetVerificationCode(ctx context.Context, email string) (string, error)
+	ConsumeVerificationCode(ctx context.Context, email, otp string) error
 }
 
 // natsUserStorage implements UserStorage using NATS KV store
 type natsUserStorage struct {
 	natsClient *nats.NATSClient
 	kvStore    map[string]jetstream.KeyValue
+	now        func() time.Time
 }
 
 func (n *natsUserStorage) lookupUser(ctx context.Context, key string) (string, error) {
@@ -228,8 +239,76 @@ func (n *natsUserStorage) UpdateUserWithRevision(ctx context.Context, user *Auth
 	return nil
 }
 
-// CreateVerificationCode stores a verification code (OTP) for an email address in the email OTP bucket
-// The key is the email address and the value is the OTP code as a string
+// verificationCodeRecord is the value stored in the email OTP bucket for one address.
+// ExpiresAt is enforced here rather than relying on the bucket TTL alone, because
+// every revision-checked write restarts the bucket TTL for that key.
+type verificationCodeRecord struct {
+	OTP       string    `json:"otp"`
+	Attempts  int       `json:"attempts"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	// Consumed marks a code that was accepted. The record is kept until it expires so
+	// the resend cooldown still applies, but it can never be accepted again.
+	Consumed bool `json:"consumed,omitempty"`
+}
+
+func (r *verificationCodeRecord) expired(now time.Time) bool {
+	return !now.Before(r.ExpiresAt)
+}
+
+func (r *verificationCodeRecord) locked() bool {
+	return r.Attempts >= otpMaxAttempts
+}
+
+// isRevisionMismatch reports whether a revision-checked KV write lost to another writer.
+func isRevisionMismatch(err error) bool {
+	var jsErr jetstream.JetStreamError
+	return errors.As(err, &jsErr) && jsErr.APIError() != nil &&
+		jsErr.APIError().ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+}
+
+// verificationCodeWriteError maps a failed revision-checked write to a client-facing error
+// without exposing KV internals in the message.
+func verificationCodeWriteError(ctx context.Context, email string, err error) error {
+	slog.WarnContext(ctx, "failed to write verification code",
+		"email", redaction.RedactEmail(email),
+		"error", err,
+	)
+	if isRevisionMismatch(err) {
+		return errs.NewConflict("verification code was modified concurrently, please retry")
+	}
+	return errs.NewUnexpected("failed to write verification code")
+}
+
+func (n *natsUserStorage) clock() time.Time {
+	if n.now != nil {
+		return n.now()
+	}
+	return time.Now()
+}
+
+// getVerificationCodeRecord returns the stored record and its revision. A value that
+// cannot be decoded is reported as (nil, revision, nil) so callers can replace it.
+func (n *natsUserStorage) getVerificationCodeRecord(ctx context.Context, key string) (*verificationCodeRecord, uint64, error) {
+	entry, err := n.kvStore[constants.KVBucketNameAutheliaEmailOTP].Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, 0, errs.NewNotFound("verification code not found or expired")
+		}
+		return nil, 0, errs.NewUnexpected("failed to get verification code from NATS KV", err)
+	}
+
+	var record verificationCodeRecord
+	if errUnmarshal := json.Unmarshal(entry.Value(), &record); errUnmarshal != nil || (record.OTP == "" && !record.Consumed) {
+		return nil, entry.Revision(), nil
+	}
+	return &record, entry.Revision(), nil
+}
+
+// CreateVerificationCode stores a new verification code (OTP) for an email address in the
+// email OTP bucket. A new code is refused while
+// the current one is inside its resend cooldown, or while it is locked after too many
+// failed attempts and not yet expired.
 func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp string) error {
 	if email == "" {
 		return errs.NewUnexpected("email is required")
@@ -238,11 +317,50 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 		return errs.NewUnexpected("otp is required")
 	}
 
-	// Store the OTP as a simple string value
-	// The TTL is configured in the bucket itself (5 minutes by default)
-	_, errPut := n.kvStore[constants.KVBucketNameAutheliaEmailOTP].Put(ctx, email, []byte(otp))
-	if errPut != nil {
-		return errs.NewUnexpected("failed to store verification code in NATS KV", errPut)
+	now := n.clock()
+	existing, revision, errGet := n.getVerificationCodeRecord(ctx, email)
+	var notFound errs.NotFound
+	switch {
+	case errGet == nil:
+	case errors.As(errGet, &notFound):
+	default:
+		return errGet
+	}
+
+	if existing != nil && !existing.expired(now) {
+		if existing.locked() && !existing.Consumed {
+			return errs.NewRateLimited("too many failed verification attempts, please try again later", existing.ExpiresAt.Sub(now))
+		}
+		if resendAt := existing.CreatedAt.Add(otpResendCooldown); now.Before(resendAt) {
+			return errs.NewRateLimited("a verification code was sent recently, please try again later", resendAt.Sub(now))
+		}
+	}
+
+	record := &verificationCodeRecord{
+		OTP:       otp,
+		CreatedAt: now,
+		ExpiresAt: now.Add(otpLifetime),
+	}
+	// Failed attempts carry over to a replacement code, so resending cannot be used
+	// to reset the attempt budget before the current code expires.
+	if existing != nil && !existing.expired(now) && !existing.Consumed {
+		record.Attempts = existing.Attempts
+	}
+
+	data, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		return errs.NewUnexpected("failed to marshal verification code", errMarshal)
+	}
+
+	kv := n.kvStore[constants.KVBucketNameAutheliaEmailOTP]
+	var errWrite error
+	if errGet != nil {
+		_, errWrite = kv.Create(ctx, email, data)
+	} else {
+		_, errWrite = kv.Update(ctx, email, data, revision)
+	}
+	if errWrite != nil {
+		return verificationCodeWriteError(ctx, email, errWrite)
 	}
 
 	slog.InfoContext(ctx, "verification code stored successfully",
@@ -252,28 +370,90 @@ func (n *natsUserStorage) CreateVerificationCode(ctx context.Context, email, otp
 	return nil
 }
 
-// GetVerificationCode retrieves a verification code (OTP) for an email address from the email OTP bucket
-// Returns the OTP as a string
-func (n *natsUserStorage) GetVerificationCode(ctx context.Context, email string) (string, error) {
+// ConsumeVerificationCode checks a submitted verification code (OTP) for an email address.
+// Each check spends one of a bounded number of attempts before the comparison is made, and
+// a matching code is marked consumed in the same revision-checked operation that accepts it,
+// so a code can be accepted at most once.
+func (n *natsUserStorage) ConsumeVerificationCode(ctx context.Context, email, otp string) error {
 	if email == "" {
-		return "", errs.NewUnexpected("email is required")
+		return errs.NewUnexpected("email is required")
 	}
 
-	entry, err := n.kvStore[constants.KVBucketNameAutheliaEmailOTP].Get(ctx, email)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return "", errs.NewNotFound("verification code not found or expired")
+	kv := n.kvStore[constants.KVBucketNameAutheliaEmailOTP]
+	now := n.clock()
+
+	record, revision, errGet := n.getVerificationCodeRecord(ctx, email)
+	if errGet != nil {
+		return errGet
+	}
+	if record == nil || record.expired(now) {
+		if errDelete := kv.Delete(ctx, email, jetstream.LastRevision(revision)); errDelete != nil {
+			slog.WarnContext(ctx, "failed to delete expired verification code",
+				"email", redaction.RedactEmail(email),
+				"error", errDelete,
+			)
 		}
-		return "", errs.NewUnexpected("failed to get verification code from NATS KV", err)
+		return errs.NewNotFound("verification code not found or expired")
+	}
+	if record.Consumed {
+		return errs.NewNotFound("verification code not found or expired")
+	}
+	if record.locked() {
+		return errs.NewValidation("too many failed verification attempts, please try again later")
 	}
 
-	otp := string(entry.Value())
+	// Reserve the attempt before comparing so that concurrent guesses against the
+	// same revision cannot be evaluated without being counted.
+	record.Attempts++
+	data, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		return errs.NewUnexpected("failed to marshal verification code", errMarshal)
+	}
+	reservedRevision, errUpdate := kv.Update(ctx, email, data, revision)
+	if errUpdate != nil {
+		return verificationCodeWriteError(ctx, email, errUpdate)
+	}
 
-	slog.InfoContext(ctx, "verification code retrieved successfully",
+	if subtle.ConstantTimeCompare([]byte(record.OTP), []byte(otp)) != 1 {
+		slog.WarnContext(ctx, "invalid verification code submitted",
+			"email", redaction.RedactEmail(email),
+			"attempts", record.Attempts,
+		)
+		return errs.NewValidation("invalid verification code")
+	}
+
+	consumed, errMarshal := json.Marshal(&verificationCodeRecord{
+		Attempts:  record.Attempts,
+		CreatedAt: record.CreatedAt,
+		ExpiresAt: record.ExpiresAt,
+		Consumed:  true,
+	})
+	if errMarshal != nil {
+		return errs.NewUnexpected("failed to marshal verification code", errMarshal)
+	}
+	if _, errConsume := kv.Update(ctx, email, consumed, reservedRevision); errConsume != nil {
+		return verificationCodeWriteError(ctx, email, errConsume)
+	}
+
+	slog.InfoContext(ctx, "verification code consumed successfully",
 		"email", redaction.RedactEmail(email),
 	)
 
-	return otp, nil
+	return nil
+}
+
+// validateEmailOTPBucketTTL rejects an email OTP bucket whose TTL is shorter than the code
+// lifetime: such a bucket would drop a locked or recently sent record early and reset its
+// attempt count and resend cooldown. A zero TTL (no expiry) is accepted.
+func validateEmailOTPBucketTTL(ctx context.Context, kv jetstream.KeyValue) error {
+	status, err := kv.Status(ctx)
+	if err != nil {
+		return errs.NewUnexpected("failed to read email OTP bucket status", err)
+	}
+	if ttl := status.TTL(); ttl > 0 && ttl < otpLifetime {
+		return errs.NewUnexpected(fmt.Sprintf("email OTP bucket TTL %s is shorter than the verification code lifetime %s", ttl, otpLifetime))
+	}
+	return nil
 }
 
 // BuildLookupKey builds the lookup key for the given lookup key and key
@@ -292,6 +472,9 @@ func newNATSUserStorage(ctx context.Context, natsClient *nats.NATSClient) (inter
 			return nil, errs.NewUnexpected("KV bucket not found in NATS client")
 		}
 		kvStores[bucketName] = kvStore
+	}
+	if errTTL := validateEmailOTPBucketTTL(ctx, kvStores[constants.KVBucketNameAutheliaEmailOTP]); errTTL != nil {
+		return nil, errTTL
 	}
 	slog.DebugContext(ctx, "created NATS user storage", "kvStores", kvStores)
 

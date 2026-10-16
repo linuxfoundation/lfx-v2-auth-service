@@ -6,23 +6,35 @@ package auth0
 import (
 	"context"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
-	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	jwtparser "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
+// jwksStartupRetries is how many times NewJWTVerificationConfig retries the
+// initial JWKS load before failing.
+const jwksStartupRetries = 2
+
+// signingKeySource resolves tenant signing keys by key ID.
+type signingKeySource interface {
+	key(ctx context.Context, kid string) (*rsa.PublicKey, error)
+}
+
 // JWTVerificationConfig holds configuration for JWT signature verification
 type JWTVerificationConfig struct {
-	// PublicKey is the RSA public key for signature verification
+	// Keys selects the verification key by the token's 'kid' from the tenant
+	// JWKS, refreshed so rotated-in keys verify and removed keys stop
+	// verifying without a restart. When set, it takes precedence over PublicKey.
+	Keys signingKeySource
+	// PublicKey is a fixed RSA public key for signature verification, used only
+	// when Keys is nil
 	PublicKey *rsa.PublicKey
 	// ExpectedIssuer is the expected JWT issuer (e.g., "https://your-domain.auth0.com/")
 	ExpectedIssuer string
@@ -34,7 +46,7 @@ type JWTVerificationConfig struct {
 	// ExpectedAudiences is the full audience allow-list for JWT verification
 	// (Management API plus, when configured, the LFX v2 API audience)
 	ExpectedAudiences []string
-	// JWKSURL is the URL to fetch JSON Web Key Set (optional, alternative to PublicKey)
+	// JWKSURL is the tenant JSON Web Key Set URL backing Keys
 	JWKSURL string
 }
 
@@ -56,6 +68,10 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 		ExpectedIssuer:    j.ExpectedIssuer,
 		ExpectedAudience:  j.ExpectedAudience,
 		ExpectedAudiences: j.ExpectedAudiences,
+	}
+	if j.Keys != nil {
+		opts.KeyLookup = j.Keys.key
+		opts.SigningKey = nil
 	}
 
 	if len(requiredScope) > 0 {
@@ -97,79 +113,51 @@ func (j *JWTVerificationConfig) JWTVerify(ctx context.Context, token string, req
 	return claims, nil
 }
 
-// NewJWTVerificationConfig creates a JWT verification configuration
-func NewJWTVerificationConfig(ctx context.Context, domain string, httpClient *httpclient.Client) (*JWTVerificationConfig, error) {
-	// Try to load from JWKS URL first (recommended for Auth0)
-	jwksURL := fmt.Sprintf("https://%s/.well-known/jwks.json", domain)
-
-	// Fetch JWKS from Auth0 using the existing httpclient
-	apiRequest := httpclient.NewAPIRequest(
-		httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(jwksURL),
-		httpclient.WithDescription("fetch Auth0 JWKS"),
-	)
-
-	// Parse JWKS and extract the first RSA key
-	var jwks struct {
-		Keys []struct {
-			Kty string `json:"kty"`
-			Use string `json:"use,omitempty"`
-			Kid string `json:"kid,omitempty"`
-			Alg string `json:"alg,omitempty"`
-			N   string `json:"n"`
-			E   string `json:"e"`
-		} `json:"keys"`
+// NewJWTVerificationConfig creates a JWT verification configuration backed by
+// the tenant JWKS. Keys are selected by 'kid' from a cache shared with the
+// impersonation flow, so key rotation and revocation in Auth0 take effect
+// within jwksTTL without a restart.
+func NewJWTVerificationConfig(ctx context.Context, domain string) (*JWTVerificationConfig, error) {
+	keys := sharedTenantKeys(domain)
+	// The shared cache fetches without retries, so retry the startup load here
+	// to tolerate a transient JWKS failure without holding the cache lock.
+	err := keys.ensure(ctx)
+	for attempt := 1; err != nil && attempt <= jwksStartupRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, errors.NewUnexpected("failed to fetch JWKS", ctx.Err())
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
+		err = keys.ensure(ctx)
 	}
-
-	statusCode, err := apiRequest.Call(ctx, &jwks)
 	if err != nil {
 		return nil, errors.NewUnexpected("failed to fetch JWKS", err)
 	}
-
-	if statusCode != http.StatusOK {
-		return nil, errors.NewUnexpected(fmt.Sprintf("JWKS endpoint returned status %d", statusCode))
+	if !keys.hasSigningKey() {
+		return nil, errors.NewUnexpected("no suitable RSA key found in JWKS for signature verification")
 	}
 
-	// Find the first RSA key suitable for signature verification
-	for _, key := range jwks.Keys {
-		if key.Kty == "RSA" && (key.Use == "sig" || key.Use == "") {
-			// Convert JWK to RSA public key
-			jwkData, err := json.Marshal(key)
-			if err != nil {
-				continue
-			}
-
-			publicKey, err := jwtparser.LoadRSAPublicKeyFromJWK(jwkData)
-			if err != nil {
-				return nil, errors.NewUnexpected("failed to load RSA public key from JWK", err)
-			}
-
-			expectedIssuer := fmt.Sprintf("https://%s/", domain)
-			expectedAudience := fmt.Sprintf("https://%s/api/v2/", domain)
-			if override := strings.TrimSpace(os.Getenv(constants.Auth0ManagementAudienceEnvKey)); override != "" {
-				expectedAudience = override
-			}
-
-			expectedAudiences := audienceAllowList(expectedAudience)
-
-			slog.InfoContext(ctx, "JWT signature verification enabled",
-				"issuer", expectedIssuer,
-				"audience", expectedAudience,
-				"audiences", expectedAudiences,
-				"key_id", key.Kid)
-
-			return &JWTVerificationConfig{
-				PublicKey:         publicKey,
-				ExpectedIssuer:    expectedIssuer,
-				ExpectedAudience:  expectedAudience,
-				ExpectedAudiences: expectedAudiences,
-				JWKSURL:           jwksURL,
-			}, nil
-		}
+	expectedIssuer := fmt.Sprintf("https://%s/", domain)
+	expectedAudience := fmt.Sprintf("https://%s/api/v2/", domain)
+	if override := strings.TrimSpace(os.Getenv(constants.Auth0ManagementAudienceEnvKey)); override != "" {
+		expectedAudience = override
 	}
 
-	return nil, errors.NewUnexpected("no suitable RSA key found in JWKS for signature verification")
+	expectedAudiences := audienceAllowList(expectedAudience)
+
+	slog.InfoContext(ctx, "JWT signature verification enabled",
+		"issuer", expectedIssuer,
+		"audience", expectedAudience,
+		"audiences", expectedAudiences,
+		"jwks_url", keys.jwksURL)
+
+	return &JWTVerificationConfig{
+		Keys:              keys,
+		ExpectedIssuer:    expectedIssuer,
+		ExpectedAudience:  expectedAudience,
+		ExpectedAudiences: expectedAudiences,
+		JWKSURL:           keys.jwksURL,
+	}, nil
 }
 
 // audienceAllowList returns the audiences accepted for JWT verification.

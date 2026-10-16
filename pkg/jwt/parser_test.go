@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 
@@ -732,6 +733,63 @@ func TestParseVerifiedMultipleTokenAudiences(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://lfx-api.example.org/", parsed.Audience)
 	assert.Equal(t, []string{"https://lfx-api.example.org/", "https://test.auth0.com/userinfo"}, parsed.Audiences)
+}
+
+func TestParseVerifiedKeyLookup(t *testing.T) {
+	ctx := context.Background()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	sign := func(key *rsa.PrivateKey, kid string) string {
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+			"sub": "test-user-123",
+			"iss": "https://test.auth0.com/",
+			"aud": "https://test.auth0.com/api/v2/",
+			"exp": time.Now().Add(time.Hour).Unix(),
+		})
+		if kid != "" {
+			token.Header["kid"] = kid
+		}
+		signed, err := token.SignedString(key)
+		require.NoError(t, err)
+		return signed
+	}
+
+	var lookedUp []string
+	opts := &ParseOptions{
+		VerifySignature:   true,
+		SigningKey:        &otherKey.PublicKey, // ignored when KeyLookup is set
+		ExpectedIssuer:    "https://test.auth0.com/",
+		ExpectedAudience:  "https://test.auth0.com/api/v2/",
+		RequireExpiration: true,
+		RequireSubject:    true,
+		KeyLookup: func(_ context.Context, kid string) (*rsa.PublicKey, error) {
+			lookedUp = append(lookedUp, kid)
+			if kid == "published" {
+				return &privateKey.PublicKey, nil
+			}
+			return nil, errors.New("unknown key")
+		},
+	}
+
+	claims, err := ParseVerified(ctx, sign(privateKey, "published"), opts)
+	require.NoError(t, err)
+	assert.Equal(t, "test-user-123", claims.Subject)
+	assert.Equal(t, []string{"published"}, lookedUp)
+
+	_, err = ParseVerified(ctx, sign(otherKey, "published"), opts)
+	assert.Error(t, err, "foreign key under a published kid must not verify")
+
+	_, err = ParseVerified(ctx, sign(otherKey, "revoked"), opts)
+	assert.Error(t, err, "unknown kid must not fall back to SigningKey")
+
+	lookedUp = nil
+	_, err = ParseVerified(ctx, sign(privateKey, ""), opts)
+	assert.Error(t, err, "token without kid must be rejected")
+	assert.Empty(t, lookedUp)
 }
 
 func TestClaimsHasAudience(t *testing.T) {
