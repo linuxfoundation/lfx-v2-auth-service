@@ -192,6 +192,13 @@ jobs:
       - release-helm-chart
       - create-ghcr-helm-provenance
     runs-on: ubuntu-latest
+    # This job assumes an AWS role and reads an org-level GitHub App key. It
+    # must run in the protected `release` environment, whose required
+    # reviewers are the actual gate. This line routes the job through that
+    # environment and gives it the OIDC subject
+    # (repo:linuxfoundation/lfx-v2-auth-service:environment:release) that the
+    # role's trust policy is expected to require.
+    environment: release
     permissions:
       contents: read
       id-token: write
