@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -65,7 +66,10 @@ type impersonationFlow struct {
 
 // subjectTokenKeys caches the tenant JWKS and selects verification keys by key
 // ID, refetching when the cache is stale or a token names an unknown key so
-// Auth0 signing key rotation does not require a restart.
+// Auth0 signing key rotation does not require a restart. One instance per
+// tenant is shared (see sharedTenantKeys) by the impersonation subject-token
+// check and JWTVerificationConfig, so every token verifier in the service
+// enforces the same rotation and revocation behaviour.
 type subjectTokenKeys struct {
 	jwksURL    string
 	httpClient *httpclient.Client
@@ -85,6 +89,27 @@ func newSubjectTokenKeys(domain string, httpClient *httpclient.Client) *subjectT
 	}
 }
 
+var (
+	tenantKeysMu sync.Mutex
+	tenantKeys   = map[string]*subjectTokenKeys{}
+)
+
+// sharedTenantKeys returns the process-wide signing key cache for domain,
+// creating it on first use. Fetches use a dedicated client without retries:
+// key lookups hold the cache lock while fetching, so a JWKS outage must stay
+// bounded by a single short request.
+func sharedTenantKeys(domain string) *subjectTokenKeys {
+	tenantKeysMu.Lock()
+	defer tenantKeysMu.Unlock()
+
+	if keys, ok := tenantKeys[domain]; ok {
+		return keys
+	}
+	keys := newSubjectTokenKeys(domain, httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second}))
+	tenantKeys[domain] = keys
+	return keys
+}
+
 // prefetch loads the JWKS ahead of the first request. A failure is logged and
 // retried on demand, so a transient outage at startup does not disable
 // impersonation for the life of the process.
@@ -92,6 +117,41 @@ func (k *subjectTokenKeys) prefetch(ctx context.Context) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.attemptRefreshLocked(ctx, k.now())
+}
+
+// ensure loads the JWKS if no set fetched within jwksTTL is cached, and fails
+// when none is available.
+func (k *subjectTokenKeys) ensure(ctx context.Context) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	now := k.now()
+	if !k.isFreshLocked(now) {
+		k.attemptRefreshLocked(ctx, now)
+	}
+	if !k.isFreshLocked(now) {
+		return errors.NewServiceUnavailable("tenant signing keys are unavailable")
+	}
+	return nil
+}
+
+// hasSigningKey reports whether the cached JWKS holds at least one key usable
+// for RS256 signature verification.
+func (k *subjectTokenKeys) hasSigningKey() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	if k.set == nil {
+		return false
+	}
+	for i := 0; i < k.set.Len(); i++ {
+		if key, ok := k.set.Key(i); ok {
+			if _, err := rsaSigningKey(key); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // key returns the RSA signing key published under kid. It fails closed when no
@@ -112,11 +172,11 @@ func (k *subjectTokenKeys) key(ctx context.Context, kid string) (*rsa.PublicKey,
 	}
 
 	if !k.isFreshLocked(now) {
-		return nil, errors.NewServiceUnavailable("impersonation signing keys are unavailable")
+		return nil, errors.NewServiceUnavailable("tenant signing keys are unavailable")
 	}
 	key, ok := k.set.LookupKeyID(kid)
 	if !ok {
-		return nil, errors.NewUnauthorized("invalid subject_token")
+		return nil, errors.NewUnauthorized("invalid token")
 	}
 	return rsaSigningKey(key)
 }
@@ -144,7 +204,7 @@ func (k *subjectTokenKeys) attemptRefreshLocked(ctx context.Context, now time.Ti
 		err = fmt.Errorf("JWKS contains no keys")
 	}
 	if err != nil {
-		slog.WarnContext(ctx, "failed to fetch impersonation signing keys", "error", err)
+		slog.WarnContext(ctx, "failed to fetch tenant signing keys", "error", err)
 		return
 	}
 
@@ -156,17 +216,17 @@ func (k *subjectTokenKeys) attemptRefreshLocked(ctx context.Context, now time.Ti
 // signature verification.
 func rsaSigningKey(key jwk.Key) (*rsa.PublicKey, error) {
 	if key.KeyType() != jwa.RSA {
-		return nil, errors.NewUnauthorized("invalid subject_token")
+		return nil, errors.NewUnauthorized("invalid token")
 	}
 	if use := key.KeyUsage(); use != "" && use != string(jwk.ForSignature) {
-		return nil, errors.NewUnauthorized("invalid subject_token")
+		return nil, errors.NewUnauthorized("invalid token")
 	}
 	if alg := key.Algorithm().String(); alg != "" && alg != jwa.RS256.String() {
-		return nil, errors.NewUnauthorized("invalid subject_token")
+		return nil, errors.NewUnauthorized("invalid token")
 	}
 	var pub rsa.PublicKey
 	if err := key.Raw(&pub); err != nil {
-		return nil, errors.NewUnauthorized("invalid subject_token")
+		return nil, errors.NewUnauthorized("invalid token")
 	}
 	return &pub, nil
 }
@@ -210,7 +270,7 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 
 	httpClient := httpclient.NewClient(httpclient.Config{Timeout: 10 * time.Second})
 
-	subjectKeys := newSubjectTokenKeys(domain, httpClient)
+	subjectKeys := sharedTenantKeys(domain)
 	subjectKeys.prefetch(ctx)
 
 	slog.DebugContext(ctx, "impersonation flow initialized",
@@ -256,6 +316,10 @@ func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectTo
 
 	signingKey, err := f.subjectKeys.key(ctx, kid)
 	if err != nil {
+		var unauthorized errors.Unauthorized
+		if stderrors.As(err, &unauthorized) {
+			return errors.NewUnauthorized("invalid subject_token")
+		}
 		return err
 	}
 
