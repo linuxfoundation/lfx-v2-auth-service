@@ -755,6 +755,17 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		return "", errors.NewValidation("email is required")
 	}
 
+	// Auth0 enforces email uniqueness per connection only, so a 409 on the
+	// email-connection create cannot be relied on to detect an address held via
+	// a social or enterprise connection. Check every connection first.
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return "", errors.NewUnexpected("failed to get M2M token for alias availability check", errToken)
+	}
+	if errClaimed := u.ensureEmailUnclaimed(ctx, email, m2mToken); errClaimed != nil {
+		return "", errClaimed
+	}
+
 	// Verified: system aliases are issued on LF-controlled domains, so ownership
 	// is established by the service itself rather than claimed by the user.
 	stubUserID, errLink := u.createAndLinkEmailIdentity(ctx, primaryUserID, email, true, &Auth0AppMetadata{SystemManaged: true})
@@ -779,6 +790,149 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 	}
 
 	return stubUserID, nil
+}
+
+// ensureEmailUnclaimed returns a validation error ("email already linked") when
+// any Auth0 user, on any connection, holds email as its root email or as the
+// profile email of any of its identities. Unlike SearchUser, the results are
+// not narrowed to database or email-connection identities. Orphaned
+// passwordless stubs (see isOrphanedEmailStub) are ignored here so that the
+// 409 reconciliation in createAndLinkEmailIdentity can still remove them.
+// Lookup failures are returned as unexpected errors so the claim fails closed.
+func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mToken string) error {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	escaper := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	escaped := escaper.Replace(normalized)
+
+	identityTerms := make([]string, 0, 12)
+	for _, variant := range emailCasingVariants(normalized) {
+		identityTerms = append(identityTerms, `identities.profileData.email:"`+escaper.Replace(variant)+`"`)
+	}
+
+	// users-by-email is case-sensitive and social/enterprise connections may
+	// keep the provider's casing, so the root email is also searched through
+	// the normalized (case-insensitive) v3 "email" field. users-by-email is kept
+	// because, unlike the search index, it is not eventually consistent.
+	// identities.profileData.email has no case-insensitive search, so the
+	// common casings a provider may have stored are searched together (see
+	// emailCasingVariants); results are compared case-insensitively by
+	// holdsEmail.
+	lookups := []struct {
+		description string
+		endpoint    string
+	}{
+		{
+			description: "look up users by root email",
+			endpoint:    "users-by-email?email=" + url.QueryEscape(normalized),
+		},
+		{
+			description: "search users by root email",
+			endpoint:    "users?q=" + url.QueryEscape(`email:"`+escaped+`"`) + "&search_engine=v3",
+		},
+		{
+			description: "look up users by identity email",
+			endpoint:    "users?q=" + url.QueryEscape(strings.Join(identityTerms, " OR ")) + "&search_engine=v3",
+		},
+	}
+
+	for _, lookup := range lookups {
+		apiSearch := httpclient.NewAPIRequest(
+			u.httpClient,
+			httpclient.WithMethod(http.MethodGet),
+			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/%s", u.config.Domain, lookup.endpoint)),
+			httpclient.WithToken(m2mToken),
+			httpclient.WithDescription(lookup.description),
+		)
+
+		var users []Auth0User
+		if statusCode, errSearch := apiSearch.Call(ctx, &users); errSearch != nil {
+			slog.ErrorContext(ctx, "failed to check email availability",
+				"error", errSearch,
+				"status_code", statusCode,
+				"lookup", lookup.description,
+				"email", redaction.RedactEmail(email),
+			)
+			return errors.NewUnexpected("failed to check email availability", errSearch)
+		}
+
+		for i := range users {
+			candidate := &users[i]
+			if !holdsEmail(candidate, normalized) || isOrphanedEmailStub(candidate, normalized) {
+				continue
+			}
+			slog.InfoContext(ctx, "email already held by an existing Auth0 user",
+				"existing_user_id", redaction.Redact(candidate.UserID),
+				"email", redaction.RedactEmail(email),
+			)
+			return errors.NewValidation("email already linked")
+		}
+	}
+
+	return nil
+}
+
+// emailCasingVariants returns the casings of a lowercased email that identity
+// providers commonly store: lowercase, uppercase, and the local part and domain
+// each either lowercase, capitalized, or (local part only) capitalized per
+// segment, e.g. "First.Last@Linux.com". Auth0 cannot search identity emails
+// case-insensitively, so these are what the identity-email lookup can cover.
+func emailCasingVariants(email string) []string {
+	local, domain, found := strings.Cut(email, "@")
+	if !found {
+		return []string{email}
+	}
+
+	capitalize := func(s string) string {
+		r, size := utf8.DecodeRuneInString(s)
+		if size == 0 {
+			return s
+		}
+		return string(unicode.ToUpper(r)) + s[size:]
+	}
+	capitalizeSegments := func(s string) string {
+		var b strings.Builder
+		start := true
+		for _, r := range s {
+			if start {
+				b.WriteRune(unicode.ToUpper(r))
+			} else {
+				b.WriteRune(r)
+			}
+			start = r == '.' || r == '_' || r == '-'
+		}
+		return b.String()
+	}
+
+	variants := []string{email, strings.ToUpper(email)}
+	seen := map[string]struct{}{email: {}, strings.ToUpper(email): {}}
+	for _, l := range []string{local, capitalize(local), capitalizeSegments(local)} {
+		for _, d := range []string{domain, capitalize(domain)} {
+			v := l + "@" + d
+			if _, dup := seen[v]; dup {
+				continue
+			}
+			seen[v] = struct{}{}
+			variants = append(variants, v)
+		}
+	}
+	return variants
+}
+
+// holdsEmail reports whether user carries email, case-insensitively, as its
+// root email or as the profile email of any identity, regardless of connection.
+func holdsEmail(user *Auth0User, email string) bool {
+	if user == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(user.Email), email) {
+		return true
+	}
+	for _, identity := range user.Identities {
+		if identity.ProfileData != nil && strings.EqualFold(strings.TrimSpace(identity.ProfileData.Email), email) {
+			return true
+		}
+	}
+	return false
 }
 
 // createAndLinkEmailIdentity creates a stub Auth0 passwordless email-connection
