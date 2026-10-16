@@ -291,6 +291,8 @@ func Test_emailFilter_Filter(t *testing.T) {
 			name: "matches when connection is Username-Password-Authentication",
 			user: &model.User{PrimaryEmail: "test@example.com"},
 			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: true,
 				Identities: []Auth0Identity{
 					{
 						Connection: usernamePasswordAuthenticationFilter,
@@ -333,6 +335,8 @@ func Test_emailFilter_Filter(t *testing.T) {
 			name: "checks multiple identities and finds match",
 			user: &model.User{PrimaryEmail: "test@example.com"},
 			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: true,
 				Identities: []Auth0Identity{
 					{
 						Connection: "google-oauth2",
@@ -360,6 +364,8 @@ func Test_emailFilter_Filter(t *testing.T) {
 			name: "sets primary email from userID when match found",
 			user: &model.User{PrimaryEmail: "test@example.com"},
 			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: true,
 				Identities: []Auth0Identity{
 					{
 						Connection: usernamePasswordAuthenticationFilter,
@@ -368,6 +374,110 @@ func Test_emailFilter_Filter(t *testing.T) {
 				},
 			},
 			wantMatch: true,
+			wantErr:   false,
+		},
+		{
+			name: "no match when root email is not verified",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: false,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+				},
+			},
+			wantMatch: false,
+			wantErr:   false,
+		},
+		{
+			name: "matches when root email is verified case-insensitively",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "Test@Example.com",
+				EmailVerified: true,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+				},
+			},
+			wantMatch: true,
+			wantErr:   false,
+		},
+		{
+			name: "matches when root email is unverified but a linked identity verifies the same email",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: false,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+					{
+						Connection: emailAuthenticationFilter,
+						UserID:     "email|abc",
+						ProfileData: &Auth0ProfileData{
+							Email:         "test@example.com",
+							EmailVerified: true,
+						},
+					},
+				},
+			},
+			wantMatch: true,
+			wantErr:   false,
+		},
+		{
+			name: "no match when only a linked social identity verifies the email",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: false,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+					{
+						Connection: "google-oauth2",
+						UserID:     "1234567890",
+						ProfileData: &Auth0ProfileData{
+							Email:         "test@example.com",
+							EmailVerified: true,
+						},
+					},
+				},
+			},
+			wantMatch: false,
+			wantErr:   false,
+		},
+		{
+			name: "no match when only a linked identity for a different email is verified",
+			user: &model.User{PrimaryEmail: "test@example.com"},
+			auth0User: &Auth0User{
+				Email:         "test@example.com",
+				EmailVerified: false,
+				Identities: []Auth0Identity{
+					{
+						Connection: usernamePasswordAuthenticationFilter,
+						UserID:     "test@example.com",
+					},
+					{
+						Connection: emailAuthenticationFilter,
+						UserID:     "email|abc",
+						ProfileData: &Auth0ProfileData{
+							Email:         "other@example.com",
+							EmailVerified: true,
+						},
+					},
+				},
+			},
+			wantMatch: false,
 			wantErr:   false,
 		},
 	}
@@ -635,6 +745,27 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 				},
 			},
 			wantMatch: true,
+			wantErr:   false,
+		},
+		{
+			name: "no match when identity email matches but is not verified",
+			user: &model.User{
+				AlternateEmails: []model.Email{
+					{Email: "alt@example.com"},
+				},
+			},
+			auth0User: &Auth0User{
+				Identities: []Auth0Identity{
+					{
+						Connection: emailAuthenticationFilter,
+						ProfileData: &Auth0ProfileData{
+							Email:         "alt@example.com",
+							EmailVerified: false,
+						},
+					},
+				},
+			},
+			wantMatch: false,
 			wantErr:   false,
 		},
 	}

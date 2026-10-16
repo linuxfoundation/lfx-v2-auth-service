@@ -129,6 +129,7 @@ To create a new release of the auth service:
 
 3. **The GitHub Actions workflow will automatically**:
    - Build and publish the container images (auth-service)
+   - Sign the container images with Cosign (keyless, by digest)
    - Package and publish the Helm chart to GitHub Pages
    - Publish the chart to GitHub Container Registry (GHCR)
    - Sign the chart with Cosign
@@ -143,6 +144,25 @@ To create a new release of the auth service:
 - Only update the chart `version` field when making releases - this represents the Helm chart version.
 - The container image tags are automatically managed by the consolidated CI/CD pipeline using the git tag.
 - Both container images (auth-service) and the Helm chart are published together in a single workflow.
+- Pull request builds (`ko-build-branch.yaml`) only verify the container build;
+  the workflow does not publish images or hold package write permission.
+
+### Verifying Release Images
+
+Release images are signed keylessly by the `ko-build-tag.yaml` workflow. Verify a
+release by pinning the signer to that workflow on a `v*` tag, not just checking that
+a signature exists:
+
+```bash
+repo='linuxfoundation/lfx-v2-auth-service'
+wf="ko-build-tag\\.yaml@refs/tags/v"
+id="^https://github\\.com/${repo}/\\.github/workflows/${wf}"
+for image in server cdp-merge-repair; do
+  cosign verify "ghcr.io/${repo}/${image}:v0.2.0" \
+    --certificate-identity-regexp "${id}" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+done
+```
 
 ## Development
 

@@ -2199,3 +2199,43 @@ func TestEmailCasingVariants(t *testing.T) {
 
 	assert.Equal(t, []string{"no-at-sign"}, emailCasingVariants("no-at-sign"))
 }
+
+func TestUserReaderWriter_SearchUser_Email_RequiresVerifiedEmail(t *testing.T) {
+	ctx := context.Background()
+
+	unverifiedDB := `{"user_id":"auth0|unverified","username":"unverified","email":"owner@example.com","email_verified":false,` +
+		`"identities":[{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"unverified"}]}`
+	verifiedDB := `{"user_id":"auth0|verified","username":"verified","email":"owner@example.com","email_verified":true,` +
+		`"identities":[{"connection":"Username-Password-Authentication","provider":"auth0","user_id":"verified"}]}`
+	verifiedSocial := `{"user_id":"google-oauth2|123","email":"owner@example.com","email_verified":true,` +
+		`"identities":[{"connection":"google-oauth2","provider":"google-oauth2","user_id":"123","isSocial":true}]}`
+
+	tests := []struct {
+		name       string
+		byEmail    string
+		wantUserID string // empty means NotFound is expected
+	}{
+		{name: "unverified database user is not resolved", byEmail: "[" + unverifiedDB + "]"},
+		{name: "unverified database user next to verified social owner is not resolved", byEmail: "[" + unverifiedDB + "," + verifiedSocial + "]"},
+		{name: "verified owner is resolved when listed after unverified record", byEmail: "[" + unverifiedDB + "," + verifiedDB + "]", wantUserID: "auth0|verified"},
+		{name: "verified owner is resolved when listed first", byEmail: "[" + verifiedDB + "," + unverifiedDB + "]", wantUserID: "auth0|verified"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.byEmailResp = tt.byEmail
+			rw := newTestReaderWriter(ft)
+
+			user, err := rw.SearchUser(ctx, &model.User{PrimaryEmail: "owner@example.com"}, constants.CriteriaTypeEmail)
+			if tt.wantUserID == "" {
+				var notFound errors.NotFound
+				require.ErrorAs(t, err, &notFound)
+				assert.Nil(t, user)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantUserID, user.UserID)
+		})
+	}
+}
