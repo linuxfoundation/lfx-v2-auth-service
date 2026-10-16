@@ -20,6 +20,7 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/password"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
@@ -286,18 +287,28 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 		return errs.NewValidation("alternate email is required")
 	}
 
-	otp, errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail)
-	if errSendEmail != nil {
-		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
-		return errs.NewUnexpected("failed to send email", errSendEmail)
+	otp, errGenerateOTP := password.OnlyNumbers(6)
+	if errGenerateOTP != nil {
+		slog.ErrorContext(ctx, "failed to generate OTP", "error", errGenerateOTP)
+		return errs.NewUnexpected("failed to generate OTP", errGenerateOTP)
 	}
 
+	// Store the code before sending it so the per-address resend limit is enforced
+	// before any email goes out.
 	user := &model.User{}
 	key := user.BuildAlternateEmailIndexKey(ctx, alternateEmail)
 	errCreateVerificationCode := a.storage.CreateVerificationCode(ctx, key, otp)
 	if errCreateVerificationCode != nil {
 		slog.ErrorContext(ctx, "failed to create verification code", "error", errCreateVerificationCode)
-		return errs.NewUnexpected("failed to create verification code", errCreateVerificationCode)
+		return errCreateVerificationCode
+	}
+
+	// If the send fails, the stored code is left in place rather than removed, so the
+	// attempt count and resend cooldown it carries are not reset.
+	errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail, otp)
+	if errSendEmail != nil {
+		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
+		return errs.NewUnexpected("failed to send email", errSendEmail)
 	}
 
 	slog.DebugContext(ctx, "alternate email verification initiated successfully",
@@ -317,13 +328,9 @@ func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	user := &model.User{}
 
 	key := user.BuildAlternateEmailIndexKey(ctx, email.Email)
-	otp, errGetVerificationCode := a.storage.GetVerificationCode(ctx, key)
-	if errGetVerificationCode != nil {
-		return nil, errGetVerificationCode
-	}
-
-	if otp != email.OTP {
-		return nil, errs.NewValidation("invalid verification code")
+	errConsumeVerificationCode := a.storage.ConsumeVerificationCode(ctx, key, email.OTP)
+	if errConsumeVerificationCode != nil {
+		return nil, errConsumeVerificationCode
 	}
 
 	expiresIn := 60 * time.Minute
