@@ -618,11 +618,11 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
-	err := m.checkEmailExists(ctx, alternateEmailInput)
-	if err != nil {
-		return m.errorResponse(err.Error()), nil
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
+	// Sending must not inspect linked state before the caller proves inbox ownership.
 	errLinkAlternateEmail := m.emailHandler.SendVerificationAlternateEmail(ctx, alternateEmailInput)
 	if errLinkAlternateEmail != nil {
 		return m.errorResponse(errLinkAlternateEmail.Error()), nil
@@ -668,17 +668,20 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
-	//
-	errExists := m.checkEmailExists(ctx, email.Email)
-	if errExists != nil {
-		return m.errorResponse(errExists.Error()), nil
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
+	// Prove inbox ownership before inspecting linked state; failures must not expose tokens.
 	authResponse, errVerifyAlternateEmail := m.emailHandler.VerifyAlternateEmail(ctx, email)
 	if errVerifyAlternateEmail != nil {
 		return m.errorResponse(errVerifyAlternateEmail.Error()), nil
 	}
 
+	errExists := m.checkEmailExists(ctx, email.Email)
+	if errExists != nil {
+		return m.errorResponse(errExists.Error()), nil
+	}
 	// Return success response with user metadata
 	response := UserDataResponse{
 		Success: true,

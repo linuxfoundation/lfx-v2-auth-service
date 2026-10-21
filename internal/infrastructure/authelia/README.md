@@ -208,7 +208,6 @@ sequenceDiagram
     Note over User,Storage: Step 1: Send Verification Code
     
     User->>AuthService: Send verification (alternate email)
-    AuthService->>AuthService: Check email not already linked
     AuthService->>AuthService: Generate 6-digit OTP
     AuthService->>NATSKV: Store OTP record (refused during resend cooldown or lockout)<br/>Key: email<br/>Value: OTP, attempts, expiry
     NATSKV-->>AuthService: Success
@@ -219,7 +218,6 @@ sequenceDiagram
     Note over User,Storage: Step 2: Verify OTP Code
     
     User->>AuthService: Verify OTP (email + code)
-    AuthService->>AuthService: Check email not already linked
     AuthService->>NATSKV: Get OTP record by email key
     
     alt OTP Found, Not Expired and Not Locked
@@ -229,7 +227,12 @@ sequenceDiagram
         alt OTP Matches
             AuthService->>NATSKV: Mark OTP record consumed (revision-checked)
             AuthService->>AuthService: Generate identity tokens<br/>(ID token + Access token)
-            AuthService-->>User: Success + tokens
+            AuthService->>AuthService: Check email not already linked
+            alt Conflict or lookup failure
+                AuthService-->>User: Error (tokens discarded)
+            else No existing holder
+                AuthService-->>User: Success + tokens
+            end
         else OTP Mismatch
             AuthService-->>User: Error: Invalid code
         end

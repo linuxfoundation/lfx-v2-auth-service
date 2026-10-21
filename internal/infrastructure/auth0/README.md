@@ -241,6 +241,6 @@ The email verification and linking functionality is exposed via three NATS subje
 - Each OTP code is single-use
 
 **Service-Level Validation:**
-- Checks if email is already linked to another user account
+- Checks if email is already linked to another user account, after successful OTP validation
 - Prevents duplicate alternate email addresses
 - Validates email format before initiating passwordless flow
