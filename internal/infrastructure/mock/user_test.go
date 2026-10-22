@@ -550,11 +550,14 @@ func TestSendVerificationAlternateEmail(t *testing.T) {
 				}
 				writer.users[user.UserID] = user
 			}
+			before := time.Now()
 			require.NoError(t, writer.SendVerificationAlternateEmail(ctx, "Target@Example.com"))
+			after := time.Now()
 			entry := writer.otps["target@example.com"]
 			require.NotNil(t, entry)
 			require.Regexp(t, `^\d{6}$`, entry.otp)
-			require.WithinDuration(t, time.Now().Add(5*time.Minute), entry.expiresAt, time.Second)
+			require.False(t, entry.expiresAt.Before(before.Add(5*time.Minute)), "expiresAt earlier than send time + 5m")
+			require.False(t, entry.expiresAt.After(after.Add(5*time.Minute)), "expiresAt later than return time + 5m")
 		})
 	}
 }

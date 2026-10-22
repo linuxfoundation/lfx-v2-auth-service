@@ -170,19 +170,18 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email.Email))
 
-	// Verify OTP
-	u.otpMutex.RLock()
+	// Verify and consume the OTP atomically so concurrent requests cannot reuse it.
+	u.otpMutex.Lock()
 	entry, exists := u.otps[normalizedEmail]
-	u.otpMutex.RUnlock()
 
 	if !exists {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP not found or expired")
 	}
 
 	// Check if OTP is expired
 	if time.Now().After(entry.expiresAt) {
 		// Clean up expired OTP
-		u.otpMutex.Lock()
 		delete(u.otps, normalizedEmail)
 		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP expired")
@@ -190,11 +189,11 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	// Verify OTP matches
 	if entry.otp != email.OTP {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("invalid OTP")
 	}
 
 	// Consume successful OTP proof before inspecting linked state.
-	u.otpMutex.Lock()
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
 

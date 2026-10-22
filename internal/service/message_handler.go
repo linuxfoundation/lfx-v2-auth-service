@@ -682,6 +682,7 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 	if errExists != nil {
 		return m.errorResponse(errExists.Error()), nil
 	}
+
 	// Return success response with user metadata
 	response := UserDataResponse{
 		Success: true,
