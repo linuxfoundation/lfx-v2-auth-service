@@ -669,7 +669,7 @@ func TestVerifyAlternateEmail(t *testing.T) {
 				case "empty":
 					submitted, wantError = "", "email and OTP are required"
 				case "valid":
-					if state != "unlinked" {
+					if state != "unlinked" && state != "unverified alternate" {
 						wantError = "alternate email already linked"
 					}
 				}

@@ -4224,10 +4224,11 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_AliasDomains(t *testing.T
 		aliasDomains string
 		email        string
 		wantSuccess  bool
+		wantError    string
 	}{
 		{name: "alias domain address is refused", aliasDomains: "linux.com", email: "jane.doe@linux.com"},
 		{name: "alias domain match is case-insensitive", aliasDomains: "linux.com", email: "Jane.Doe@LINUX.com"},
-		{name: "display-name form of an alias domain address is refused", aliasDomains: "linux.com", email: "Jane <jane.doe@linux.com>"},
+		{name: "display-name form of an alias domain address is refused", aliasDomains: "linux.com", email: "Jane <jane.doe@linux.com>", wantError: "invalid email"},
 		{name: "non-alias domain proceeds", aliasDomains: "linux.com", email: "jane.doe@gmail.com", wantSuccess: true},
 		{name: "alias feature disabled proceeds", aliasDomains: "", email: "jane.doe@linux.com", wantSuccess: true},
 	}
@@ -4262,8 +4263,12 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_AliasDomains(t *testing.T
 				}
 				return
 			}
-			if reply.Error != "email domain is reserved for system-managed aliases" {
-				t.Errorf("error = %q, want reserved-domain error", reply.Error)
+			wantError := tt.wantError
+			if wantError == "" {
+				wantError = "email domain is reserved for system-managed aliases"
+			}
+			if reply.Error != wantError {
+				t.Errorf("error = %q, want %q", reply.Error, wantError)
 			}
 			if len(emailHandler.verified) != 0 {
 				t.Errorf("OTP must not be exchanged for a reserved address, got %v", emailHandler.verified)
@@ -4429,7 +4434,7 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking(t *testing.T) {
 		{name: "nil reader", input: `{"email":"target@example.com","otp":"123456"}`, nilReader: true, wantError: "auth_service_unavailable"},
 		{name: "invalid before nil reader", input: `{}`, nilReader: true, wantError: "invalid email"},
 		{name: "reserved before nil reader", input: `{"email":"target@reserved.example.com"}`, nilReader: true, wantError: "email domain is reserved for system-managed aliases"},
-		{name: "non-bare validation unchanged", input: `{"email":"Target <target@example.com>","otp":"123456"}`},
+		{name: "non-bare rejected before proof", input: `{"email":"Target <target@example.com>","otp":"123456"}`, wantError: "invalid email"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			emailHandler := &recordingEmailHandler{}

@@ -197,12 +197,14 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
 
+	// SearchUser does not index alternate emails, so the orchestrator's holder
+	// check cannot see them here; mirror its policy (verified alternates only).
 	for _, user := range u.users {
 		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
 			return nil, errors.NewValidation("alternate email already linked")
 		}
 		for _, altEmail := range user.AlternateEmails {
-			if strings.ToLower(altEmail.Email) == normalizedEmail {
+			if strings.ToLower(altEmail.Email) == normalizedEmail && altEmail.Verified {
 				return nil, errors.NewValidation("alternate email already linked")
 			}
 		}

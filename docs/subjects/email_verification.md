@@ -199,7 +199,7 @@ The request payload must be a JSON object containing the email address and the O
 
 ### Required Fields
 
-- `email`: The email address that received the verification code
+- `email`: The email address that received the verification code. As with send, only a bare address is accepted; display-name and quoted forms return `invalid email` before any OTP exchange.
 - `otp`: The one-time password code sent to the email
 
 ### Reply
@@ -305,7 +305,7 @@ The Authelia flow is fully self-contained — no external provider is called:
 The Mock flow is fully self-contained — no NATS KV or SMTP is involved:
 
 1. **Send verification** (`email_linking.send_verification`): Generates a 6-digit OTP for eligible linked and unlinked addresses, stored in-memory with a 5-minute TTL. The OTP is logged to stdout (no email is sent).
-2. **Verify OTP** (`email_linking.verify`): Checks the submitted code before inspecting linked state. A valid code is consumed before the existing primary/alternate conflict check; no token is generated on conflict. Otherwise, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
+2. **Verify OTP** (`email_linking.verify`): Checks the submitted code before inspecting linked state. A valid code is consumed before the conflict check, which matches the service policy: a primary email or a verified alternate email is a conflict, while an unverified alternate is not; no token is generated on conflict. Otherwise, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
 3. **Link identity** (`user_identity.link`): Refused — the mock cannot verify tokens, so it rejects link requests. Steps 1–2 still work for local testing of the OTP exchange.
 
 > The Mock provider returns `alternate email already linked` (rather than `email already linked`) for an already-linked address — see the note under the error replies above.
