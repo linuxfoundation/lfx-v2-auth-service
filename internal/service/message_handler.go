@@ -136,8 +136,9 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 	return responseJSON
 }
 
-// errUnverifiedPrincipal is returned when a write is requested by a principal
-// that was not established from a verified token.
+// errUnverifiedPrincipal is returned when an operation scoped to the caller's
+// own account is requested by a principal that was not established from a
+// verified token.
 const errUnverifiedPrincipal = "a valid JWT token is required"
 
 // isVerifiedPrincipal reports whether the user returned by a scope-gated

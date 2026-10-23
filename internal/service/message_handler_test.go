@@ -2853,10 +2853,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 					return &model.User{UserID: input}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
-					return &model.User{
-						UserID:     user.UserID,
-						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
-					}, nil
+					return nil, errors.NewUnexpected("GetUser must not be called for an unverified principal")
 				},
 			},
 			expectSuccess: false,
@@ -2870,10 +2867,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 					return &model.User{Username: input}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
-					return &model.User{
-						Username:   user.Username,
-						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
-					}, nil
+					return nil, errors.NewUnexpected("GetUser must not be called for an unverified principal")
 				},
 			},
 			expectSuccess: false,
@@ -2889,10 +2883,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 					return &model.User{Username: input, Sub: input}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
-					return &model.User{
-						Username:   user.Username,
-						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
-					}, nil
+					return nil, errors.NewUnexpected("GetUser must not be called for an unverified principal")
 				},
 			},
 			expectSuccess: false,
