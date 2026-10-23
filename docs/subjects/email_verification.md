@@ -251,7 +251,7 @@ The address already belongs to the calling account, so there is nothing to link.
 After OTP proof, a caller-supplied token yields `already_connected` only when one of these holds:
 
 1. The caller's own record (fetched with service credentials, keyed on the verified principal) has the address as a **verified** primary email, a **verified** `email`-connection identity, or a **verified** alternate email. Matching is case-insensitive.
-2. Otherwise, the holder search finds an account holding the address and that account's `user_id` equals the verified caller's. This covers operator-provisioned primaries, such as Authelia's, that are matched as stored.
+2. Otherwise, the holder search finds an account holding the address and that account's `user_id` equals the verified caller's. A holder with no `user_id` matches when its username equals the username on the caller's own record; Authelia leaves `user_id` empty until a token-verified update persists the user's `sub`. This covers operator-provisioned primaries, such as Authelia's, that are matched as stored.
 
 Social identities (`github`, `google-oauth2`, and so on) never count, even when the provider marks their email verified. An unverified primary or alternate never counts either; it keeps the normal token reply so it can be linked as a verified email identity. A holder that is any other account returns `email already linked`, and a failure while fetching the caller's record or searching holders returns that error. Neither carries tokens.
 

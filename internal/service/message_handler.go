@@ -647,7 +647,12 @@ func (m *messageHandlerOrchestrator) isEmailConnectedToPrincipal(ctx context.Con
 	if holder == nil {
 		return false, nil
 	}
-	if holder.UserID == principal.UserID {
+	// Authelia leaves UserID empty until a token-verified update persists the
+	// user's sub, so a holder without a UserID is matched on its username (the
+	// Authelia storage key) against the caller's canonical record instead.
+	heldByCaller := holder.UserID == principal.UserID ||
+		(holder.UserID == "" && holder.Username != "" && fullUser != nil && holder.Username == fullUser.Username)
+	if heldByCaller {
 		slog.DebugContext(ctx, "email held by caller", "user_id", redaction.Redact(principal.UserID))
 		return true, nil
 	}

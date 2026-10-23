@@ -4562,6 +4562,59 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_OwnAccount(t *testing.T) 
 			wantReply:  alreadyConnected,
 		},
 		{
+			name: "holder without user_id is the caller by username (Authelia sub not persisted)",
+			getUser: func() (*model.User, error) {
+				return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "holder without user_id under another username",
+			getUser: func() (*model.User, error) {
+				return &model.User{Username: "caller"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "other", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "holder without user_id when the caller's record has no username",
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "holder with another user_id and the caller's username",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", Username: "caller"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{UserID: "auth0|other", Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
 			name: "verified alternate held by another user",
 			holder: func(string) (*model.User, error) {
 				return &model.User{UserID: "auth0|other", AlternateEmails: []model.Email{{Email: "target@example.com", Verified: true}}}, nil
