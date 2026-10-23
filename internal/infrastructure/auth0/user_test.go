@@ -805,6 +805,15 @@ func TestUserReaderWriter_MetadataLookup_AudienceTokenRetention(t *testing.T) {
 		assert.Equal(t, "auth0|123456789", user.Sub)
 		assert.Equal(t, "auth0|123456789", user.UserID)
 		assert.Empty(t, user.Token, "non-management token must not be forwarded to the Management API")
+		assert.True(t, user.PrincipalVerified, "a signature-verified JWT must mark the principal verified")
+	})
+
+	t.Run("bare sub and username are not verified principals", func(t *testing.T) {
+		for _, input := range []string{"auth0|123456789", "john.doe"} {
+			user, err := writer.MetadataLookup(ctx, input)
+			require.NoError(t, err)
+			assert.False(t, user.PrincipalVerified, input)
+		}
 	})
 
 	t.Run("un-allow-listed audience is rejected", func(t *testing.T) {

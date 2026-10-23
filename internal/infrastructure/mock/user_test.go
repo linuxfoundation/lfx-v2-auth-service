@@ -57,6 +57,27 @@ func TestUserReaderWriter_MetadataLookup_ScopeGatedRejected(t *testing.T) {
 	})
 }
 
+// TestUserReaderWriter_MetadataLookup_PrincipalVerified verifies that the mock
+// treats only a parsed JWT as the caller, never a bare sub or username.
+func TestUserReaderWriter_MetadataLookup_PrincipalVerified(t *testing.T) {
+	ctx := context.Background()
+	writer := &userWriter{}
+
+	for _, tc := range []struct {
+		input string
+		want  bool
+	}{
+		{createTestJWT(t, "auth0|123456789"), true},
+		{"auth0|123456789", false},
+		{"john.doe", false},
+		{"first.middle.last", false},
+	} {
+		user, err := writer.MetadataLookup(ctx, tc.input)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, user.PrincipalVerified, tc.input)
+	}
+}
+
 // TestUserReaderWriter_MetadataLookup tests the MetadataLookup method for Mock implementation
 func TestUserReaderWriter_MetadataLookup(t *testing.T) {
 	ctx := context.Background()

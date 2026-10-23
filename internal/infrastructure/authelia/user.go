@@ -175,6 +175,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		user.UserID = userInfo.Sub
 		user.Sub = userInfo.Sub
 		user.Username = userInfo.PreferredUsername
+		user.PrincipalVerified = true
 		return user, nil
 	}
 

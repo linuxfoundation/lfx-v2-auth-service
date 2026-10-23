@@ -15,6 +15,8 @@ This document describes the NATS subjects for listing, linking, and unlinking id
 
 Retrieves all identities linked to the authenticated user's account.
 
+`user.auth_token` must be a token the backend verifies (a JWT, or an Authelia access token). A bare `sub` or username is rejected with `a valid JWT token is required`.
+
 **Subject:** `lfx.auth-service.user_identity.list`
 **Pattern:** Request/Reply
 

@@ -231,6 +231,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		// Successfully verified JWT token
 		user.UserID = claims.Subject
 		user.Sub = claims.Subject
+		user.PrincipalVerified = true
 
 		// Only tokens minted for the Auth0 Management API may be forwarded to it
 		// on the user's behalf. Tokens verified via another allow-listed audience

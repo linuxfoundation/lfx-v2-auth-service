@@ -354,6 +354,33 @@ func TestUserReaderWriter_MetadataLookup(t *testing.T) {
 			}
 		})
 	}
+
+	// A bare sub, username, or JWT-shaped username is never a verified principal.
+	writer := &userReaderWriter{}
+	for _, input := range []string{"john", "first.middle.last", "8f14e45f-ceea-467a-9d2b-1c3f2a1e5b6c"} {
+		user, err := writer.MetadataLookup(ctx, input)
+		if err != nil {
+			t.Fatalf("MetadataLookup(%q) unexpected error: %v", input, err)
+		}
+		if user.PrincipalVerified {
+			t.Errorf("MetadataLookup(%q) marked an unverified input as a verified principal", input)
+		}
+	}
+
+	// A token confirmed by the OIDC userinfo endpoint is a verified principal.
+	verified := newUserInfoTestWriter(t, &mockStorageReaderWriter{}, map[string]OIDCUserInfo{
+		"authelia_at_valid": {Sub: "8f14e45f-ceea-467a-9d2b-1c3f2a1e5b6c", PreferredUsername: "john"},
+	})
+	user, err := verified.MetadataLookup(ctx, "authelia_at_valid")
+	if err != nil {
+		t.Fatalf("MetadataLookup(valid token) unexpected error: %v", err)
+	}
+	if !user.PrincipalVerified {
+		t.Error("MetadataLookup(valid token) did not mark the principal verified")
+	}
+	if user.UserID != "8f14e45f-ceea-467a-9d2b-1c3f2a1e5b6c" || user.Sub != user.UserID {
+		t.Errorf("MetadataLookup(valid token) UserID = %q, Sub = %q", user.UserID, user.Sub)
+	}
 }
 
 // TestUserReaderWriter_LinkIdentity_TokenVerification tests that LinkIdentity only
