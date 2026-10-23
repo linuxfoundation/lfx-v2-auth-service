@@ -500,6 +500,7 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 	user := &model.User{}
 
 	// First, try to parse as JWT token to extract the sub
+	subFromJWT := false
 	if cleanToken, isJWT := jwt.LooksLikeJWT(input); isJWT {
 		sub, err := u.extractSubFromJWT(ctx, cleanToken)
 		if err != nil {
@@ -508,9 +509,14 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 		} else {
 			// Successfully extracted sub from JWT
 			input = sub
+			subFromJWT = true
 			slog.InfoContext(ctx, "mock: extracted sub from JWT", "sub", sub)
 		}
 	}
+	// The mock never checks signatures; it treats a parsed JWT as the caller's
+	// own token so self-service reads keep working in local development. Writes
+	// stay refused above via the scope gate.
+	user.PrincipalVerified = subFromJWT
 
 	// Determine lookup strategy based on input format
 	switch {

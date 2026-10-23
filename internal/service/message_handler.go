@@ -425,6 +425,15 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 		return m.errorResponse(err.Error()), nil
 	}
 
+	// Identities are listed only for the caller's own account, so the principal
+	// must come from a token the backend verified, not a bare sub or username.
+	// Token shape alone is not proof: a username like "first.middle.last" parses
+	// as a JWT structure, so rely on the backend's verification flag instead.
+	if user == nil || !user.PrincipalVerified {
+		slog.WarnContext(ctx, "identity list rejected: input is not a verified token")
+		return m.errorResponse(errUnverifiedPrincipal), nil
+	}
+
 	fullUser, err := m.userReader.GetUser(ctx, user)
 	if err != nil {
 		slog.ErrorContext(ctx, "error getting user for identity list",

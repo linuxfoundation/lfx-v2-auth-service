@@ -2747,7 +2747,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
 			mockReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123", Token: input}, nil
+					return &model.User{UserID: "auth0|123", Token: input, PrincipalVerified: true}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 					return &model.User{
@@ -2793,7 +2793,7 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
 			mockReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123", Token: input}, nil
+					return &model.User{UserID: "auth0|123", Token: input, PrincipalVerified: true}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 					return &model.User{UserID: "auth0|123", Identities: nil}, nil
@@ -2846,11 +2846,82 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 			expectError:   "invalid token",
 		},
 		{
+			name:        "bare sub is rejected without reading the user",
+			messageData: []byte(`{"user":{"auth_token":"auth0|victim"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{
+						UserID:     user.UserID,
+						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
+					}, nil
+				},
+			},
+			expectSuccess: false,
+			expectError:   errUnverifiedPrincipal,
+		},
+		{
+			name:        "bare username is rejected without reading the user",
+			messageData: []byte(`{"user":{"auth_token":"victim"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{Username: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{
+						Username:   user.Username,
+						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
+					}, nil
+				},
+			},
+			expectSuccess: false,
+			expectError:   errUnverifiedPrincipal,
+		},
+		{
+			// A three-part dotted username parses as a JWT structure but is
+			// resolved by Authelia as a plain username lookup; it must be rejected.
+			name:        "JWT-shaped username is rejected",
+			messageData: []byte(`{"user":{"auth_token":"first.middle.last"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{Username: input, Sub: input}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{
+						Username:   user.Username,
+						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
+					}, nil
+				},
+			},
+			expectSuccess: false,
+			expectError:   errUnverifiedPrincipal,
+		},
+		{
+			// A verified JWT for a non-management audience leaves Token empty
+			// and must still list the caller's own identities.
+			name:        "verified JWT without forwarded token succeeds",
+			messageData: []byte(`{"user":{"auth_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHwxMjMifQ.c2lnbmF0dXJl"}}`),
+			mockReader: &mockUserServiceReader{
+				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
+					return &model.User{UserID: "auth0|123", Sub: "auth0|123", PrincipalVerified: true}, nil
+				},
+				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					return &model.User{
+						UserID:     "auth0|123",
+						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
+					}, nil
+				},
+			},
+			expectSuccess: true,
+		},
+		{
 			name:        "get user failure",
 			messageData: []byte(`{"user":{"auth_token":"valid-token"}}`),
 			mockReader: &mockUserServiceReader{
 				metadataLookupFunc: func(ctx context.Context, input string) (*model.User, error) {
-					return &model.User{UserID: "auth0|123", Token: input}, nil
+					return &model.User{UserID: "auth0|123", Token: input, PrincipalVerified: true}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
 					return nil, errors.NewNotFound("user not found")

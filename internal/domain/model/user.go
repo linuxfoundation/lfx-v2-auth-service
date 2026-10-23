@@ -37,6 +37,11 @@ type User struct {
 	// PrimaryEmail (Auth0's root email_verified). It is internal-only and never
 	// serialized, so it cannot be supplied or altered by a caller.
 	PrimaryEmailVerified bool `json:"-" yaml:"-"`
+	// PrincipalVerified is set by MetadataLookup only when the user was resolved
+	// from a token the backend verified (a signed JWT for Auth0, the OIDC userinfo
+	// endpoint for Authelia), as opposed to a bare sub or username. It is
+	// internal-only and never serialized, so a caller cannot supply it.
+	PrincipalVerified bool `json:"-" yaml:"-"`
 }
 
 // UserMetadata represents the metadata of a user
