@@ -541,7 +541,9 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 	return responseJSON, nil
 }
 
-func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email string) error {
+// findEmailHolder returns the account that already holds email as its primary,
+// a verified alternate, or a verified email identity, or nil when none does.
+func (m *messageHandlerOrchestrator) findEmailHolder(ctx context.Context, email string) (*model.User, error) {
 
 	email = strings.ToLower(strings.TrimSpace(email))
 
@@ -549,7 +551,7 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 	for _, criteria := range []string{constants.CriteriaTypeAlternateEmail, constants.CriteriaTypeEmail} {
 		user, errSearch := m.searchByEmail(ctx, criteria, email)
 		if errSearch != nil && !errors.As(errSearch, &notFound) {
-			return errSearch
+			return nil, errSearch
 		}
 		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
@@ -558,14 +560,14 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 			// unverified Auth0 record never blocks here. Authelia and mock users
 			// are provisioned by an operator and are matched as stored.
 			if strings.EqualFold(user.PrimaryEmail, email) {
-				return errs.NewValidation("email already linked")
+				return user, nil
 			}
 
 			// Authelia and Mock adapters expose linked emails via AlternateEmails;
 			// the Auth0 adapter exposes them as identities with Connection == "email".
 			for _, alternateEmail := range user.AlternateEmails {
 				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.Verified {
-					return errs.NewValidation("email already linked")
+					return user, nil
 				}
 			}
 			for _, id := range user.Identities {
@@ -573,13 +575,83 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 					continue
 				}
 				if strings.EqualFold(id.Email, email) && id.EmailVerified {
-					return errs.NewValidation("email already linked")
+					return user, nil
 				}
 			}
 		}
 	}
 
+	return nil, nil
+}
+
+func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email string) error {
+	holder, errFind := m.findEmailHolder(ctx, email)
+	if errFind != nil {
+		return errFind
+	}
+	if holder != nil {
+		return errs.NewValidation("email already linked")
+	}
 	return nil
+}
+
+// ownsVerifiedEmail reports whether user's own record holds email as a verified
+// primary, a verified email-connection identity, or a verified alternate.
+// Social identities and unverified addresses never count, whatever the
+// provider reports for them.
+func ownsVerifiedEmail(user *model.User, email string) bool {
+	if user == nil {
+		return false
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+
+	if user.PrimaryEmailVerified && strings.EqualFold(strings.TrimSpace(user.PrimaryEmail), email) {
+		return true
+	}
+	for _, id := range user.Identities {
+		if id.Connection == constants.EmailConnection && id.EmailVerified && strings.EqualFold(strings.TrimSpace(id.Email), email) {
+			return true
+		}
+	}
+	for _, alternateEmail := range user.AlternateEmails {
+		if alternateEmail.Verified && strings.EqualFold(strings.TrimSpace(alternateEmail.Email), email) {
+			return true
+		}
+	}
+	return false
+}
+
+// isEmailConnectedToPrincipal reports whether a proven email already belongs to
+// the verified caller: their own record holds it verified, or the account that
+// holds it is the caller's. Another holder is a conflict.
+func (m *messageHandlerOrchestrator) isEmailConnectedToPrincipal(ctx context.Context, principal *model.User, email string) (bool, error) {
+	// Fetch the canonical record with the service's credentials (empty Token):
+	// Auth0 keys on UserID over M2M, Authelia on Username or Sub.
+	fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{
+		UserID:   principal.UserID,
+		Sub:      principal.Sub,
+		Username: principal.Username,
+	})
+	if errGetUser != nil {
+		return false, errGetUser
+	}
+	if ownsVerifiedEmail(fullUser, email) {
+		slog.DebugContext(ctx, "email already connected to caller", "user_id", redaction.Redact(principal.UserID))
+		return true, nil
+	}
+
+	holder, errFind := m.findEmailHolder(ctx, email)
+	if errFind != nil {
+		return false, errFind
+	}
+	if holder == nil {
+		return false, nil
+	}
+	if holder.UserID == principal.UserID {
+		slog.DebugContext(ctx, "email held by caller", "user_id", redaction.Redact(principal.UserID))
+		return true, nil
+	}
+	return false, errs.NewValidation("email already linked")
 }
 
 // StartEmailLinking starts the email linking process
@@ -642,6 +714,31 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 	return responseJSON, nil
 }
 
+// verifyEmailLinkingRequest represents the JSON payload for email_linking.verify
+// requests. user.auth_token is optional; when present it identifies the caller
+// so an address they already own can be reported as already connected.
+type verifyEmailLinkingRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Email string `json:"email"`
+	OTP   string `json:"otp"`
+}
+
+// The already-connected reply must avoid the substrings Self Serve treats as
+// a linked-to-another-account error ("already linked", "belongs to an
+// existing", "existing lfid account").
+const (
+	emailAlreadyConnectedMessage = "email already connected to this account"
+	emailAlreadyConnectedStatus  = "already_connected"
+)
+
+// emailLinkingStatusData is the data payload of the already-connected reply.
+// It carries no tokens, so nothing can be linked from it.
+type emailLinkingStatusData struct {
+	Status string `json:"status"`
+}
+
 // VerifyEmailLinking verifies the email linking
 func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
@@ -649,12 +746,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("email service unavailable"), nil
 	}
 
-	email := &model.Email{}
-	err := json.Unmarshal(msg.Data(), email)
+	var request verifyEmailLinkingRequest
+	err := json.Unmarshal(msg.Data(), &request)
 	if err != nil {
 		responseJSON := m.errorResponse("failed to unmarshal email data")
 		return responseJSON, nil
 	}
+	email := &model.Email{Email: request.Email, OTP: request.OTP}
 
 	if !email.IsValidEmail() {
 		return m.errorResponse("invalid email"), nil
@@ -677,15 +775,48 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
+	// Resolve the optional caller before proof, so a bad token never consumes
+	// the code. Without a token the legacy behavior is unchanged.
+	var principal *model.User
+	if authToken := strings.TrimSpace(request.User.AuthToken); authToken != "" {
+		user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
+		if errLookup != nil {
+			return m.errorResponse(errLookup.Error()), nil
+		}
+		if !isVerifiedPrincipal(user) {
+			return m.errorResponse(errUnverifiedPrincipal), nil
+		}
+		principal = user
+	}
+
 	// Prove inbox ownership before inspecting linked state; failures must not expose tokens.
 	authResponse, errVerifyAlternateEmail := m.emailHandler.VerifyAlternateEmail(ctx, email)
 	if errVerifyAlternateEmail != nil {
 		return m.errorResponse(errVerifyAlternateEmail.Error()), nil
 	}
 
-	errExists := m.checkEmailExists(ctx, email.Email)
-	if errExists != nil {
-		return m.errorResponse(errExists.Error()), nil
+	if principal == nil {
+		errExists := m.checkEmailExists(ctx, email.Email)
+		if errExists != nil {
+			return m.errorResponse(errExists.Error()), nil
+		}
+	} else {
+		connected, errConnected := m.isEmailConnectedToPrincipal(ctx, principal, email.Email)
+		if errConnected != nil {
+			return m.errorResponse(errConnected.Error()), nil
+		}
+		if connected {
+			response := UserDataResponse{
+				Success: true,
+				Message: emailAlreadyConnectedMessage,
+				Data:    emailLinkingStatusData{Status: emailAlreadyConnectedStatus},
+			}
+			responseJSON, errMarshal := json.Marshal(response)
+			if errMarshal != nil {
+				return m.errorResponse("failed to marshal response"), nil
+			}
+			return responseJSON, nil
+		}
 	}
 
 	// Return success response with user metadata
