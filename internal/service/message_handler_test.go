@@ -2899,6 +2899,9 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 					return &model.User{UserID: "auth0|123", Sub: "auth0|123", PrincipalVerified: true}, nil
 				},
 				getUserFunc: func(ctx context.Context, user *model.User) (*model.User, error) {
+					if user.UserID != "auth0|123" {
+						return nil, errors.NewUnexpected("GetUser called for an unexpected account")
+					}
 					return &model.User{
 						UserID:     "auth0|123",
 						Identities: []model.Identity{{Provider: "github", IdentityID: "gh456", IsSocial: true}},
@@ -2906,6 +2909,17 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 				},
 			},
 			expectSuccess: true,
+			validateIdentities: func(t *testing.T, result []byte) {
+				var response struct {
+					Data []identityResponse `json:"data"`
+				}
+				if err := json.Unmarshal(result, &response); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if len(response.Data) != 1 || response.Data[0].Provider != "github" || response.Data[0].UserID != "gh456" {
+					t.Errorf("expected the github/gh456 identity, got %+v", response.Data)
+				}
+			},
 		},
 		{
 			name:        "get user failure",
