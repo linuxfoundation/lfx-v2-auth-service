@@ -121,7 +121,7 @@ func (u *userWriter) UpdateUser(ctx context.Context, _ *model.User) (*model.User
 	return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
 }
 
-// SendVerificationAlternateEmail is a no-op in the mock adapter.
+// SendVerificationAlternateEmail generates an in-memory OTP without delivering email.
 func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
 
@@ -131,21 +131,7 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 		return errors.NewValidation("invalid email format")
 	}
 
-	// Check if email is already registered as primary or alternate email
 	normalizedEmail := strings.ToLower(strings.TrimSpace(alternateEmail))
-	for _, user := range u.users {
-		// Check primary email
-		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
-			return errors.NewValidation("alternate email already linked")
-		}
-		// Check alternate emails
-		for _, altEmail := range user.AlternateEmails {
-			if strings.ToLower(altEmail.Email) == normalizedEmail {
-				return errors.NewValidation("alternate email already linked")
-			}
-		}
-	}
-
 	// Generate a 6-digit OTP
 	otp, err := password.OnlyNumbers(6)
 	if err != nil {
@@ -184,31 +170,18 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email.Email))
 
-	// Check if email is already linked (re-check to prevent race conditions)
-	for _, user := range u.users {
-		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
-			return nil, errors.NewValidation("alternate email already linked")
-		}
-		for _, altEmail := range user.AlternateEmails {
-			if strings.ToLower(altEmail.Email) == normalizedEmail {
-				return nil, errors.NewValidation("alternate email already linked")
-			}
-		}
-	}
-
-	// Verify OTP
-	u.otpMutex.RLock()
+	// Verify and consume the OTP atomically so concurrent requests cannot reuse it.
+	u.otpMutex.Lock()
 	entry, exists := u.otps[normalizedEmail]
-	u.otpMutex.RUnlock()
 
 	if !exists {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP not found or expired")
 	}
 
 	// Check if OTP is expired
 	if time.Now().After(entry.expiresAt) {
 		// Clean up expired OTP
-		u.otpMutex.Lock()
 		delete(u.otps, normalizedEmail)
 		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP expired")
@@ -216,13 +189,26 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	// Verify OTP matches
 	if entry.otp != email.OTP {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("invalid OTP")
 	}
 
-	// OTP is valid, clean it up
-	u.otpMutex.Lock()
+	// Consume successful OTP proof before inspecting linked state.
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
+
+	// SearchUser does not index alternate emails, so the orchestrator's holder
+	// check cannot see them here; mirror its policy (verified alternates only).
+	for _, user := range u.users {
+		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
+			return nil, errors.NewValidation("alternate email already linked")
+		}
+		for _, altEmail := range user.AlternateEmails {
+			if strings.ToLower(altEmail.Email) == normalizedEmail && altEmail.Verified {
+				return nil, errors.NewValidation("alternate email already linked")
+			}
+		}
+	}
 
 	// Generate an identity token for the verified email using email| sub prefix
 	idToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(email.Email, fmt.Sprintf("email|%s", normalizedEmail), 1*time.Hour)

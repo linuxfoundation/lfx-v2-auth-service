@@ -606,8 +606,7 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 	// Only a bare address is accepted: display-name or quoted forms accepted by
 	// IsValidEmail would otherwise let the checked domain differ from the
 	// string sent to the provider.
-	parsed, errParse := mail.ParseAddress(alternateEmailInput)
-	if errParse != nil || !strings.EqualFold(parsed.Address, alternateEmailInput) {
+	if !isBareEmailAddress(alternateEmailInput) {
 		return m.errorResponse("invalid email"), nil
 	}
 	at := strings.LastIndex(alternateEmailInput, "@")
@@ -618,11 +617,11 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
-	err := m.checkEmailExists(ctx, alternateEmailInput)
-	if err != nil {
-		return m.errorResponse(err.Error()), nil
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
+	// Sending must not inspect linked state before the caller proves inbox ownership.
 	errLinkAlternateEmail := m.emailHandler.SendVerificationAlternateEmail(ctx, alternateEmailInput)
 	if errLinkAlternateEmail != nil {
 		return m.errorResponse(errLinkAlternateEmail.Error()), nil
@@ -661,6 +660,12 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("invalid email"), nil
 	}
 
+	// Mirror the send_verification bare-address rule: the holder lookup after
+	// proof must search the same address the provider verified.
+	if !isBareEmailAddress(strings.TrimSpace(email.Email)) {
+		return m.errorResponse("invalid email"), nil
+	}
+
 	// Mirror the send_verification guard: alias-domain addresses are claimed
 	// only through add_alias, so a code obtained outside this service (or issued
 	// before the guard existed) cannot be exchanged for one either.
@@ -668,15 +673,19 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
-	//
-	errExists := m.checkEmailExists(ctx, email.Email)
-	if errExists != nil {
-		return m.errorResponse(errExists.Error()), nil
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
 	}
 
+	// Prove inbox ownership before inspecting linked state; failures must not expose tokens.
 	authResponse, errVerifyAlternateEmail := m.emailHandler.VerifyAlternateEmail(ctx, email)
 	if errVerifyAlternateEmail != nil {
 		return m.errorResponse(errVerifyAlternateEmail.Error()), nil
+	}
+
+	errExists := m.checkEmailExists(ctx, email.Email)
+	if errExists != nil {
+		return m.errorResponse(errExists.Error()), nil
 	}
 
 	// Return success response with user metadata
@@ -1022,6 +1031,13 @@ func isAliasDomainAddress(address string) bool {
 	}
 	at := strings.LastIndex(parsed.Address, "@")
 	return at >= 0 && isAllowedAliasDomain(parsed.Address[at+1:])
+}
+
+// isBareEmailAddress reports whether address is a plain addr-spec, rejecting
+// display-name and quoted forms that net/mail would otherwise accept.
+func isBareEmailAddress(address string) bool {
+	parsed, err := mail.ParseAddress(address)
+	return err == nil && strings.EqualFold(parsed.Address, address)
 }
 
 // hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.

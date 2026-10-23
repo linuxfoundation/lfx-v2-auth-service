@@ -16,6 +16,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/stretchr/testify/require"
 )
 
 // mockTransportMessenger is a mock implementation of port.TransportMessenger for testing
@@ -4061,15 +4062,23 @@ func TestHasEmailDomainSuffix(t *testing.T) {
 type recordingEmailHandler struct {
 	sent     []string
 	verified []string
+	onSend   func(string) error
+	onVerify func(*model.Email) (*model.AuthResponse, error)
 }
 
 func (r *recordingEmailHandler) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	r.sent = append(r.sent, alternateEmail)
+	if r.onSend != nil {
+		return r.onSend(alternateEmail)
+	}
 	return nil
 }
 
 func (r *recordingEmailHandler) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	r.verified = append(r.verified, email.Email)
+	if r.onVerify != nil {
+		return r.onVerify(email)
+	}
 	return &model.AuthResponse{IDToken: "id-token"}, nil
 }
 
@@ -4215,10 +4224,11 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_AliasDomains(t *testing.T
 		aliasDomains string
 		email        string
 		wantSuccess  bool
+		wantError    string
 	}{
 		{name: "alias domain address is refused", aliasDomains: "linux.com", email: "jane.doe@linux.com"},
 		{name: "alias domain match is case-insensitive", aliasDomains: "linux.com", email: "Jane.Doe@LINUX.com"},
-		{name: "display-name form of an alias domain address is refused", aliasDomains: "linux.com", email: "Jane <jane.doe@linux.com>"},
+		{name: "display-name form of an alias domain address is refused", aliasDomains: "linux.com", email: "Jane <jane.doe@linux.com>", wantError: "invalid email"},
 		{name: "non-alias domain proceeds", aliasDomains: "linux.com", email: "jane.doe@gmail.com", wantSuccess: true},
 		{name: "alias feature disabled proceeds", aliasDomains: "", email: "jane.doe@linux.com", wantSuccess: true},
 	}
@@ -4253,11 +4263,201 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_AliasDomains(t *testing.T
 				}
 				return
 			}
-			if reply.Error != "email domain is reserved for system-managed aliases" {
-				t.Errorf("error = %q, want reserved-domain error", reply.Error)
+			wantError := tt.wantError
+			if wantError == "" {
+				wantError = "email domain is reserved for system-managed aliases"
+			}
+			if reply.Error != wantError {
+				t.Errorf("error = %q, want %q", reply.Error, wantError)
 			}
 			if len(emailHandler.verified) != 0 {
 				t.Errorf("OTP must not be exchanged for a reserved address, got %v", emailHandler.verified)
+			}
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_StartEmailLinking(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, "reserved.example.com")
+	for _, state := range []string{"unlinked", "primary", "alternate", "lookup outage"} {
+		for _, sendFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/send failure=%v", state, sendFailure), func(t *testing.T) {
+				lookups := 0
+				reader := &mockUserServiceReader{searchUserFunc: func(_ context.Context, _ *model.User, _ string) (*model.User, error) {
+					lookups++
+					switch state {
+					case "primary":
+						return &model.User{UserID: "holder", PrimaryEmail: "target@example.com"}, nil
+					case "alternate":
+						return &model.User{UserID: "holder", AlternateEmails: []model.Email{{Email: "target@example.com", Verified: true}}}, nil
+					case "lookup outage":
+						return nil, errors.NewUnexpected("lookup unavailable")
+					default:
+						return nil, errors.NewNotFound("not found")
+					}
+				}}
+				emailHandler := &recordingEmailHandler{onSend: func(email string) error {
+					require.Equal(t, "target@example.com", email)
+					if sendFailure {
+						return errors.NewUnexpected("delivery failed")
+					}
+					return nil
+				}}
+				handler := &messageHandlerOrchestrator{userReader: reader, emailHandler: emailHandler}
+				result, err := handler.StartEmailLinking(ctx, &mockTransportMessenger{data: []byte("  Target@Example.com  ")})
+				require.NoError(t, err)
+				require.Zero(t, lookups, "send must not inspect linked state")
+				require.Equal(t, []string{"target@example.com"}, emailHandler.sent)
+				want := `{"success":true,"message":"alternate email verification sent"}`
+				if sendFailure {
+					want = `{"success":false,"error":"delivery failed"}`
+				}
+				require.Equal(t, want, string(result), "responses must be byte-identical across linked states")
+			})
+		}
+	}
+
+	for _, tt := range []struct {
+		name, input, wantError string
+		nilEmail, nilReader    bool
+	}{
+		{name: "empty", wantError: "alternate email is required"},
+		{name: "invalid", input: "not-an-email", wantError: "invalid email"},
+		{name: "display name", input: "Target <target@example.com>", wantError: "invalid email"},
+		{name: "quoted", input: `"a b"@example.com`, wantError: "invalid email"},
+		{name: "reserved", input: "target@reserved.example.com", wantError: "email domain is reserved for system-managed aliases"},
+		{name: "nil email first", nilEmail: true, wantError: "email service unavailable"},
+		{name: "nil reader", input: "target@example.com", nilReader: true, wantError: "auth_service_unavailable"},
+		{name: "invalid before nil reader", input: "invalid", nilReader: true, wantError: "invalid email"},
+		{name: "reserved before nil reader", input: "target@reserved.example.com", nilReader: true, wantError: "email domain is reserved for system-managed aliases"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			emailHandler := &recordingEmailHandler{}
+			handler := &messageHandlerOrchestrator{emailHandler: emailHandler}
+			if !tt.nilReader {
+				handler.userReader = &mockUserServiceReader{searchUserFunc: func(context.Context, *model.User, string) (*model.User, error) {
+					t.Fatal("guard must precede lookup")
+					return nil, nil
+				}}
+			}
+			if tt.nilEmail {
+				handler.emailHandler = nil
+			}
+			result, err := handler.StartEmailLinking(ctx, &mockTransportMessenger{data: []byte(tt.input)})
+			require.NoError(t, err)
+			require.Equal(t, string(handler.errorResponse(tt.wantError)), string(result))
+			require.Empty(t, emailHandler.sent)
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_VerifyEmailLinking(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, "reserved.example.com")
+	for _, state := range []string{"unlinked", "primary", "alternate", "identity", "unverified", "other address", "alternate lookup outage", "primary lookup outage"} {
+		for _, otpError := range []string{"", "invalid OTP", "OTP expired", "email and OTP are required", "provider unavailable"} {
+			t.Run(state+"/"+otpError, func(t *testing.T) {
+				events := []string{}
+				reader := &mockUserServiceReader{searchUserFunc: func(_ context.Context, user *model.User, criteria string) (*model.User, error) {
+					events = append(events, criteria)
+					require.Equal(t, "target@example.com", user.PrimaryEmail)
+					if criteria == constants.CriteriaTypeAlternateEmail {
+						require.Equal(t, []model.Email{{Email: "target@example.com"}}, user.AlternateEmails)
+					}
+					switch {
+					case state == "alternate lookup outage" || (state == "primary lookup outage" && criteria == constants.CriteriaTypeEmail):
+						return nil, errors.NewUnexpected("lookup unavailable")
+					case state == "primary" && criteria == constants.CriteriaTypeEmail:
+						return &model.User{UserID: "holder", PrimaryEmail: "TARGET@example.com"}, nil
+					case state == "alternate" || state == "unverified":
+						return &model.User{UserID: "holder", AlternateEmails: []model.Email{{Email: "TARGET@example.com", Verified: state == "alternate"}}}, nil
+					case state == "identity":
+						return &model.User{UserID: "holder", Identities: []model.Identity{{Connection: constants.EmailConnection, Email: "target@example.com", EmailVerified: true}}}, nil
+					case state == "other address":
+						return &model.User{UserID: "holder", PrimaryEmail: "other@example.com"}, nil
+					default:
+						return nil, errors.NewNotFound("not found")
+					}
+				}}
+				tokens := &model.AuthResponse{IDToken: "discarded-id-token", AccessToken: "discarded-access-token"}
+				emailHandler := &recordingEmailHandler{onVerify: func(email *model.Email) (*model.AuthResponse, error) {
+					events = append(events, "verify")
+					require.Equal(t, "Target@Example.com", email.Email)
+					require.Equal(t, "123456", email.OTP)
+					if otpError != "" {
+						return tokens, errors.NewValidation(otpError)
+					}
+					return tokens, nil
+				}}
+				handler := &messageHandlerOrchestrator{userReader: reader, emailHandler: emailHandler}
+				result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: []byte(`{"email":"Target@Example.com","otp":"123456"}`)})
+				require.NoError(t, err)
+				wantEvents, wantError := []string{"verify"}, otpError
+				if otpError == "" {
+					wantEvents = append(wantEvents, constants.CriteriaTypeAlternateEmail)
+					if state != "alternate" && state != "identity" && state != "alternate lookup outage" {
+						wantEvents = append(wantEvents, constants.CriteriaTypeEmail)
+					}
+					switch state {
+					case "primary", "alternate", "identity":
+						wantError = "email already linked"
+					case "alternate lookup outage", "primary lookup outage":
+						wantError = "lookup unavailable"
+					}
+				}
+				require.Equal(t, wantEvents, events, "only successful proof may trigger lookups")
+				require.Equal(t, []string{"Target@Example.com"}, emailHandler.verified)
+				var reply UserDataResponse
+				require.NoError(t, json.Unmarshal(result, &reply))
+				if wantError != "" {
+					require.Equal(t, string(handler.errorResponse(wantError)), string(result))
+					require.Nil(t, reply.Data, "failure must not expose either token")
+				} else {
+					require.True(t, reply.Success)
+					require.Equal(t, tokens.IDToken, reply.Data.(map[string]any)["id_token"])
+					require.Equal(t, tokens.AccessToken, reply.Data.(map[string]any)["access_token"])
+				}
+			})
+		}
+	}
+
+	for _, tt := range []struct {
+		name, input, wantError string
+		nilEmail, nilReader    bool
+	}{
+		{name: "bad JSON", input: "{", wantError: "failed to unmarshal email data"},
+		{name: "empty email", input: `{}`, wantError: "invalid email"},
+		{name: "invalid", input: `{"email":"invalid"}`, wantError: "invalid email"},
+		{name: "reserved", input: `{"email":"target@reserved.example.com"}`, wantError: "email domain is reserved for system-managed aliases"},
+		{name: "nil email first", input: "{", nilEmail: true, wantError: "email service unavailable"},
+		{name: "nil reader", input: `{"email":"target@example.com","otp":"123456"}`, nilReader: true, wantError: "auth_service_unavailable"},
+		{name: "invalid before nil reader", input: `{}`, nilReader: true, wantError: "invalid email"},
+		{name: "reserved before nil reader", input: `{"email":"target@reserved.example.com"}`, nilReader: true, wantError: "email domain is reserved for system-managed aliases"},
+		{name: "non-bare rejected before proof", input: `{"email":"Target <target@example.com>","otp":"123456"}`, wantError: "invalid email"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			emailHandler := &recordingEmailHandler{}
+			handler := &messageHandlerOrchestrator{emailHandler: emailHandler}
+			if !tt.nilReader {
+				handler.userReader = &mockUserServiceReader{searchUserFunc: func(context.Context, *model.User, string) (*model.User, error) {
+					require.Empty(t, tt.wantError, "guard must precede lookup")
+					return nil, errors.NewNotFound("not found")
+				}}
+			}
+			if tt.nilEmail {
+				handler.emailHandler = nil
+			}
+			result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: []byte(tt.input)})
+			require.NoError(t, err)
+			if tt.wantError == "" {
+				require.Len(t, emailHandler.verified, 1)
+				var reply UserDataResponse
+				require.NoError(t, json.Unmarshal(result, &reply))
+				require.True(t, reply.Success)
+			} else {
+				require.Equal(t, string(handler.errorResponse(tt.wantError)), string(result))
+				require.Empty(t, emailHandler.verified)
 			}
 		})
 	}

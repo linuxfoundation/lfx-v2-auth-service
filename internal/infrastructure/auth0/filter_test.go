@@ -288,6 +288,18 @@ func Test_emailFilter_Filter(t *testing.T) {
 		wantErr   bool
 	}{
 		{
+			name: "no match for standalone verified passwordless primary identity",
+			user: &model.User{PrimaryEmail: "new@example.com"},
+			auth0User: &Auth0User{
+				Email:         "new@example.com",
+				EmailVerified: true,
+				Identities: []Auth0Identity{
+					{Connection: emailAuthenticationFilter, UserID: "standalone"},
+				},
+			},
+			wantMatch: false,
+		},
+		{
 			name: "matches when connection is Username-Password-Authentication",
 			user: &model.User{PrimaryEmail: "test@example.com"},
 			auth0User: &Auth0User{
@@ -582,6 +594,38 @@ func Test_alternateEmailFilter_Filter(t *testing.T) {
 		wantMatch bool
 		wantErr   bool
 	}{
+		{
+			name: "no match for standalone verified passwordless primary identity",
+			user: &model.User{AlternateEmails: []model.Email{{Email: "new@example.com"}}},
+			auth0User: &Auth0User{
+				Email:         "new@example.com",
+				EmailVerified: true,
+				Identities: []Auth0Identity{
+					{Connection: emailAuthenticationFilter, UserID: "standalone"},
+				},
+			},
+			wantMatch: false,
+		},
+		{
+			name: "matches verified passwordless secondary identity on canonical account",
+			user: &model.User{AlternateEmails: []model.Email{{Email: "linked@example.com"}}},
+			auth0User: &Auth0User{
+				Email:         "primary@example.com",
+				EmailVerified: true,
+				Identities: []Auth0Identity{
+					{Connection: usernamePasswordAuthenticationFilter, UserID: "canonical"},
+					{
+						Connection: emailAuthenticationFilter,
+						UserID:     "linked",
+						ProfileData: &Auth0ProfileData{
+							Email:         "linked@example.com",
+							EmailVerified: true,
+						},
+					},
+				},
+			},
+			wantMatch: true,
+		},
 		{
 			name: "matches when alternate email and connection match",
 			user: &model.User{
