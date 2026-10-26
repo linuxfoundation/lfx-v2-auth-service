@@ -292,7 +292,7 @@ For complete flow details, see the [Email Verification Documentation](../../../d
 The OTP verification flow exposes the following NATS subjects:
 
 - `lfx.auth-service.email_linking.send_verification` - Initiates OTP verification flow
-- `lfx.auth-service.email_linking.verify` - Validates OTP and returns identity token
+- `lfx.auth-service.email_linking.verify` - Validates OTP and returns an identity token, or a token-free `already_connected` success when optional `user.auth_token` identifies the email's owner. See the [Email Verification Documentation](../../../docs/subjects/email_verification.md).
 - `lfx.auth-service.user_identity.link` - Links verified identity to user account
 
 ## Known Limitations

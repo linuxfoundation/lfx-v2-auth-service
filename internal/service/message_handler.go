@@ -584,13 +584,15 @@ func (m *messageHandlerOrchestrator) findEmailHolder(ctx context.Context, email 
 	return nil, nil
 }
 
+// checkEmailExists returns a validation error when an account already holds email,
+// preserving the conflict response for verification requests without a caller token.
 func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email string) error {
 	holder, errFind := m.findEmailHolder(ctx, email)
 	if errFind != nil {
 		return errFind
 	}
 	if holder != nil {
-		return errs.NewValidation("email already linked")
+		return errs.NewValidation(errEmailAlreadyLinked)
 	}
 	return nil
 }
@@ -656,7 +658,7 @@ func (m *messageHandlerOrchestrator) isEmailConnectedToPrincipal(ctx context.Con
 		slog.DebugContext(ctx, "email held by caller", "user_id", redaction.Redact(principal.UserID))
 		return true, nil
 	}
-	return false, errs.NewValidation("email already linked")
+	return false, errs.NewValidation(errEmailAlreadyLinked)
 }
 
 // StartEmailLinking starts the email linking process
@@ -730,6 +732,9 @@ type verifyEmailLinkingRequest struct {
 	OTP   string `json:"otp"`
 }
 
+// errEmailAlreadyLinked is shared by both conflict paths; Self Serve matches its text.
+const errEmailAlreadyLinked = "email already linked"
+
 // The already-connected reply must avoid the substrings Self Serve treats as
 // a linked-to-another-account error ("already linked", "belongs to an
 // existing", "existing lfid account").
@@ -744,7 +749,9 @@ type emailLinkingStatusData struct {
 	Status string `json:"status"`
 }
 
-// VerifyEmailLinking verifies the email linking
+// VerifyEmailLinking proves inbox ownership with an OTP and returns linking tokens.
+// An optional caller token is validated before OTP proof; if the caller already
+// owns the proven email, the reply reports already_connected without tokens.
 func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.emailHandler == nil {
