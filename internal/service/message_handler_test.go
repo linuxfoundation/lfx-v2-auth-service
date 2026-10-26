@@ -4538,3 +4538,344 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnsVerifiedEmail(t *testing.T) {
+	const email = "target@example.com"
+	tests := []struct {
+		name string
+		user *model.User
+		want bool
+	}{
+		{name: "nil user", user: nil},
+		{name: "verified primary", user: &model.User{PrimaryEmail: email, PrimaryEmailVerified: true}, want: true},
+		{name: "verified primary is case-insensitive", user: &model.User{PrimaryEmail: " TARGET@Example.com ", PrimaryEmailVerified: true}, want: true},
+		{name: "unverified primary", user: &model.User{PrimaryEmail: email}},
+		{name: "verified email identity", user: &model.User{Identities: []model.Identity{{Connection: constants.EmailConnection, Email: "Target@Example.com", EmailVerified: true}}}, want: true},
+		{name: "unverified email identity", user: &model.User{Identities: []model.Identity{{Connection: constants.EmailConnection, Email: email}}}},
+		{name: "verified github identity", user: &model.User{Identities: []model.Identity{{Connection: "github", Email: email, EmailVerified: true, IsSocial: true}}}},
+		{name: "verified google identity", user: &model.User{Identities: []model.Identity{{Connection: "google-oauth2", Email: email, EmailVerified: true, IsSocial: true}}}},
+		{name: "verified alternate", user: &model.User{AlternateEmails: []model.Email{{Email: "TARGET@example.com", Verified: true}}}, want: true},
+		{name: "unverified alternate", user: &model.User{AlternateEmails: []model.Email{{Email: email}}}},
+		{name: "different address", user: &model.User{
+			PrimaryEmail:         "other@example.com",
+			PrimaryEmailVerified: true,
+			Identities:           []model.Identity{{Connection: constants.EmailConnection, Email: "other@example.com", EmailVerified: true}},
+			AlternateEmails:      []model.Email{{Email: "other@example.com", Verified: true}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ownsVerifiedEmail(tt.user, " Target@Example.com "))
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_VerifyEmailLinking_OwnAccount(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(constants.AllowedAliasDomainsEnvKey, "reserved.example.com")
+
+	const (
+		authToken          = "management-token"
+		alreadyConnected   = `{"success":true,"message":"email already connected to this account","data":{"status":"already_connected"}}`
+		lookupEvent        = "lookup"
+		verifyEvent        = "verify"
+		getUserEvent       = "get_user"
+		alternateCriteria  = constants.CriteriaTypeAlternateEmail
+		primaryCriteria    = constants.CriteriaTypeEmail
+		emailAlreadyLinked = "email already linked"
+	)
+	principal := &model.User{UserID: "auth0|caller", Sub: "auth0|caller", Username: "caller", Token: authToken}
+	notFound := func(string) (*model.User, error) { return nil, errors.NewNotFound("not found") }
+
+	tests := []struct {
+		name       string
+		authToken  string
+		lookup     func() (*model.User, error)
+		otpError   string
+		getUser    func() (*model.User, error)
+		holder     func(criteria string) (*model.User, error)
+		wantEvents []string
+		wantReply  string
+		wantError  string
+		wantTokens bool
+	}{
+		{
+			name: "own verified primary",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", PrimaryEmail: "TARGET@example.com", PrimaryEmailVerified: true}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "own verified email identity",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", Identities: []model.Identity{{Connection: constants.EmailConnection, Email: "target@example.com", EmailVerified: true}}}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "own verified alternate",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", AlternateEmails: []model.Email{{Email: "target@example.com", Verified: true}}}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "holder is the caller (operator-provisioned primary)",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", PrimaryEmail: "target@example.com"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{UserID: "auth0|caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "holder without user_id is the caller by username (Authelia sub not persisted)",
+			getUser: func() (*model.User, error) {
+				return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantReply:  alreadyConnected,
+		},
+		{
+			name: "holder without user_id under another username",
+			getUser: func() (*model.User, error) {
+				return &model.User{Username: "caller"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "other", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "holder without user_id when the caller's record has no username",
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "holder with another user_id and the caller's username",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", Username: "caller"}, nil
+			},
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{UserID: "auth0|other", Username: "caller", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "verified alternate held by another user",
+			holder: func(string) (*model.User, error) {
+				return &model.User{UserID: "auth0|other", AlternateEmails: []model.Email{{Email: "target@example.com", Verified: true}}}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "primary held by another user",
+			holder: func(criteria string) (*model.User, error) {
+				if criteria == primaryCriteria {
+					return &model.User{UserID: "auth0|other", PrimaryEmail: "target@example.com"}, nil
+				}
+				return nil, errors.NewNotFound("not found")
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantError:  emailAlreadyLinked,
+		},
+		{
+			name: "no holder and own unverified primary",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", PrimaryEmail: "target@example.com"}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantTokens: true,
+		},
+		{
+			name: "no holder and own social identity",
+			getUser: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", Identities: []model.Identity{{Connection: "github", Email: "target@example.com", EmailVerified: true, IsSocial: true}}}, nil
+			},
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria, primaryCriteria},
+			wantTokens: true,
+		},
+		{
+			name:       "holder lookup outage",
+			holder:     func(string) (*model.User, error) { return nil, errors.NewUnexpected("lookup unavailable") },
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent, alternateCriteria},
+			wantError:  "lookup unavailable",
+		},
+		{
+			name:       "token lookup error",
+			lookup:     func() (*model.User, error) { return nil, errors.NewUnauthorized("invalid token") },
+			wantEvents: []string{lookupEvent},
+			wantError:  "invalid token",
+		},
+		{
+			name: "principal without token",
+			lookup: func() (*model.User, error) {
+				return &model.User{UserID: "auth0|caller", Sub: "auth0|caller"}, nil
+			},
+			wantEvents: []string{lookupEvent},
+			wantError:  errUnverifiedPrincipal,
+		},
+		{
+			name:       "nil principal",
+			lookup:     func() (*model.User, error) { return nil, nil },
+			wantEvents: []string{lookupEvent},
+			wantError:  errUnverifiedPrincipal,
+		},
+		{
+			name:       "OTP failure with token",
+			otpError:   "invalid OTP",
+			wantEvents: []string{lookupEvent, verifyEvent},
+			wantError:  "invalid OTP",
+		},
+		{
+			name:       "GetUser error after proof",
+			getUser:    func() (*model.User, error) { return nil, errors.NewUnexpected("provider unavailable") },
+			wantEvents: []string{lookupEvent, verifyEvent, getUserEvent},
+			wantError:  "provider unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := []string{}
+			tokens := &model.AuthResponse{IDToken: "id-token", AccessToken: "access-token"}
+			reader := &mockUserServiceReader{
+				metadataLookupFunc: func(_ context.Context, input string) (*model.User, error) {
+					events = append(events, lookupEvent)
+					require.Equal(t, authToken, input)
+					if tt.lookup != nil {
+						return tt.lookup()
+					}
+					p := *principal
+					return &p, nil
+				},
+				getUserFunc: func(_ context.Context, user *model.User) (*model.User, error) {
+					events = append(events, getUserEvent)
+					require.Equal(t, &model.User{UserID: principal.UserID, Sub: principal.Sub, Username: principal.Username}, user,
+						"own-record lookup must key on the principal and use service credentials")
+					if tt.getUser != nil {
+						return tt.getUser()
+					}
+					return &model.User{UserID: principal.UserID}, nil
+				},
+				searchUserFunc: func(_ context.Context, user *model.User, criteria string) (*model.User, error) {
+					events = append(events, criteria)
+					require.Equal(t, "target@example.com", user.PrimaryEmail)
+					if tt.holder != nil {
+						return tt.holder(criteria)
+					}
+					return notFound(criteria)
+				},
+			}
+			emailHandler := &recordingEmailHandler{onVerify: func(email *model.Email) (*model.AuthResponse, error) {
+				events = append(events, verifyEvent)
+				require.Equal(t, "Target@Example.com", email.Email)
+				require.Equal(t, "123456", email.OTP)
+				if tt.otpError != "" {
+					return tokens, errors.NewValidation(tt.otpError)
+				}
+				return tokens, nil
+			}}
+			handler := &messageHandlerOrchestrator{userReader: reader, emailHandler: emailHandler}
+
+			payload := fmt.Sprintf(`{"email":"Target@Example.com","otp":"123456","user":{"auth_token":%q}}`, authToken)
+			result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: []byte(payload)})
+			require.NoError(t, err)
+
+			require.Equal(t, tt.wantEvents, events)
+			require.Equal(t, []string{constants.UserUpdateIdentityRequiredScope}, reader.capturedLookupScopes)
+			if len(tt.wantEvents) == 1 {
+				require.Empty(t, emailHandler.verified, "a rejected token must not consume the OTP")
+			}
+
+			var reply UserDataResponse
+			require.NoError(t, json.Unmarshal(result, &reply))
+			switch {
+			case tt.wantReply != "":
+				require.Equal(t, tt.wantReply, string(result))
+				data, ok := reply.Data.(map[string]any)
+				require.True(t, ok)
+				require.NotContains(t, data, "id_token")
+				require.NotContains(t, data, "access_token")
+			case tt.wantError != "":
+				require.Equal(t, string(handler.errorResponse(tt.wantError)), string(result))
+				require.Nil(t, reply.Data, "failure must not expose either token")
+			case tt.wantTokens:
+				require.True(t, reply.Success)
+				require.Equal(t, tokens.IDToken, reply.Data.(map[string]any)["id_token"])
+				require.Equal(t, tokens.AccessToken, reply.Data.(map[string]any)["access_token"])
+			}
+		})
+	}
+
+	t.Run("blank auth_token keeps the legacy reply", func(t *testing.T) {
+		run := func(payload string) ([]byte, []string) {
+			events := []string{}
+			reader := &mockUserServiceReader{
+				metadataLookupFunc: func(context.Context, string) (*model.User, error) {
+					t.Fatal("blank token must not trigger a principal lookup")
+					return nil, nil
+				},
+				getUserFunc: func(context.Context, *model.User) (*model.User, error) {
+					t.Fatal("blank token must not trigger an own-record lookup")
+					return nil, nil
+				},
+				searchUserFunc: func(_ context.Context, _ *model.User, criteria string) (*model.User, error) {
+					events = append(events, criteria)
+					return nil, errors.NewNotFound("not found")
+				},
+			}
+			handler := &messageHandlerOrchestrator{userReader: reader, emailHandler: &recordingEmailHandler{}}
+			result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: []byte(payload)})
+			require.NoError(t, err)
+			return result, events
+		}
+		legacy, legacyEvents := run(`{"email":"target@example.com","otp":"123456"}`)
+		for _, payload := range []string{
+			`{"email":"target@example.com","otp":"123456","user":{"auth_token":""}}`,
+			`{"email":"target@example.com","otp":"123456","user":{"auth_token":"   "}}`,
+			`{"email":"target@example.com","otp":"123456","user":{}}`,
+		} {
+			got, events := run(payload)
+			require.Equal(t, string(legacy), string(got), payload)
+			require.Equal(t, legacyEvents, events, payload)
+		}
+	})
+
+	t.Run("already-connected reply avoids Self Serve linked-error markers", func(t *testing.T) {
+		lower := strings.ToLower(alreadyConnected)
+		for _, marker := range []string{"already linked", "belongs to an existing", "existing lfid account"} {
+			require.NotContains(t, lower, marker)
+		}
+	})
+}

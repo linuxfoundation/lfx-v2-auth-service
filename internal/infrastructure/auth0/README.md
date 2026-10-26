@@ -225,7 +225,7 @@ only difference is that the preserved old primary is **not** marked `system_mana
 The email verification and linking functionality is exposed via three NATS subjects:
 
 - **`lfx.auth-service.email_linking.send_verification`**: Initiates the passwordless flow
-- **`lfx.auth-service.email_linking.verify`**: Validates OTP and returns ID token
+- **`lfx.auth-service.email_linking.verify`**: Validates OTP and returns an ID token, or a token-free `already_connected` success when optional `user.auth_token` identifies the email's owner. See the [Email Verification Documentation](../../../docs/subjects/email_verification.md).
 - **`lfx.auth-service.user_identity.link`**: Links the verified email identity to the user account
 
 **Token Processing for Identity Linking:**
