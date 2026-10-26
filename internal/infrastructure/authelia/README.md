@@ -201,6 +201,7 @@ The OTP verification system uses a dedicated NATS Key-Value bucket with TTL (Tim
 sequenceDiagram
     participant User
     participant AuthService
+    participant Authelia as Authelia OIDC
     participant SMTP
     participant NATSKV as NATS KV<br/>(authelia-email-otp)
     participant Storage as NATS KV<br/>(authelia-users)
@@ -217,7 +218,14 @@ sequenceDiagram
 
     Note over User,Storage: Step 2: Verify OTP Code
     
-    User->>AuthService: Verify OTP (email + code)
+    User->>AuthService: Verify OTP (email + code, optional user.auth_token)
+    opt user.auth_token supplied
+        AuthService->>Authelia: Resolve caller via OIDC userinfo
+        Authelia-->>AuthService: Verified caller or error
+        break Invalid token or unverified principal
+            AuthService-->>User: Error (OTP not consumed)
+        end
+    end
     AuthService->>NATSKV: Get OTP record by email key
     
     alt OTP Found, Not Expired and Not Locked
@@ -227,8 +235,10 @@ sequenceDiagram
         alt OTP Matches
             AuthService->>NATSKV: Mark OTP record consumed (revision-checked)
             AuthService->>AuthService: Generate identity tokens<br/>(ID token + Access token)
-            AuthService->>AuthService: Check email not already linked
-            alt Conflict or lookup failure
+            AuthService->>AuthService: Check caller ownership and existing holder
+            alt Email already belongs to verified caller
+                AuthService-->>User: Success + status: already_connected (no tokens)
+            else Conflict or lookup failure
                 AuthService-->>User: Error (tokens discarded)
             else No existing holder
                 AuthService-->>User: Success + tokens
@@ -243,14 +253,16 @@ sequenceDiagram
 
     Note over User,Storage: Step 3: Link Identity to User
     
-    User->>AuthService: Link identity (user token + identity token)
-    AuthService->>AuthService: Parse identity token<br/>Extract email from claims
-    AuthService->>Storage: Get user with revision
-    Storage-->>AuthService: User data + revision
-    AuthService->>AuthService: Add email to AlternateEmails
-    AuthService->>Storage: Update user with revision<br/>(optimistic locking)
-    Storage-->>AuthService: Success
-    AuthService-->>User: Identity linked
+    opt Linking tokens returned (not already_connected)
+        User->>AuthService: Link identity (user token + identity token)
+        AuthService->>AuthService: Parse identity token<br/>Extract email from claims
+        AuthService->>Storage: Get user with revision
+        Storage-->>AuthService: User data + revision
+        AuthService->>AuthService: Add email to AlternateEmails
+        AuthService->>Storage: Update user with revision<br/>(optimistic locking)
+        Storage-->>AuthService: Success
+        AuthService-->>User: Identity linked
+    end
 ```
 
 ### OTP Storage Implementation
@@ -264,7 +276,7 @@ sequenceDiagram
 
 ### Token Generation After Verification
 
-Upon successful OTP verification, the system generates two tokens:
+Upon successful OTP verification, the provider generates two tokens internally. The handler discards them on a conflict or lookup failure, and returns only status `already_connected` (no tokens) when the verified caller already owns the email. Only a new address receives the tokens for the linking step:
 
 **ID Token:**
 - Contains verified email as subject claim (`sub: "email|{email}"`)
@@ -281,7 +293,7 @@ Upon successful OTP verification, the system generates two tokens:
 
 The OTP verification flow integrates with the identity linking system:
 
-1. **Verification Phase**: User verifies email ownership via OTP → receives identity token
+1. **Verification Phase**: User verifies email ownership via OTP → receives identity tokens for a new address, or token-free `already_connected` when `user.auth_token` identifies its owner (no linking or storage update is needed)
 2. **Linking Phase**: User links identity token to account → email added to `AlternateEmails` array
 3. **Storage Update**: User record updated with optimistic locking to prevent race conditions
 
