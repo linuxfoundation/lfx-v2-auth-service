@@ -46,7 +46,7 @@ The service automatically determines the lookup strategy based on input format:
 
 - **Token Strategy**: If input is a JWT/Authelia token, validates the token and extracts the subject identifier
 - **Canonical Lookup**: If input contains `|` (pipe character) or is a UUID, treats as subject identifier for direct lookup
-- **Username Search**: If input doesn't match above patterns, treats as username for search lookup
+- **Username Search**: If input doesn't match above patterns, treats it as a username, searches for the account, then fetches its current user record by ID. Metadata is not returned from the search snapshot; a failed current-record fetch returns an error.
 
 ### Reply
 

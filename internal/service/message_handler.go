@@ -233,7 +233,8 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 
 // resolveUserFromAuthInput resolves a user from an auth token, subject identifier, or LFID username.
 // Supported inputs follow MetadataLookup: JWT (Auth0 or Authelia), Auth0 sub or Authelia UUID,
-// or a plain LFID username resolved via SearchUser when no UserID is present.
+// or a plain LFID username resolved via SearchUser when no UserID is present. The search
+// result only identifies the account; GetUser fetches current data by ID before returning.
 // Callers that receive a structured JSON payload (e.g. user_emails.read) should
 // extract user.auth_token first; handlers with a raw string body (e.g.
 // user_metadata.read) should use getUserByInput instead.
@@ -252,10 +253,13 @@ func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Contex
 		return nil, err
 	}
 
-	if user.UserID != "" {
-		return m.userReader.GetUser(ctx, user)
+	if user.UserID == "" {
+		user, err = m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+	return m.userReader.GetUser(ctx, user)
 }
 
 // getUserByInput resolves a user when the NATS payload is a raw auth input string

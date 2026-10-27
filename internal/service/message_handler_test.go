@@ -2447,6 +2447,127 @@ func TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated(t *testing.T) {
 	}
 }
 
+func TestMessageHandlerOrchestrator_GetUserEmails_RefetchesLFIDAfterPrimaryChange(t *testing.T) {
+	ctx := context.Background()
+	const userID = "auth0|fixture-user"
+	const oldPrimary = "old@example.com"
+	const newPrimary = "new@example.com"
+	currentPrimary := oldPrimary
+	var calls []string
+	reader := &mockUserServiceReader{
+		metadataLookupFunc: func(_ context.Context, input string) (*model.User, error) {
+			if input == "fixture-token" {
+				return &model.User{UserID: userID, Token: "fixture-token"}, nil
+			}
+			require.Equal(t, "fixture-user", input)
+			return &model.User{Username: input}, nil
+		},
+		searchUserFunc: func(_ context.Context, user *model.User, criteria string) (*model.User, error) {
+			require.Equal(t, "fixture-user", user.Username)
+			require.Equal(t, constants.CriteriaTypeUsername, criteria)
+			calls = append(calls, "search")
+			// The search index still has the old address after a successful write.
+			return &model.User{UserID: userID, PrimaryEmail: oldPrimary}, nil
+		},
+		getUserFunc: func(_ context.Context, user *model.User) (*model.User, error) {
+			require.Equal(t, userID, user.UserID)
+			calls = append(calls, "get")
+			return &model.User{
+				UserID:       userID,
+				PrimaryEmail: currentPrimary,
+				Identities: []model.Identity{
+					{Connection: constants.EmailConnection, Email: oldPrimary, EmailVerified: true},
+					{Connection: constants.EmailConnection, Email: newPrimary, EmailVerified: true},
+				},
+			}, nil
+		},
+	}
+	writer := &mockUserServiceWriter{
+		setPrimaryEmailFunc: func(_ context.Context, id, email string) error {
+			require.Equal(t, userID, id)
+			currentPrimary = email
+			return nil
+		},
+	}
+	handler := NewMessageHandlerOrchestrator(WithUserReaderForMessageHandler(reader), WithUserWriterForMessageHandler(writer))
+	result, err := handler.SetPrimaryEmail(ctx, &mockTransportMessenger{
+		data: []byte(`{"user":{"auth_token":"fixture-token"},"email":"new@example.com"}`),
+	})
+	require.NoError(t, err)
+	var writeResponse UserDataResponse
+	require.NoError(t, json.Unmarshal(result, &writeResponse))
+	require.True(t, writeResponse.Success, writeResponse.Error)
+
+	result, err = handler.GetUserEmails(ctx, &mockTransportMessenger{data: []byte(`{"user":{"auth_token":"fixture-user"}}`)})
+	require.NoError(t, err)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			PrimaryEmail    string        `json:"primary_email"`
+			AlternateEmails []model.Email `json:"alternate_emails"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(result, &response))
+	require.True(t, response.Success)
+	require.Equal(t, newPrimary, response.Data.PrimaryEmail)
+	require.Equal(t, []model.Email{{Email: oldPrimary, Verified: true}, {Email: newPrimary, Verified: true}}, response.Data.AlternateEmails)
+	require.Equal(t, []string{"search", "get"}, calls)
+}
+
+func TestMessageHandlerOrchestrator_GetUserEmails_LFIDRefetchFailure(t *testing.T) {
+	for _, readError := range []error{errors.NewNotFound("user not found"), errors.NewUnexpected("user read unavailable")} {
+		t.Run(readError.Error(), func(t *testing.T) {
+			reader := &mockUserServiceReader{
+				searchUserFunc: func(_ context.Context, _ *model.User, _ string) (*model.User, error) {
+					return &model.User{UserID: "auth0|fixture-user", PrimaryEmail: "stale@example.com"}, nil
+				},
+				getUserFunc: func(_ context.Context, user *model.User) (*model.User, error) {
+					require.Equal(t, "auth0|fixture-user", user.UserID)
+					return nil, readError
+				},
+			}
+			handler := NewMessageHandlerOrchestrator(WithUserReaderForMessageHandler(reader))
+			result, err := handler.GetUserEmails(context.Background(), &mockTransportMessenger{
+				data: []byte(`{"user":{"auth_token":"fixture-user"}}`),
+			})
+			require.NoError(t, err)
+			var response UserDataResponse
+			require.NoError(t, json.Unmarshal(result, &response))
+			require.False(t, response.Success, "must not return the stale search record when refetching fails")
+			require.Equal(t, readError.Error(), response.Error)
+			require.Nil(t, response.Data)
+		})
+	}
+}
+
+func TestMessageHandlerOrchestrator_GetUserMetadata_RefetchesLFIDSearchResult(t *testing.T) {
+	reader := &mockUserServiceReader{
+		searchUserFunc: func(_ context.Context, _ *model.User, _ string) (*model.User, error) {
+			return &model.User{
+				UserID:       "auth0|fixture-user",
+				UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Stale Fixture")},
+			}, nil
+		},
+		getUserFunc: func(_ context.Context, user *model.User) (*model.User, error) {
+			require.Equal(t, "auth0|fixture-user", user.UserID)
+			return &model.User{
+				UserID:       user.UserID,
+				UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Current Fixture")},
+			}, nil
+		},
+	}
+	handler := NewMessageHandlerOrchestrator(WithUserReaderForMessageHandler(reader))
+	result, err := handler.GetUserMetadata(context.Background(), &mockTransportMessenger{data: []byte("fixture-user")})
+	require.NoError(t, err)
+	var response struct {
+		Success bool                `json:"success"`
+		Data    *model.UserMetadata `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(result, &response))
+	require.True(t, response.Success)
+	require.Equal(t, &model.UserMetadata{Name: converters.StringPtr("Current Fixture")}, response.Data)
+}
+
 func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 	ctx := context.Background()
 
