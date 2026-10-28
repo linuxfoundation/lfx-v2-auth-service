@@ -53,3 +53,16 @@ GO_GOLANGCI_LINT_PRE_COMMANDS:
       tar -xzf /tmp/golangci-lint.tar.gz -C /tmp &&
       install /tmp/golangci-lint-2.15.0-linux-amd64/golangci-lint /usr/bin/golangci-lint
     cwd: "workspace"
+
+# The osv-scanner bundled with MegaLinter is built with Go 1.26, so its
+# govulncheck step cannot load a go 1.27.3 module. Install osv-scanner
+# v2.7.0 (built with Go 1.27, checksum verified). Remove with the
+# golangci-lint block above.
+REPOSITORY_OSV_SCANNER_PRE_COMMANDS:
+  - command: >-
+      go env -w GOTOOLCHAIN=auto &&
+      curl -sSfL -o /tmp/osv-scanner
+      https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_linux_amd64 &&
+      echo "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b  /tmp/osv-scanner" | sha256sum -c - &&
+      install /tmp/osv-scanner /usr/bin/osv-scanner
+    cwd: "workspace"
