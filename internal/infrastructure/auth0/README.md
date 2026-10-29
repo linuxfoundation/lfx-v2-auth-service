@@ -243,6 +243,6 @@ The email verification and linking functionality is exposed via three NATS subje
 **Service-Level Validation:**
 - Checks if email is already linked to another user account, after successful OTP validation
 - Attempts deletion of a candidate standalone passwordless profile after a post-proof refusal. Cleanup requires exactly one `email`-connection identity without linked-secondary `profileData`, no `system_managed`, `created_at` within 5 minutes, and `logins_count` at most 1. The age/login heuristics do not prove that this exchange created the profile. The GET/DELETE sequence and retries share a one-second budget; cleanup reuses a still-valid cached M2M token and skips rather than initiating or waiting for refresh. Failures, timeouts and guard refusals are logged without replacing the original refusal; a profile may remain.
-- Auth0's **Disable Sign Ups** on the email connection is not used for cleanup: the OTP exchange creates the profile, so it is expected to block codes to addresses with no account. Not yet confirmed on a dev tenant.
+- Auth0's **Disable Sign Ups** on the email connection is not used for cleanup: the OTP exchange creates the profile, so it is expected to block codes to addresses with no account.
 - Prevents duplicate alternate email addresses
 - Validates email format before initiating passwordless flow

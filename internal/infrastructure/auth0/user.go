@@ -1604,6 +1604,9 @@ func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, u
 	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
 		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
 	}
+	slog.InfoContext(ctx, "deleted fresh email-connection profile after refused link",
+		"user_id", redaction.Redact(userID),
+	)
 	return nil
 }
 

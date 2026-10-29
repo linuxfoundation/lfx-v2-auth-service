@@ -4,11 +4,13 @@
 package auth0
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,6 +24,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -2601,11 +2604,12 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 	emailIdentity := `[{"connection":"email","provider":"email"}]`
 
 	tests := []struct {
-		name       string
-		getResp    string
-		getStatus  int
-		wantDelete bool
-		wantErr    string
+		name         string
+		getResp      string
+		getStatus    int
+		deleteStatus int
+		wantDelete   bool
+		wantErr      string
 	}{
 		{name: "deletes a fresh email-only profile", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":` + emailIdentity + `}`, wantDelete: true},
 		{name: "deletes a fresh profile with zero logins", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":0,"identities":` + emailIdentity + `}`, wantDelete: true},
@@ -2620,6 +2624,7 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 		{name: "skips a profile with an unparsable created_at", getResp: `{"user_id":"email|stub123","created_at":"yesterday","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "created_at"},
 		{name: "treats a 404 as already gone", getStatus: http.StatusNotFound},
 		{name: "surfaces a non-404 fetch failure", getStatus: http.StatusInternalServerError, wantErr: "failed to verify email-connection stub before delete"},
+		{name: "does not log a successful deletion when DELETE fails", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":` + emailIdentity + `}`, deleteStatus: http.StatusInternalServerError, wantDelete: true, wantErr: "failed to delete email-connection stub user"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2631,6 +2636,11 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 				ft.stubGetStatus = tt.getStatus
 			}
 			rw := newTestReaderWriter(ft)
+			ft.deleteStatus = tt.deleteStatus
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 			err := rw.deleteFreshEmailConnectionStub(ctx, "email|stub123", m2mToken, now)
 			if tt.wantErr != "" {
@@ -2644,6 +2654,27 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 				wantDeletes = 1
 			}
 			assert.Equal(t, wantDeletes, ft.countFor(http.MethodDelete, "/email|stub123"))
+
+			const auditMessage = "deleted fresh email-connection profile after refused link"
+			var auditEntries []map[string]any
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if !strings.Contains(line, auditMessage) {
+					continue
+				}
+				var entry map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				auditEntries = append(auditEntries, entry)
+				assert.NotContains(t, line, "email|stub123")
+				assert.NotContains(t, line, m2mToken)
+			}
+			if tt.wantDelete && tt.wantErr == "" {
+				require.Len(t, auditEntries, 1)
+				assert.Equal(t, "INFO", auditEntries[0]["level"])
+				assert.Equal(t, auditMessage, auditEntries[0]["msg"])
+				assert.Equal(t, redaction.Redact("email|stub123"), auditEntries[0]["user_id"])
+			} else {
+				assert.Empty(t, auditEntries, "skips and failures must not log a successful deletion")
+			}
 		})
 	}
 
