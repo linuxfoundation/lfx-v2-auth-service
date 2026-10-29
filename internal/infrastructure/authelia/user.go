@@ -319,6 +319,11 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 	return nil
 }
 
+// DiscardVerifiedEmailProfile is a no-op: Authelia keeps no external profile for a verified email.
+func (a *userReaderWriter) DiscardVerifiedEmailProfile(_ context.Context, _ *model.AuthResponse) error {
+	return nil
+}
+
 // VerifyAlternateEmail completes verification of an alternate email for an Authelia-backed user.
 func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 

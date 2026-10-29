@@ -155,6 +155,11 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 	return nil
 }
 
+// DiscardVerifiedEmailProfile is a no-op: the mock keeps no external profile for a verified email.
+func (u *userWriter) DiscardVerifiedEmailProfile(_ context.Context, _ *model.AuthResponse) error {
+	return nil
+}
+
 // VerifyAlternateEmail simulates verifying an alternate email in the mock store.
 func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))

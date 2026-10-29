@@ -242,5 +242,7 @@ The email verification and linking functionality is exposed via three NATS subje
 
 **Service-Level Validation:**
 - Checks if email is already linked to another user account, after successful OTP validation
+- Deletes the standalone passwordless profile the OTP exchange created when the post-proof check refuses the link. The delete is best-effort and guarded: email-connection identities only, not `system_managed`, `created_at` within 5 minutes, and `logins_count` at most 1. Failures are logged and do not change the refusal.
+- Auth0's **Disable Sign Ups** on the email connection is not used for cleanup: the OTP exchange creates the profile, so it is expected to block codes to addresses with no account. Not yet confirmed on a dev tenant.
 - Prevents duplicate alternate email addresses
 - Validates email format before initiating passwordless flow
