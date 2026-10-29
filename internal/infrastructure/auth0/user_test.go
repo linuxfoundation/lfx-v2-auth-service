@@ -2613,6 +2613,8 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 		{name: "skips a profile that has logged in", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":5,"identities":` + emailIdentity + `}`, wantErr: "logged in"},
 		{name: "skips a profile with a non-email identity", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"google-oauth2","provider":"google-oauth2"}]}`, wantErr: "non-email-connection"},
 		{name: "skips a profile with no identities", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","identities":[]}`, wantErr: "no identities"},
+		{name: "skips a linked primary with two email identities", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"email","provider":"email"},{"connection":"email","provider":"email","profileData":{"email":"linked@example.com","email_verified":true}}]}`, wantErr: "not a standalone email profile"},
+		{name: "skips an email identity with linked profile data", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"email","provider":"email","profileData":{}}]}`, wantErr: "not a standalone email profile"},
 		{name: "skips a system-managed profile", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"app_metadata":{"system_managed":true},"identities":` + emailIdentity + `}`, wantErr: "system-managed"},
 		{name: "skips a profile with no created_at", getResp: `{"user_id":"email|stub123","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "created_at"},
 		{name: "skips a profile with an unparsable created_at", getResp: `{"user_id":"email|stub123","created_at":"yesterday","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "created_at"},
@@ -2651,6 +2653,97 @@ func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
 	})
 }
 
+// gatedRefreshTokenSource simulates a token refresh already blocked on the network.
+type gatedRefreshTokenSource struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedRefreshTokenSource) Token() (*oauth2.Token, error) {
+	close(s.entered)
+	<-s.release
+	return fakeTokenSource{token: "refreshed-token"}.Token()
+}
+
+func TestTokenManager_CachedAccessToken(t *testing.T) {
+	ctx := context.Background()
+	tm := &TokenManager{tokenSource: fakeTokenSource{token: "cached-token"}}
+	_, err := tm.cachedAccessToken(ctx)
+	require.ErrorContains(t, err, "cached M2M token")
+	_, err = tm.GetToken(ctx)
+	require.NoError(t, err)
+
+	source := &gatedRefreshTokenSource{entered: make(chan struct{}), release: make(chan struct{})}
+	tm.tokenSource = source
+	refreshed := make(chan error, 1)
+	go func() {
+		_, errRefresh := tm.GetToken(ctx)
+		refreshed <- errRefresh
+	}()
+	<-source.entered
+	// Release before assertions, even if an assertion fails, then join the refresh.
+	token, errCached := tm.cachedAccessToken(ctx)
+	close(source.release)
+	require.NoError(t, <-refreshed)
+	require.NoError(t, errCached)
+	assert.Equal(t, "cached-token", token)
+
+	tm.cachedToken.Store(&oauth2.Token{AccessToken: "expired-token", Expiry: time.Now().Add(-time.Hour)})
+	_, err = tm.cachedAccessToken(ctx)
+	require.ErrorContains(t, err, "cached M2M token")
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = tm.cachedAccessToken(canceled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+type discardDeadlineTransport struct {
+	base         *fakeAuth0Transport
+	blockMethod  string
+	deadline     time.Time
+	blockedCalls int
+	cancellation error
+}
+
+func (d *discardDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != d.blockMethod {
+		return d.base.RoundTrip(req)
+	}
+	d.deadline, _ = req.Context().Deadline()
+	d.blockedCalls++
+	<-req.Context().Done()
+	d.cancellation = req.Context().Err()
+	return nil, d.cancellation
+}
+
+func TestUserReaderWriter_DiscardVerifiedEmailProfile_Timeout(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.stubGetResp = `{"user_id":"email|stub123","created_at":"` + time.Now().UTC().Format(time.RFC3339) + `","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
+			transport := &discardDeadlineTransport{base: ft, blockMethod: method}
+			rw := newTestReaderWriter(transport)
+			// Use production retry settings, not the zero-retry default test seam.
+			config := httpclient.DefaultConfig()
+			config.Transport = transport
+			rw.httpClient = httpclient.NewClient(config)
+			_, errToken := rw.config.M2MTokenManager.GetToken(context.Background())
+			require.NoError(t, errToken)
+			token, errSign := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": "email|stub123"}).SignedString([]byte("test-key"))
+			require.NoError(t, errSign)
+
+			start := time.Now()
+			err := rw.DiscardVerifiedEmailProfile(context.Background(), &model.AuthResponse{IDToken: token})
+			require.Error(t, err)
+			require.ErrorIs(t, transport.cancellation, context.DeadlineExceeded)
+			assert.WithinDuration(t, start.Add(discardProfileTimeout), transport.deadline, 500*time.Millisecond)
+			assert.Less(t, time.Since(start), 3*time.Second, "cleanup must not use the normal 30-second request/retry budget")
+			assert.Equal(t, 1, transport.blockedCalls)
+			assert.Zero(t, ft.countFor(http.MethodDelete, "/email|stub123"))
+		})
+	}
+}
+
 func TestUserReaderWriter_DiscardVerifiedEmailProfile(t *testing.T) {
 	ctx := context.Background()
 
@@ -2684,6 +2777,8 @@ func TestUserReaderWriter_DiscardVerifiedEmailProfile(t *testing.T) {
 		ft.stubGetResp = `{"user_id":"email|stub123","created_at":"` + time.Now().Add(-time.Second).UTC().Format(time.RFC3339) +
 			`","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
 		rw := newTestReaderWriter(ft)
+		_, errToken := rw.config.M2MTokenManager.GetToken(ctx)
+		require.NoError(t, errToken)
 
 		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
 		require.NoError(t, err)
@@ -2695,10 +2790,22 @@ func TestUserReaderWriter_DiscardVerifiedEmailProfile(t *testing.T) {
 		ft := newFakeAuth0(testPrimaryUserID, "{}")
 		ft.stubGetResp = `{"user_id":"email|stub123","created_at":"2020-01-01T00:00:00Z","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
 		rw := newTestReaderWriter(ft)
+		_, errToken := rw.config.M2MTokenManager.GetToken(ctx)
+		require.NoError(t, errToken)
 
 		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
 		require.Error(t, err)
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("skips cleanup without a previously obtained token", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+		// A refresh here would panic: cleanup must not consult the token source.
+		rw.config.M2MTokenManager.tokenSource = nil
+		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
+		require.ErrorContains(t, err, "cached M2M token")
+		assert.Empty(t, ft.methodPaths())
 	})
 }
 

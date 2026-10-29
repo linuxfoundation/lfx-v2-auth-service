@@ -1540,14 +1540,15 @@ const (
 	// discardMaxLoginsCount is the highest logins_count a profile may show and
 	// still count as never used beyond the exchange that created it.
 	discardMaxLoginsCount = 1
+	// discardProfileTimeout bounds the entire best-effort GET/DELETE sequence.
+	discardProfileTimeout = time.Second
 )
 
-// deleteFreshEmailConnectionStub deletes the standalone email-connection profile
-// an OTP exchange just created, after the link was refused. On top of the
-// email-identity-only rule it requires the profile to be not system-managed,
-// recently created and barely logged in, so a pre-existing passwordless account
-// is never removed. It fails closed on a missing or unparsable created_at. A 404
-// fetch is treated as already-gone.
+// deleteFreshEmailConnectionStub deletes a candidate standalone email profile
+// after a refused link. Exactly one email identity, with no linked profileData,
+// is required in addition to the metadata, age and login-count guards. Those
+// heuristics reduce risk but do not prove this exchange created the profile.
+// A missing/unparsable created_at refuses deletion; a 404 fetch is already gone.
 func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, userID, m2mToken string, now time.Time) error {
 	if strings.TrimSpace(userID) == "" {
 		return errors.NewValidation("user_id is required")
@@ -1576,6 +1577,9 @@ func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, u
 	if errIdentities := requireEmailConnectionOnly(&target); errIdentities != nil {
 		return errIdentities
 	}
+	if len(target.Identities) != 1 || target.Identities[0].ProfileData != nil {
+		return errors.NewForbidden("refusing to delete user that is not a standalone email profile")
+	}
 	if target.AppMetadata != nil && target.AppMetadata.SystemManaged {
 		return errors.NewForbidden("refusing to delete system-managed user")
 	}
@@ -1603,21 +1607,23 @@ func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, u
 	return nil
 }
 
-// DiscardVerifiedEmailProfile deletes the standalone profile created by the OTP
-// exchange behind authResponse. The subject comes from the ID token that Auth0's
-// token endpoint just returned, so it is read without signature verification.
-// The delete runs only if deleteFreshEmailConnectionStub's guard passes.
+// DiscardVerifiedEmailProfile attempts bounded cleanup of a candidate standalone
+// profile after an OTP exchange. The subject comes from the ID token Auth0 just
+// returned. Only an already-cached M2M token is used: cleanup never waits for a
+// refresh. The deletion still requires deleteFreshEmailConnectionStub's guard.
 func (u *userReaderWriter) DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error {
 	if authResponse == nil || strings.TrimSpace(authResponse.IDToken) == "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, discardProfileTimeout)
+	defer cancel()
 
 	sub, errSubject := jwt.ExtractSubject(ctx, authResponse.IDToken)
 	if errSubject != nil {
 		return errors.NewValidation("invalid identity token: unable to extract subject", errSubject)
 	}
 
-	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	m2mToken, errToken := u.config.M2MTokenManager.cachedAccessToken(ctx)
 	if errToken != nil {
 		return errors.NewUnexpected("failed to get M2M token", errToken)
 	}
