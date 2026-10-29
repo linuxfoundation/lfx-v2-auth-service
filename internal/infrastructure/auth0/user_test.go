@@ -4,11 +4,13 @@
 package auth0
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,6 +24,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -2589,6 +2592,251 @@ func TestUserReaderWriter_DeleteEmailConnectionStub(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to verify email-connection stub before delete")
 		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+}
+
+func TestUserReaderWriter_DeleteFreshEmailConnectionStub(t *testing.T) {
+	ctx := context.Background()
+	const m2mToken = "test-m2m-token"
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-time.Minute).Format(time.RFC3339)
+	old := now.Add(-2 * discardMaxProfileAge).Format(time.RFC3339)
+	emailIdentity := `[{"connection":"email","provider":"email"}]`
+
+	tests := []struct {
+		name         string
+		getResp      string
+		getStatus    int
+		deleteStatus int
+		wantDelete   bool
+		wantErr      string
+	}{
+		{name: "deletes a fresh email-only profile", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":` + emailIdentity + `}`, wantDelete: true},
+		{name: "deletes a fresh profile with zero logins", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":0,"identities":` + emailIdentity + `}`, wantDelete: true},
+		{name: "skips a profile created before the window", getResp: `{"user_id":"email|stub123","created_at":"` + old + `","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "freshness window"},
+		{name: "skips a profile that has logged in", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":5,"identities":` + emailIdentity + `}`, wantErr: "logged in"},
+		{name: "skips a profile with a non-email identity", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"google-oauth2","provider":"google-oauth2"}]}`, wantErr: "non-email-connection"},
+		{name: "skips a profile with no identities", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","identities":[]}`, wantErr: "no identities"},
+		{name: "skips a linked primary with two email identities", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"email","provider":"email"},{"connection":"email","provider":"email","profileData":{"email":"linked@example.com","email_verified":true}}]}`, wantErr: "not a standalone email profile"},
+		{name: "skips an email identity with linked profile data", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":[{"connection":"email","provider":"email","profileData":{}}]}`, wantErr: "not a standalone email profile"},
+		{name: "skips a system-managed profile", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"app_metadata":{"system_managed":true},"identities":` + emailIdentity + `}`, wantErr: "system-managed"},
+		{name: "skips a profile with no created_at", getResp: `{"user_id":"email|stub123","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "created_at"},
+		{name: "skips a profile with an unparsable created_at", getResp: `{"user_id":"email|stub123","created_at":"yesterday","logins_count":1,"identities":` + emailIdentity + `}`, wantErr: "created_at"},
+		{name: "treats a 404 as already gone", getStatus: http.StatusNotFound},
+		{name: "surfaces a non-404 fetch failure", getStatus: http.StatusInternalServerError, wantErr: "failed to verify email-connection stub before delete"},
+		{name: "does not log a successful deletion when DELETE fails", getResp: `{"user_id":"email|stub123","created_at":"` + fresh + `","logins_count":1,"identities":` + emailIdentity + `}`, deleteStatus: http.StatusInternalServerError, wantDelete: true, wantErr: "failed to delete email-connection stub user"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			if tt.getResp != "" {
+				ft.stubGetResp = tt.getResp
+			}
+			if tt.getStatus != 0 {
+				ft.stubGetStatus = tt.getStatus
+			}
+			rw := newTestReaderWriter(ft)
+			ft.deleteStatus = tt.deleteStatus
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			err := rw.deleteFreshEmailConnectionStub(ctx, "email|stub123", m2mToken, now)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			wantDeletes := 0
+			if tt.wantDelete {
+				wantDeletes = 1
+			}
+			assert.Equal(t, wantDeletes, ft.countFor(http.MethodDelete, "/email|stub123"))
+
+			const auditMessage = "deleted fresh email-connection profile after refused link"
+			var auditEntries []map[string]any
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if !strings.Contains(line, auditMessage) {
+					continue
+				}
+				var entry map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				auditEntries = append(auditEntries, entry)
+				assert.NotContains(t, line, "email|stub123")
+				assert.NotContains(t, line, m2mToken)
+			}
+			if tt.wantDelete && tt.wantErr == "" {
+				require.Len(t, auditEntries, 1)
+				assert.Equal(t, "INFO", auditEntries[0]["level"])
+				assert.Equal(t, auditMessage, auditEntries[0]["msg"])
+				assert.Equal(t, redaction.Redact("email|stub123"), auditEntries[0]["user_id"])
+			} else {
+				assert.Empty(t, auditEntries, "skips and failures must not log a successful deletion")
+			}
+		})
+	}
+
+	t.Run("requires a user id", func(t *testing.T) {
+		rw := newTestReaderWriter(newFakeAuth0(testPrimaryUserID, "{}"))
+		require.Error(t, rw.deleteFreshEmailConnectionStub(ctx, " ", m2mToken, now))
+	})
+}
+
+// gatedRefreshTokenSource simulates a token refresh already blocked on the network.
+type gatedRefreshTokenSource struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedRefreshTokenSource) Token() (*oauth2.Token, error) {
+	close(s.entered)
+	<-s.release
+	return fakeTokenSource{token: "refreshed-token"}.Token()
+}
+
+func TestTokenManager_CachedAccessToken(t *testing.T) {
+	ctx := context.Background()
+	tm := &TokenManager{tokenSource: fakeTokenSource{token: "cached-token"}}
+	_, err := tm.cachedAccessToken(ctx)
+	require.ErrorContains(t, err, "cached M2M token")
+	_, err = tm.GetToken(ctx)
+	require.NoError(t, err)
+
+	source := &gatedRefreshTokenSource{entered: make(chan struct{}), release: make(chan struct{})}
+	tm.tokenSource = source
+	refreshed := make(chan error, 1)
+	go func() {
+		_, errRefresh := tm.GetToken(ctx)
+		refreshed <- errRefresh
+	}()
+	<-source.entered
+	// Release before assertions, even if an assertion fails, then join the refresh.
+	token, errCached := tm.cachedAccessToken(ctx)
+	close(source.release)
+	require.NoError(t, <-refreshed)
+	require.NoError(t, errCached)
+	assert.Equal(t, "cached-token", token)
+
+	tm.cachedToken.Store(&oauth2.Token{AccessToken: "expired-token", Expiry: time.Now().Add(-time.Hour)})
+	_, err = tm.cachedAccessToken(ctx)
+	require.ErrorContains(t, err, "cached M2M token")
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = tm.cachedAccessToken(canceled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+type discardDeadlineTransport struct {
+	base         *fakeAuth0Transport
+	blockMethod  string
+	deadline     time.Time
+	blockedCalls int
+	cancellation error
+}
+
+func (d *discardDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != d.blockMethod {
+		return d.base.RoundTrip(req)
+	}
+	d.deadline, _ = req.Context().Deadline()
+	d.blockedCalls++
+	<-req.Context().Done()
+	d.cancellation = req.Context().Err()
+	return nil, d.cancellation
+}
+
+func TestUserReaderWriter_DiscardVerifiedEmailProfile_Timeout(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			ft := newFakeAuth0(testPrimaryUserID, "{}")
+			ft.stubGetResp = `{"user_id":"email|stub123","created_at":"` + time.Now().UTC().Format(time.RFC3339) + `","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
+			transport := &discardDeadlineTransport{base: ft, blockMethod: method}
+			rw := newTestReaderWriter(transport)
+			// Use production retry settings, not the zero-retry default test seam.
+			config := httpclient.DefaultConfig()
+			config.Transport = transport
+			rw.httpClient = httpclient.NewClient(config)
+			_, errToken := rw.config.M2MTokenManager.GetToken(context.Background())
+			require.NoError(t, errToken)
+			token, errSign := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": "email|stub123"}).SignedString([]byte("test-key"))
+			require.NoError(t, errSign)
+
+			start := time.Now()
+			err := rw.DiscardVerifiedEmailProfile(context.Background(), &model.AuthResponse{IDToken: token})
+			require.Error(t, err)
+			require.ErrorIs(t, transport.cancellation, context.DeadlineExceeded)
+			assert.WithinDuration(t, start.Add(discardProfileTimeout), transport.deadline, 500*time.Millisecond)
+			assert.Less(t, time.Since(start), 3*time.Second, "cleanup must not use the normal 30-second request/retry budget")
+			assert.Equal(t, 1, transport.blockedCalls)
+			assert.Zero(t, ft.countFor(http.MethodDelete, "/email|stub123"))
+		})
+	}
+}
+
+func TestUserReaderWriter_DiscardVerifiedEmailProfile(t *testing.T) {
+	ctx := context.Background()
+
+	signedToken := func(t *testing.T, sub string) string {
+		t.Helper()
+		tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": sub}).SignedString([]byte("secret"))
+		require.NoError(t, err)
+		return tok
+	}
+
+	t.Run("does nothing for a nil response or empty ID token", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		require.NoError(t, rw.DiscardVerifiedEmailProfile(ctx, nil))
+		require.NoError(t, rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{}))
+		assert.Empty(t, ft.methodPaths())
+	})
+
+	t.Run("rejects an invalid ID token without calling Auth0", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+
+		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: "not-a-jwt"})
+		require.Error(t, err)
+		assert.Empty(t, ft.methodPaths())
+	})
+
+	t.Run("fetches then deletes the profile named by the token subject", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","created_at":"` + time.Now().Add(-time.Second).UTC().Format(time.RFC3339) +
+			`","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
+		rw := newTestReaderWriter(ft)
+		_, errToken := rw.config.M2MTokenManager.GetToken(ctx)
+		require.NoError(t, errToken)
+
+		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
+		require.NoError(t, err)
+		assert.Equal(t, 1, ft.countFor(http.MethodGet, "/email|stub123"))
+		assert.Equal(t, 1, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("returns the guard refusal and does not delete an old profile", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		ft.stubGetResp = `{"user_id":"email|stub123","created_at":"2020-01-01T00:00:00Z","logins_count":1,"identities":[{"connection":"email","provider":"email"}]}`
+		rw := newTestReaderWriter(ft)
+		_, errToken := rw.config.M2MTokenManager.GetToken(ctx)
+		require.NoError(t, errToken)
+
+		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
+		require.Error(t, err)
+		assert.Equal(t, 0, ft.countFor(http.MethodDelete, "/email|stub123"))
+	})
+
+	t.Run("skips cleanup without a previously obtained token", func(t *testing.T) {
+		ft := newFakeAuth0(testPrimaryUserID, "{}")
+		rw := newTestReaderWriter(ft)
+		// A refresh here would panic: cleanup must not consult the token source.
+		rw.config.M2MTokenManager.tokenSource = nil
+		err := rw.DiscardVerifiedEmailProfile(ctx, &model.AuthResponse{IDToken: signedToken(t, "email|stub123")})
+		require.ErrorContains(t, err, "cached M2M token")
+		assert.Empty(t, ft.methodPaths())
 	})
 }
 

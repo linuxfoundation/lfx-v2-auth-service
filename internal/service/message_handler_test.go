@@ -4257,10 +4257,20 @@ func TestHasEmailDomainSuffix(t *testing.T) {
 // recordingEmailHandler is a port.EmailHandler that records which addresses a
 // verification was sent to or verified for.
 type recordingEmailHandler struct {
-	sent     []string
-	verified []string
-	onSend   func(string) error
-	onVerify func(*model.Email) (*model.AuthResponse, error)
+	sent      []string
+	verified  []string
+	discarded []*model.AuthResponse
+	onSend    func(string) error
+	onVerify  func(*model.Email) (*model.AuthResponse, error)
+	onDiscard func() error
+}
+
+func (r *recordingEmailHandler) DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error {
+	r.discarded = append(r.discarded, authResponse)
+	if r.onDiscard != nil {
+		return r.onDiscard()
+	}
+	return nil
 }
 
 func (r *recordingEmailHandler) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
@@ -4605,6 +4615,11 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking(t *testing.T) {
 				}
 				require.Equal(t, wantEvents, events, "only successful proof may trigger lookups")
 				require.Equal(t, []string{"Target@Example.com"}, emailHandler.verified)
+				if otpError == "" && wantError != "" {
+					require.Equal(t, []*model.AuthResponse{tokens}, emailHandler.discarded, "a refused link after proof must discard the profile once")
+				} else {
+					require.Empty(t, emailHandler.discarded, "success and pre-proof failures must keep the profile")
+				}
 				var reply UserDataResponse
 				require.NoError(t, json.Unmarshal(result, &reply))
 				if wantError != "" {
@@ -4658,6 +4673,31 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMessageHandlerOrchestrator_VerifyEmailLinking_DiscardFailureKeepsRefusal(t *testing.T) {
+	ctx := context.Background()
+	tokens := &model.AuthResponse{IDToken: "id-token", AccessToken: "access-token"}
+	reader := &mockUserServiceReader{searchUserFunc: func(_ context.Context, _ *model.User, criteria string) (*model.User, error) {
+		if criteria == constants.CriteriaTypeEmail {
+			return &model.User{UserID: "holder", PrimaryEmail: "target@example.com"}, nil
+		}
+		return nil, errors.NewNotFound("not found")
+	}}
+	emailHandler := &recordingEmailHandler{
+		onVerify:  func(*model.Email) (*model.AuthResponse, error) { return tokens, nil },
+		onDiscard: func() error { return errors.NewUnexpected("auth0 unavailable") },
+	}
+	handler := &messageHandlerOrchestrator{userReader: reader, emailHandler: emailHandler}
+
+	result, err := handler.VerifyEmailLinking(ctx, &mockTransportMessenger{data: []byte(`{"email":"target@example.com","otp":"123456"}`)})
+	require.NoError(t, err)
+
+	require.Len(t, emailHandler.discarded, 1)
+	require.Equal(t, string(handler.errorResponse("email already linked")), string(result))
+	var reply UserDataResponse
+	require.NoError(t, json.Unmarshal(result, &reply))
+	require.Nil(t, reply.Data, "a failed discard must not expose tokens")
 }
 
 func TestOwnsVerifiedEmail(t *testing.T) {
@@ -4937,6 +4977,11 @@ func TestMessageHandlerOrchestrator_VerifyEmailLinking_OwnAccount(t *testing.T) 
 			require.Equal(t, []string{constants.UserUpdateIdentityRequiredScope}, reader.capturedLookupScopes)
 			if len(tt.wantEvents) == 1 {
 				require.Empty(t, emailHandler.verified, "a rejected token must not consume the OTP")
+			}
+			if tt.wantError != "" && len(emailHandler.verified) > 0 && tt.otpError == "" {
+				require.Equal(t, []*model.AuthResponse{tokens}, emailHandler.discarded, "a refused link after proof must discard the profile once")
+			} else {
+				require.Empty(t, emailHandler.discarded, "success, already-connected, and pre-proof failures must keep the profile")
 			}
 
 			var reply UserDataResponse

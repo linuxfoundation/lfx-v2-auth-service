@@ -37,6 +37,9 @@ type Auth0User struct {
 	// identity, when one exists. It can predate CreatedAt, in which case it
 	// is the true join date. See ToUser.
 	LDAPCreatedAt string `json:"ldap_created_at,omitempty"`
+	// LoginsCount is the number of logins Auth0 has recorded for the user. Read
+	// only by the fresh-stub delete guard; never written back.
+	LoginsCount int `json:"logins_count"`
 }
 
 // Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.

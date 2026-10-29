@@ -43,6 +43,10 @@ type IdentityLinker interface {
 type EmailHandler interface {
 	SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error
 	VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error)
+	// DiscardVerifiedEmailProfile removes the standalone profile a successful
+	// VerifyAlternateEmail may have created, when the link is then refused.
+	// Providers with no external profile return nil.
+	DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error
 }
 
 // PasswordHandler defines the behavior of the password handler

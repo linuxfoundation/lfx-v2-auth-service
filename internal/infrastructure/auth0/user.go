@@ -1501,13 +1501,8 @@ func (u *userReaderWriter) deleteEmailConnectionStub(ctx context.Context, userID
 		)
 		return errors.NewUnexpected("failed to verify email-connection stub before delete", errGet)
 	}
-	if len(target.Identities) == 0 {
-		return errors.NewForbidden("refusing to delete user with no identities")
-	}
-	for _, id := range target.Identities {
-		if id.Connection != constants.EmailConnection {
-			return errors.NewForbidden("refusing to delete user with a non-email-connection identity")
-		}
+	if errIdentities := requireEmailConnectionOnly(&target); errIdentities != nil {
+		return errIdentities
 	}
 
 	apiDelete := httpclient.NewAPIRequest(
@@ -1521,4 +1516,120 @@ func (u *userReaderWriter) deleteEmailConnectionStub(ctx context.Context, userID
 		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
 	}
 	return nil
+}
+
+// requireEmailConnectionOnly refuses a user that has no identities or any
+// identity outside the passwordless email connection, so a delete helper can
+// never remove a real account carrying database or social identities.
+func requireEmailConnectionOnly(target *Auth0User) error {
+	if len(target.Identities) == 0 {
+		return errors.NewForbidden("refusing to delete user with no identities")
+	}
+	for _, id := range target.Identities {
+		if id.Connection != constants.EmailConnection {
+			return errors.NewForbidden("refusing to delete user with a non-email-connection identity")
+		}
+	}
+	return nil
+}
+
+const (
+	// discardMaxProfileAge bounds how old a standalone email profile may be and
+	// still be treated as the one the just-completed OTP exchange created.
+	discardMaxProfileAge = 5 * time.Minute
+	// discardMaxLoginsCount is the highest logins_count a profile may show and
+	// still count as never used beyond the exchange that created it.
+	discardMaxLoginsCount = 1
+	// discardProfileTimeout bounds the entire best-effort GET/DELETE sequence.
+	discardProfileTimeout = time.Second
+)
+
+// deleteFreshEmailConnectionStub deletes a candidate standalone email profile
+// after a refused link. Exactly one email identity, with no linked profileData,
+// is required in addition to the metadata, age and login-count guards. Those
+// heuristics reduce risk but do not prove this exchange created the profile.
+// A missing/unparsable created_at refuses deletion; a 404 fetch is already gone.
+func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, userID, m2mToken string, now time.Time) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify fresh email-connection stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to verify fresh email-connection stub before delete",
+			"user_id", redaction.Redact(userID),
+			"status_code", statusCode,
+			"error", errGet,
+		)
+		return errors.NewUnexpected("failed to verify email-connection stub before delete", errGet)
+	}
+
+	if errIdentities := requireEmailConnectionOnly(&target); errIdentities != nil {
+		return errIdentities
+	}
+	if len(target.Identities) != 1 || target.Identities[0].ProfileData != nil {
+		return errors.NewForbidden("refusing to delete user that is not a standalone email profile")
+	}
+	if target.AppMetadata != nil && target.AppMetadata.SystemManaged {
+		return errors.NewForbidden("refusing to delete system-managed user")
+	}
+	createdAt, errParse := time.Parse(time.RFC3339, target.CreatedAt)
+	if errParse != nil {
+		return errors.NewForbidden("refusing to delete user with a missing or unparsable created_at")
+	}
+	if now.Sub(createdAt) > discardMaxProfileAge {
+		return errors.NewForbidden("refusing to delete user created before the freshness window")
+	}
+	if target.LoginsCount > discardMaxLoginsCount {
+		return errors.NewForbidden("refusing to delete user that has logged in")
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete fresh email-connection stub user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
+	}
+	slog.InfoContext(ctx, "deleted fresh email-connection profile after refused link",
+		"user_id", redaction.Redact(userID),
+	)
+	return nil
+}
+
+// DiscardVerifiedEmailProfile attempts bounded cleanup of a candidate standalone
+// profile after an OTP exchange. The subject comes from the ID token Auth0 just
+// returned. Only an already-cached M2M token is used: cleanup never waits for a
+// refresh. The deletion still requires deleteFreshEmailConnectionStub's guard.
+func (u *userReaderWriter) DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error {
+	if authResponse == nil || strings.TrimSpace(authResponse.IDToken) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, discardProfileTimeout)
+	defer cancel()
+
+	sub, errSubject := jwt.ExtractSubject(ctx, authResponse.IDToken)
+	if errSubject != nil {
+		return errors.NewValidation("invalid identity token: unable to extract subject", errSubject)
+	}
+
+	m2mToken, errToken := u.config.M2MTokenManager.cachedAccessToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token", errToken)
+	}
+
+	return u.deleteFreshEmailConnectionStub(ctx, sub, m2mToken, time.Now())
 }

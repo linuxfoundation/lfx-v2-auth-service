@@ -825,11 +825,13 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 	if principal == nil {
 		errExists := m.checkEmailExists(ctx, email.Email)
 		if errExists != nil {
+			m.discardVerifiedEmailProfile(ctx, authResponse)
 			return m.errorResponse(errExists.Error()), nil
 		}
 	} else {
 		connected, errConnected := m.isEmailConnectedToPrincipal(ctx, principal, email.Email)
 		if errConnected != nil {
+			m.discardVerifiedEmailProfile(ctx, authResponse)
 			return m.errorResponse(errConnected.Error()), nil
 		}
 		if connected {
@@ -859,6 +861,17 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 	}
 
 	return responseJSON, nil
+}
+
+// discardVerifiedEmailProfile removes the provider profile a proven OTP created
+// when the link is then refused. It is best-effort: a failure is logged and
+// never changes the refusal the caller returns.
+func (m *messageHandlerOrchestrator) discardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) {
+	if errDiscard := m.emailHandler.DiscardVerifiedEmailProfile(ctx, authResponse); errDiscard != nil {
+		slog.WarnContext(ctx, "failed to discard verified email profile after refused link",
+			"error", errDiscard,
+		)
+	}
 }
 
 // LinkIdentity links a verified email identity to a user account
