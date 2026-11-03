@@ -539,7 +539,7 @@ func TestSearchUsers_MultipleTermsHaveNoExactLookup(t *testing.T) {
 
 func TestBuildExactUserSearchQuery(t *testing.T) {
 	if q, ok := buildExactUserSearchQuery([]string{"jdoe"}); !ok ||
-		q != `(username:jdoe OR identities.user_id:jdoe) AND identities.connection:"Username-Password-Authentication"` {
+		q != `(username:jdoe OR identities.user_id:"jdoe") AND identities.connection:"Username-Password-Authentication"` {
 		t.Errorf("got %q, %v", q, ok)
 	}
 	if q, ok := buildExactUserSearchQuery([]string{"a.b@x.org"}); !ok ||
@@ -587,7 +587,7 @@ func TestUserSearchHTTPClient_KeepsQueriesOutOfTraces(t *testing.T) {
 		}
 		found := false
 		for _, attr := range spans[0].Attributes() {
-			if strings.Contains(attr.Value.Emit(), "secret.person") {
+			if strings.Contains(attr.Value.String(), "secret.person") {
 				found = true
 			}
 		}
@@ -595,4 +595,39 @@ func TestUserSearchHTTPClient_KeepsQueriesOutOfTraces(t *testing.T) {
 			t.Fatal("control: expected the default client's span to carry the query")
 		}
 	})
+}
+
+// The LFID comes from the database identity alone, whatever the root username says.
+func TestToUserSearchResults_IdentityIDs(t *testing.T) {
+	db := func(id any) []Auth0Identity {
+		return []Auth0Identity{{Connection: "github", UserID: "social-1"}, {Connection: constants.Auth0UsernamePasswordConnection, UserID: id}}
+	}
+
+	tests := []struct {
+		name string
+		user Auth0User
+		want string // expected username, "" when the account must be left out
+	}{
+		{"string id", Auth0User{UserID: "auth0|a", Username: "root", Identities: db("lfid")}, "lfid"},
+		{"numeric id keeps every digit", Auth0User{UserID: "auth0|b", Username: "root", Identities: db(float64(12345678))}, "12345678"},
+		{"id is trimmed", Auth0User{UserID: "auth0|c", Username: "root", Identities: db("  lfid  ")}, "lfid"},
+		{"root username is not a fallback for a blank id", Auth0User{UserID: "auth0|d", Username: "social-handle", Identities: db("")}, ""},
+		{"root username is not a fallback for a missing id", Auth0User{UserID: "auth0|e", Username: "social-handle", Identities: db(nil)}, ""},
+		{"root username is not a fallback for an unusable id", Auth0User{UserID: "auth0|f", Username: "social-handle", Identities: db(true)}, ""},
+		{"no database identity", Auth0User{UserID: "github|g", Username: "root", Identities: []Auth0Identity{{Connection: "github", UserID: "social-1"}}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toUserSearchResults([]Auth0User{tt.user})
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("expected the account to be left out, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Username != tt.want {
+				t.Fatalf("got %+v, want username %q", got, tt.want)
+			}
+		})
+	}
 }

@@ -182,15 +182,7 @@ func (u *Auth0User) ToUser() *model.User {
 
 	var identities []model.Identity
 	for _, auth0Id := range u.Identities {
-		var identityID string
-		switch v := auth0Id.UserID.(type) {
-		case float64:
-			identityID = strconv.FormatFloat(v, 'f', -1, 64)
-		case string:
-			identityID = v
-		default:
-			identityID = fmt.Sprintf("%v", v)
-		}
+		identityID := identityIDString(auth0Id.UserID)
 
 		identity := model.Identity{
 			Provider:   auth0Id.Provider,
@@ -216,6 +208,20 @@ func (u *Auth0User) ToUser() *model.User {
 		CreatedAt:    earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
 		// Carried so callers can refuse to treat an unverified root email as owned.
 		PrimaryEmailVerified: u.EmailVerified,
+	}
+}
+
+// identityIDString renders an identity's user_id. Auth0 returns it as a string
+// for most connections but as a JSON number for some providers, which decodes
+// as float64 and must not be rendered in exponent form.
+func identityIDString(v any) string {
+	switch id := v.(type) {
+	case float64:
+		return strconv.FormatFloat(id, 'f', -1, 64)
+	case string:
+		return id
+	default:
+		return fmt.Sprintf("%v", id)
 	}
 }
 

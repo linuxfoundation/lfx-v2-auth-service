@@ -325,8 +325,10 @@ func buildExactUserSearchQuery(terms []string) (string, bool) {
 		return fmt.Sprintf("email:%s AND identities.connection:%q", escaped, constants.Auth0UsernamePasswordConnection), true
 	}
 	// An LFID can live in a linked database identity while the root username
-	// belongs to another primary account, so both fields are searched.
-	return fmt.Sprintf("(username:%[1]s OR identities.user_id:%[1]s) AND identities.connection:%[2]q",
+	// belongs to another primary account, so both fields are searched. The
+	// identity id is quoted: it is matched as an exact value, so a numeric-looking
+	// LFID is not read as a number.
+	return fmt.Sprintf(`(username:%[1]s OR identities.user_id:"%[1]s") AND identities.connection:%[2]q`,
 		escaped, constants.Auth0UsernamePasswordConnection), true
 }
 
@@ -338,25 +340,21 @@ func toUserSearchResults(users []Auth0User) []model.UserSearchResult {
 	for i := range users {
 		user := &users[i]
 
-		// The LFID is the user_id of the database identity. The root username
-		// is only a fallback: for a linked account whose primary is another
-		// connection it can be that connection's username, which does not
-		// identify the LFID account.
+		// The LFID is the user_id of the database identity. The root username is
+		// never used: for a linked account whose primary is another connection it
+		// can be that connection's username, which does not identify the LFID
+		// account. A database identity with no usable user_id leaves the account out.
 		username := ""
-		hasLFID := false
 		for _, identity := range user.Identities {
 			if identity.Connection != constants.Auth0UsernamePasswordConnection {
 				continue
 			}
-			hasLFID = true
-			if id, ok := identity.UserID.(string); ok && id != "" && username == "" {
+			if id := databaseIdentityUsername(identity.UserID); id != "" {
 				username = id
+				break
 			}
 		}
-		if hasLFID && username == "" {
-			username = user.Username
-		}
-		if !hasLFID || username == "" {
+		if username == "" {
 			continue
 		}
 
@@ -372,6 +370,16 @@ func toUserSearchResults(users []Auth0User) []model.UserSearchResult {
 		results = append(results, result)
 	}
 	return results
+}
+
+// databaseIdentityUsername returns the LFID held in a database identity's
+// user_id, or "" when it is missing, blank, or neither a string nor a number.
+func databaseIdentityUsername(userID any) string {
+	switch userID.(type) {
+	case string, float64:
+		return strings.TrimSpace(identityIDString(userID))
+	}
+	return ""
 }
 
 // displayName returns the user's name, falling back to given and family name.

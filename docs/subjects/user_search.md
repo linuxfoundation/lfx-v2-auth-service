@@ -22,7 +22,7 @@ Searches Auth0 for users by LFID (username), email, or name. It covers every use
 | Field | Type | Description |
 |-------|------|-------------|
 | `subject_token` | string | The caller's valid LFX V2 access token (same requirements as the [impersonation token exchange](impersonation.md)) |
-| `query` | string | Free text: part of a username, email, or name. Whitespace separates terms |
+| `query` | string | Free text: part of a username, email, or name. Terms are separated by whitespace or any character outside the allowed set (see Matching) |
 | `limit` | integer | Optional. Maximum results; defaults to 10, capped at 20 |
 
 ### Reply
@@ -56,11 +56,11 @@ nats request lfx.auth-service.user.search \
 
 ### Matching
 
-- The query is split on whitespace and lowercased. Each term of 3 or more characters is a **prefix** match on `name`, `given_name`, `family_name`, `username`, `identities.user_id` or `email` (the LFID can live in a linked database identity while the root `username` belongs to another account); all terms must match (AND), so `john smith` and `smith john` both find John Smith.
+- The query is lowercased and split into terms on any character outside the allowlist below (for example whitespace or a comma). Each term of 3 or more characters is a **prefix** match on `name`, `given_name`, `family_name`, `username`, `identities.user_id` or `email` (the LFID can live in a linked database identity while the root `username` belongs to another account); all terms must match (AND), so `john smith` and `smith john` both find John Smith.
 - A term containing `@` is matched against `email` only.
 - Terms shorter than 3 characters are ignored (the caller is usually still typing them). At least one term of 3 or more characters is required. At most 4 such terms are accepted (short words such as "de" or "la" do not count), at most 10 words overall, and the query may be at most 200 characters.
 - Only letters, digits and `. _ - + ' @` are accepted in a term; any other character separates terms (so `smith, john` is two terms). This is an allowlist because Auth0 search is Lucene syntax with operators, such as the `<` and `>` range operators, that cannot be escaped. The allowed characters that are Lucene operators (`-` and `+`) are escaped, so input is only ever a literal prefix.
-- Only accounts with an LFID (a `Username-Password-Authentication` identity) are returned, and the `username` in a result is that identity's `user_id`, not the root username (which for a linked account can belong to another connection). Results are ordered exact username, exact email, username prefix, email prefix, then other matches, because Auth0 does not rank results.
+- Only accounts with an LFID (a `Username-Password-Authentication` identity) are returned, and the `username` in a result is that identity's `user_id`, not the root username (which for a linked account can belong to another connection). A numeric `user_id` is used as its digits, and an account whose database identity has no usable `user_id` is left out. Results are ordered exact username, exact email, username prefix, email prefix, then other matches, because Auth0 does not rank results.
 - Auth0 returns an unranked page, so when many accounts share a prefix the exact one may not be in it. For a single-term query the service therefore also looks up the exact username, matched against both the root `username` and `identities.user_id` (or, for a term with `@`, the exact email) and merges it into the results before ranking. For several terms there is no single exact value, so only the prefix query runs. If the exact lookup fails, the prefix results are returned.
 
 ### Important Notes
