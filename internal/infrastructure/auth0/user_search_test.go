@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
@@ -34,7 +38,9 @@ func TestParseUserSearchTerms(t *testing.T) {
 		{name: "keeps an email prefix", input: "jdoe@exa", want: []string{"jdoe@exa"}},
 		{name: "punctuation separates terms", input: "smith, john", want: []string{"smith", "john"}},
 		{name: "range operators are separators, not syntax", input: ">aaa <bbb", want: []string{"aaa", "bbb"}},
-		{name: "unsupported characters cannot form a term", input: `a=b&c"d(e)`, wantErr: true},
+		{name: "unsupported characters cannot form a term", input: `a=b&c`, wantErr: true},
+		{name: "name particles do not count towards the cap", input: "juan de la vega de", want: []string{"juan", "vega"}},
+		{name: "too many raw words", input: "a b c d e f g h i j k", wantErr: true},
 		{name: "keeps allowed punctuation", input: "o'brien j.doe_x-y+z", want: []string{"o'brien", "j.doe_x-y+z"}},
 		{name: "keeps non-ASCII letters", input: "José Núñez", want: []string{"josé", "núñez"}},
 		{name: "all terms too short", input: "jo s", wantErr: true},
@@ -91,14 +97,14 @@ func TestBuildUserSearchQuery(t *testing.T) {
 		{
 			name:  "single term searches every field",
 			terms: []string{"jdoe"},
-			want: `(name:jdoe* OR given_name:jdoe* OR family_name:jdoe* OR username:jdoe* OR email:jdoe*)` +
+			want: `(name:jdoe* OR given_name:jdoe* OR family_name:jdoe* OR username:jdoe* OR identities.user_id:jdoe* OR email:jdoe*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 		{
 			name:  "terms are AND-ed",
 			terms: []string{"john", "smith"},
-			want: `(name:john* OR given_name:john* OR family_name:john* OR username:john* OR email:john*)` +
-				` AND (name:smith* OR given_name:smith* OR family_name:smith* OR username:smith* OR email:smith*)` +
+			want: `(name:john* OR given_name:john* OR family_name:john* OR username:john* OR identities.user_id:john* OR email:john*)` +
+				` AND (name:smith* OR given_name:smith* OR family_name:smith* OR username:smith* OR identities.user_id:smith* OR email:smith*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 		{
@@ -109,7 +115,7 @@ func TestBuildUserSearchQuery(t *testing.T) {
 		{
 			name:  "operators are escaped",
 			terms: []string{"a)or(b"},
-			want: `(name:a\)or\(b* OR given_name:a\)or\(b* OR family_name:a\)or\(b* OR username:a\)or\(b* OR email:a\)or\(b*)` +
+			want: `(name:a\)or\(b* OR given_name:a\)or\(b* OR family_name:a\)or\(b* OR username:a\)or\(b* OR identities.user_id:a\)or\(b* OR email:a\)or\(b*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 	}
@@ -143,6 +149,8 @@ func TestToUserSearchResults(t *testing.T) {
 		{UserID: "auth0|c", Username: "carol", Name: "Carol C", Email: "carol@example.com", Identities: []Auth0Identity{lfidIdentity("carol")}},
 		// No LFID (social only): dropped.
 		{UserID: "github|d", Username: "dave", Name: "Dave D", Email: "dave@example.com", EmailVerified: true, Identities: []Auth0Identity{{Connection: "github", UserID: "123"}}},
+		// Linked account whose root username is the social primary's, not the LFID.
+		{UserID: "github|f", Username: "social-handle", Name: "Frank F", Email: "frank@example.com", EmailVerified: true, Identities: []Auth0Identity{{Connection: "github", UserID: "123"}, lfidIdentity("linkedlfid")}},
 		// Matched an email identity and an LFID identity on different identities: still has an LFID.
 		{UserID: "auth0|e", Username: "erin", Identities: []Auth0Identity{{Connection: constants.EmailConnection, UserID: "x"}, lfidIdentity("erin")}},
 	}
@@ -152,6 +160,7 @@ func TestToUserSearchResults(t *testing.T) {
 		{UserID: "auth0|a", Username: "alice", Name: "Alice A", Email: "alice@example.com"},
 		{UserID: "auth0|b", Username: "bob", Name: "Bob B", Email: "bob@example.com"},
 		{UserID: "auth0|c", Username: "carol", Name: "Carol C"},
+		{UserID: "github|f", Username: "linkedlfid", Name: "Frank F", Email: "frank@example.com"},
 		{UserID: "auth0|e", Username: "erin"},
 	}
 	if len(got) != len(want) {
@@ -238,7 +247,7 @@ func newTestUserSearch(t *testing.T, api *fakeManagementAPI, tokens managementTo
 		domain:     testImpersonationDomain,
 		authorizer: flow,
 		tokens:     tokens,
-		httpClient: httpclient.NewClient(httpclient.Config{Timeout: 5 * time.Second, Transport: api}),
+		httpClient: newUserSearchHTTPClient(api),
 	}, tenantKey
 }
 
@@ -342,7 +351,7 @@ func TestSearchUsers_RejectsUnauthorizedCallers(t *testing.T) {
 				domain:     testImpersonationDomain,
 				authorizer: newTestImpersonationFlow(t, fa, newTestClock()),
 				tokens:     searchTokenSource{token: "m2m-token"},
-				httpClient: httpclient.NewClient(httpclient.Config{Timeout: 5 * time.Second, Transport: api}),
+				httpClient: newUserSearchHTTPClient(api),
 			}
 
 			_, err := search.SearchUsers(context.Background(), tt.token(), "john", 10)
@@ -441,7 +450,7 @@ func userJSON(id string) string {
 // not contain it.
 func TestSearchUsers_ExactUsernameOutsidePrefixPage(t *testing.T) {
 	api := &fakeManagementAPI{respond: func(q string) (int, string) {
-		if strings.HasPrefix(q, "username:john AND") {
+		if strings.HasPrefix(q, "(username:john OR") {
 			return 200, "[" + userJSON("john") + "]"
 		}
 		// The prefix page: many other users, not the exact one.
@@ -481,7 +490,7 @@ func TestSearchUsers_ExactEmailLookup(t *testing.T) {
 	if len(got) != 1 || got[0].Username != "jdoe" {
 		t.Fatalf("unexpected results: %+v", got)
 	}
-	if len(exactQueries) != 1 || exactQueries[0] != "email:jdoe@example.com" {
+	if len(exactQueries) != 1 || exactQueries[0] != `email:jdoe@example.com AND identities.connection:"Username-Password-Authentication"` {
 		t.Fatalf("unexpected exact query: %v", exactQueries)
 	}
 }
@@ -500,7 +509,7 @@ func TestSearchUsers_ExactLookupDedupesAndToleratesFailure(t *testing.T) {
 
 	t.Run("a failed exact lookup falls back to the prefix page", func(t *testing.T) {
 		api := &fakeManagementAPI{respond: func(q string) (int, string) {
-			if strings.HasPrefix(q, "username:john AND") {
+			if strings.HasPrefix(q, "(username:john OR") {
 				return http.StatusServiceUnavailable, "{}"
 			}
 			return 200, "[" + userJSON("johnny") + "]"
@@ -530,13 +539,60 @@ func TestSearchUsers_MultipleTermsHaveNoExactLookup(t *testing.T) {
 
 func TestBuildExactUserSearchQuery(t *testing.T) {
 	if q, ok := buildExactUserSearchQuery([]string{"jdoe"}); !ok ||
-		q != `username:jdoe AND identities.connection:"Username-Password-Authentication"` {
+		q != `(username:jdoe OR identities.user_id:jdoe) AND identities.connection:"Username-Password-Authentication"` {
 		t.Errorf("got %q, %v", q, ok)
 	}
-	if q, ok := buildExactUserSearchQuery([]string{"a.b@x.org"}); !ok || q != "email:a.b@x.org" {
+	if q, ok := buildExactUserSearchQuery([]string{"a.b@x.org"}); !ok ||
+		q != `email:a.b@x.org AND identities.connection:"Username-Password-Authentication"` {
 		t.Errorf("got %q, %v", q, ok)
 	}
 	if _, ok := buildExactUserSearchQuery([]string{"john", "smith"}); ok {
 		t.Error("several terms have no single exact value")
 	}
+}
+
+// Search terms are other people's names and emails, so they must not reach
+// traces: client spans record the full request URL.
+func TestUserSearchHTTPClient_KeepsQueriesOutOfTraces(t *testing.T) {
+	api := &fakeManagementAPI{body: `[]`}
+	call := func(client *httpclient.Client) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, "https://"+testImpersonationDomain+"/api/v2/users?q=email%3Asecret.person%40example.com", nil)
+		if _, err := client.Do(context.Background(), httpclient.Request{Method: req.Method, URL: req.URL.String()}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+	}
+
+	t.Run("user search client records no span", func(t *testing.T) {
+		recorder := tracetest.NewSpanRecorder()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+		call(newUserSearchHTTPClient(api, otelhttp.WithTracerProvider(provider)))
+		if n := len(recorder.Ended()); n != 0 {
+			t.Fatalf("expected no spans, got %d", n)
+		}
+	})
+
+	// Control: the default client does record the URL, so the test above proves something.
+	t.Run("default client records the URL", func(t *testing.T) {
+		recorder := tracetest.NewSpanRecorder()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+		call(httpclient.NewClient(httpclient.Config{
+			Timeout:     5 * time.Second,
+			Transport:   api,
+			OTelOptions: []otelhttp.Option{otelhttp.WithTracerProvider(provider)},
+		}))
+		spans := recorder.Ended()
+		if len(spans) != 1 {
+			t.Fatalf("expected one span, got %d", len(spans))
+		}
+		found := false
+		for _, attr := range spans[0].Attributes() {
+			if strings.Contains(attr.Value.Emit(), "secret.person") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("control: expected the default client's span to carry the query")
+		}
+	})
 }

@@ -15,6 +15,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
@@ -27,8 +29,12 @@ const (
 	// userSearchMinTermLength is the shortest term worth sending to Auth0. Shorter
 	// prefixes match too much of the tenant and are slow against its ~2s query limit.
 	userSearchMinTermLength = 3
-	// userSearchMaxTerms bounds the query length and the cost of the AND-ed clauses.
+	// userSearchMaxTerms bounds the query length and the cost of the AND-ed
+	// clauses. It counts only terms long enough to be searched.
 	userSearchMaxTerms = 4
+	// userSearchMaxRawFields bounds the words in the input before short ones
+	// are dropped.
+	userSearchMaxRawFields = 10
 	// userSearchMaxQueryLength bounds the raw input before it is tokenized.
 	userSearchMaxQueryLength = 200
 	// userSearchDefaultLimit and userSearchMaxLimit bound the number of results
@@ -89,8 +95,24 @@ func NewUserSearcher(ctx context.Context, domain string, flow port.Impersonator)
 		domain:     domain,
 		authorizer: authorizer,
 		tokens:     tokens,
-		httpClient: httpclient.NewClient(httpclient.Config{Timeout: userSearchTimeout}),
+		httpClient: newUserSearchHTTPClient(nil),
 	}, nil
+}
+
+// newUserSearchHTTPClient builds the Management API client for user search.
+// Its requests carry the search terms (names and email addresses of other
+// people) in the URL, and client spans record the full URL, so they are kept
+// out of traces entirely. base is the transport under the instrumentation
+// (nil for the default); extra options exist for tests.
+func newUserSearchHTTPClient(base http.RoundTripper, extra ...otelhttp.Option) *httpclient.Client {
+	options := append([]otelhttp.Option{
+		otelhttp.WithFilter(func(*http.Request) bool { return false }),
+	}, extra...)
+	return httpclient.NewClient(httpclient.Config{
+		Timeout:     userSearchTimeout,
+		Transport:   base,
+		OTelOptions: options,
+	})
 }
 
 // SearchUsers authorizes subjectToken as an impersonator, then returns users
@@ -226,8 +248,8 @@ func parseUserSearchTerms(input string) ([]string, error) {
 	}
 
 	fields := strings.FieldsFunc(strings.ToLower(input), func(r rune) bool { return !isUserSearchChar(r) })
-	if len(fields) > userSearchMaxTerms {
-		return nil, errors.NewValidation(fmt.Sprintf("query has too many terms (maximum %d)", userSearchMaxTerms))
+	if len(fields) > userSearchMaxRawFields {
+		return nil, errors.NewValidation("query has too many words")
 	}
 
 	terms := make([]string, 0, len(fields))
@@ -239,12 +261,18 @@ func parseUserSearchTerms(input string) ([]string, error) {
 	if len(terms) == 0 {
 		return nil, errors.NewValidation(fmt.Sprintf("query needs at least one term of %d or more characters", userSearchMinTermLength))
 	}
+	// Only the terms that are searched count towards the cap, so short name
+	// particles ("de", "la", "van der") never turn a full name into an error.
+	if len(terms) > userSearchMaxTerms {
+		return nil, errors.NewValidation(fmt.Sprintf("query has too many terms (maximum %d)", userSearchMaxTerms))
+	}
 	return terms, nil
 }
 
 // luceneSpecialChars are the characters Lucene query syntax treats as operators.
 // They are escaped so user input can only ever be a literal prefix.
-// Whitespace never reaches here because terms come from strings.Fields.
+// Terms come from the isUserSearchChar allowlist, so only - and + can reach
+// the escaper today; the full set is kept as defense in depth.
 const luceneSpecialChars = `+-&|!(){}[]^"~*?:\/`
 
 // escapeLucene backslash-escapes every Lucene operator character in term.
@@ -277,7 +305,7 @@ func buildUserSearchQuery(terms []string) string {
 			continue
 		}
 		clauses = append(clauses, fmt.Sprintf(
-			"(name:%[1]s* OR given_name:%[1]s* OR family_name:%[1]s* OR username:%[1]s* OR email:%[1]s*)",
+			"(name:%[1]s* OR given_name:%[1]s* OR family_name:%[1]s* OR username:%[1]s* OR identities.user_id:%[1]s* OR email:%[1]s*)",
 			escaped,
 		))
 	}
@@ -294,9 +322,12 @@ func buildExactUserSearchQuery(terms []string) (string, bool) {
 	}
 	escaped := escapeLucene(terms[0])
 	if strings.Contains(terms[0], "@") {
-		return "email:" + escaped, true
+		return fmt.Sprintf("email:%s AND identities.connection:%q", escaped, constants.Auth0UsernamePasswordConnection), true
 	}
-	return fmt.Sprintf("username:%s AND identities.connection:%q", escaped, constants.Auth0UsernamePasswordConnection), true
+	// An LFID can live in a linked database identity while the root username
+	// belongs to another primary account, so both fields are searched.
+	return fmt.Sprintf("(username:%[1]s OR identities.user_id:%[1]s) AND identities.connection:%[2]q",
+		escaped, constants.Auth0UsernamePasswordConnection), true
 }
 
 // toUserSearchResults maps Auth0 users to search results, keeping only accounts
@@ -307,16 +338,23 @@ func toUserSearchResults(users []Auth0User) []model.UserSearchResult {
 	for i := range users {
 		user := &users[i]
 
-		username := user.Username
+		// The LFID is the user_id of the database identity. The root username
+		// is only a fallback: for a linked account whose primary is another
+		// connection it can be that connection's username, which does not
+		// identify the LFID account.
+		username := ""
 		hasLFID := false
 		for _, identity := range user.Identities {
 			if identity.Connection != constants.Auth0UsernamePasswordConnection {
 				continue
 			}
 			hasLFID = true
-			if id, ok := identity.UserID.(string); ok && username == "" {
+			if id, ok := identity.UserID.(string); ok && id != "" && username == "" {
 				username = id
 			}
+		}
+		if hasLFID && username == "" {
+			username = user.Username
 		}
 		if !hasLFID || username == "" {
 			continue
