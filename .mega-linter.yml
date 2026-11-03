@@ -56,8 +56,8 @@ GO_GOLANGCI_LINT_PRE_COMMANDS:
 
 # The osv-scanner bundled with MegaLinter is built with Go 1.26, so its
 # govulncheck step cannot load a go 1.27.3 module. Install osv-scanner
-# v2.7.0 (built with Go 1.27, checksum verified). Remove with the
-# golangci-lint block above.
+# v2.7.0 (built with Go 1.27, checksum verified). Remove once a MegaLinter
+# release ships osv-scanner built with Go >= 1.27.3.
 REPOSITORY_OSV_SCANNER_PRE_COMMANDS:
   - command: >-
       go env -w GOTOOLCHAIN=auto &&
