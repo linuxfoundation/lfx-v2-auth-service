@@ -294,33 +294,40 @@ func NewImpersonationFlow(ctx context.Context, domain string) (port.Impersonator
 // V2 access token issued by this tenant and that its bearer is permitted to
 // impersonate. It fails closed if the verifier is not fully configured.
 func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectToken string) error {
+	_, err := f.authorizeSubject(ctx, subjectToken)
+	return err
+}
+
+// authorizeSubject is authorizeSubjectToken that also returns the verified
+// token's subject, for callers that need to attribute the request (audit logs).
+func (f *impersonationFlow) authorizeSubject(ctx context.Context, subjectToken string) (string, error) {
 	if f.subjectKeys == nil || strings.TrimSpace(f.issuer) == "" || strings.TrimSpace(f.lfxV2Audience) == "" {
-		return errors.NewUnexpected("subject token verification is not configured")
+		return "", errors.NewUnexpected("subject token verification is not configured")
 	}
 
 	// The token is forwarded to Auth0 as-is, so accept only the compact JWS form
 	// the verifier sees unchanged (no Bearer prefix or JSON serialization).
 	if !isCompactJWS(subjectToken) {
-		return errors.NewUnauthorized("invalid subject_token")
+		return "", errors.NewUnauthorized("invalid subject_token")
 	}
 
 	msg, err := jws.Parse([]byte(subjectToken))
 	if err != nil || len(msg.Signatures()) != 1 {
-		return errors.NewUnauthorized("invalid subject_token")
+		return "", errors.NewUnauthorized("invalid subject_token")
 	}
 	headers := msg.Signatures()[0].ProtectedHeaders()
 	kid := headers.KeyID()
 	if kid == "" || headers.Algorithm() != jwa.RS256 {
-		return errors.NewUnauthorized("invalid subject_token")
+		return "", errors.NewUnauthorized("invalid subject_token")
 	}
 
 	signingKey, err := f.subjectKeys.key(ctx, kid)
 	if err != nil {
 		var unauthorized errors.Unauthorized
 		if stderrors.As(err, &unauthorized) {
-			return errors.NewUnauthorized("invalid subject_token")
+			return "", errors.NewUnauthorized("invalid subject_token")
 		}
-		return err
+		return "", err
 	}
 
 	// Only LFX V2 API tokens are valid subject tokens: the exchange declares
@@ -335,7 +342,7 @@ func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectTo
 	// JWTVerify logs the specific failure; the reply stays generic.
 	claims, err := verifier.JWTVerify(ctx, subjectToken)
 	if err != nil {
-		return errors.NewUnauthorized("invalid subject_token")
+		return "", errors.NewUnauthorized("invalid subject_token")
 	}
 
 	canImpersonate, _ := claims.GetClaim(canImpersonateClaim)
@@ -343,10 +350,10 @@ func (f *impersonationFlow) authorizeSubjectToken(ctx context.Context, subjectTo
 		slog.WarnContext(ctx, "impersonation denied: subject token lacks impersonation permission",
 			"sub", redaction.Redact(claims.Subject),
 		)
-		return errors.NewForbidden("subject_token is not authorized to impersonate")
+		return "", errors.NewForbidden("subject_token is not authorized to impersonate")
 	}
 
-	return nil
+	return claims.Subject, nil
 }
 
 // isCompactJWS reports whether token is three base64url segments joined by dots.

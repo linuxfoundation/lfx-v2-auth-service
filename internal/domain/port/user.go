@@ -26,6 +26,13 @@ type UserReader interface {
 	MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error)
 }
 
+// UserSearcher searches users on behalf of a caller that is allowed to
+// impersonate. Implementations must authorize subjectToken before querying the
+// identity provider.
+type UserSearcher interface {
+	SearchUsers(ctx context.Context, subjectToken, query string, limit int) ([]model.UserSearchResult, error)
+}
+
 // UserWriter defines the behavior of the user writer
 type UserWriter interface {
 	UpdateUser(ctx context.Context, user *model.User) (*model.User, error)

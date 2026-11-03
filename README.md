@@ -69,6 +69,7 @@ has the full reference (subjects, payloads, examples):
 - **[Password Management](docs/subjects/password_management.md)** — change password and send reset links
 - **[Impersonation](docs/subjects/impersonation.md)** — exchange a token to act as another user
 - **[Aliases](docs/subjects/alias.md)** — claim a system-managed alias email
+- **[User Search](docs/subjects/user_search.md)** — search users by LFID, email, or name (impersonators only)
 - **[Indexer Contract](docs/indexer-contract.md)** — data sent to the indexer service (currently none)
 
 For end-to-end authentication flows, see **[Auth Flows](docs/auth-flows/README.md)**.
