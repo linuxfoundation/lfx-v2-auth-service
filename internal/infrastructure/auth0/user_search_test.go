@@ -32,6 +32,11 @@ func TestParseUserSearchTerms(t *testing.T) {
 		{name: "lowercases and splits on whitespace", input: "  John   SMITH ", want: []string{"john", "smith"}},
 		{name: "drops a term still being typed", input: "john s", want: []string{"john"}},
 		{name: "keeps an email prefix", input: "jdoe@exa", want: []string{"jdoe@exa"}},
+		{name: "punctuation separates terms", input: "smith, john", want: []string{"smith", "john"}},
+		{name: "range operators are separators, not syntax", input: ">aaa <bbb", want: []string{"aaa", "bbb"}},
+		{name: "unsupported characters cannot form a term", input: `a=b&c"d(e)`, wantErr: true},
+		{name: "keeps allowed punctuation", input: "o'brien j.doe_x-y+z", want: []string{"o'brien", "j.doe_x-y+z"}},
+		{name: "keeps non-ASCII letters", input: "José Núñez", want: []string{"josé", "núñez"}},
 		{name: "all terms too short", input: "jo s", wantErr: true},
 		{name: "empty", input: "   ", wantErr: true},
 		{name: "too many terms", input: "aaa bbb ccc ddd eee", wantErr: true},
@@ -186,20 +191,25 @@ type fakeManagementAPI struct {
 	requests []*http.Request
 	status   int
 	body     string
+	// respond, when set, chooses the status and body from the q parameter.
+	respond func(q string) (int, string)
 }
 
 func (f *fakeManagementAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
-	status := f.status
+	status, body := f.status, f.body
+	if f.respond != nil {
+		status, body = f.respond(req.URL.Query().Get("q"))
+	}
 	if status == 0 {
 		status = http.StatusOK
 	}
 	return &http.Response{
 		StatusCode: status,
 		Header:     http.Header{"Content-Type": {"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(f.body)),
+		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
 	}, nil
 }
@@ -390,11 +400,16 @@ func TestSearchUsers_UpstreamFailureDoesNotLeakDetails(t *testing.T) {
 
 func TestSearchUsers_TokenFailure(t *testing.T) {
 	api := &fakeManagementAPI{body: `[]`}
-	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{err: stderrors.New("boom")})
+	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{err: stderrors.New("boom: client_secret rejected")})
 	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
 
-	if _, err := search.SearchUsers(context.Background(), token, "john", 10); err == nil {
-		t.Fatal("expected an error")
+	_, err := search.SearchUsers(context.Background(), token, "john", 10)
+	var unavailable errors.ServiceUnavailable
+	if !stderrors.As(err, &unavailable) {
+		t.Fatalf("expected ServiceUnavailable, got %T: %v", err, err)
+	}
+	if strings.Contains(err.Error(), "boom") {
+		t.Errorf("the token error must not reach the caller: %v", err)
 	}
 	if api.count() != 0 {
 		t.Fatal("no search without an M2M token")
@@ -407,11 +422,121 @@ func TestSearchUsers_InputCannotInjectParameters(t *testing.T) {
 	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
 	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
 
-	if _, err := search.SearchUsers(context.Background(), token, "abc&per_page=1000&fields=password_hash", 10); err != nil {
+	if _, err := search.SearchUsers(context.Background(), token, "abc&per_page=1000", 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	q := api.requests[0].URL.Query()
 	if q.Get("per_page") != "20" || q.Get("fields") != userSearchFields {
 		t.Fatalf("input injected parameters: per_page=%s fields=%s", q.Get("per_page"), q.Get("fields"))
+	}
+}
+
+const lfidUser = `{"user_id":"auth0|%s","username":"%s","name":"%s","email":"%s@example.com","email_verified":true,"identities":[{"connection":"Username-Password-Authentication","user_id":"%s"}]}`
+
+func userJSON(id string) string {
+	return strings.NewReplacer("%s", id).Replace(lfidUser)
+}
+
+// A short exact LFID must surface even when Auth0's unranked prefix page does
+// not contain it.
+func TestSearchUsers_ExactUsernameOutsidePrefixPage(t *testing.T) {
+	api := &fakeManagementAPI{respond: func(q string) (int, string) {
+		if strings.HasPrefix(q, "username:john AND") {
+			return 200, "[" + userJSON("john") + "]"
+		}
+		// The prefix page: many other users, not the exact one.
+		return 200, "[" + userJSON("johnny") + "," + userJSON("johnson") + "]"
+	}}
+	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+	got, err := search.SearchUsers(context.Background(), token, "john", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 3 || got[0].Username != "john" {
+		t.Fatalf("the exact username must rank first, got %+v", got)
+	}
+	if api.count() != 2 {
+		t.Fatalf("expected the prefix and the exact query, got %d calls", api.count())
+	}
+}
+
+func TestSearchUsers_ExactEmailLookup(t *testing.T) {
+	var exactQueries []string
+	api := &fakeManagementAPI{respond: func(q string) (int, string) {
+		if !strings.Contains(q, "*") {
+			exactQueries = append(exactQueries, q)
+			return 200, "[" + userJSON("jdoe") + "]"
+		}
+		return 200, "[]"
+	}}
+	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+	got, err := search.SearchUsers(context.Background(), token, "jdoe@example.com", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].Username != "jdoe" {
+		t.Fatalf("unexpected results: %+v", got)
+	}
+	if len(exactQueries) != 1 || exactQueries[0] != "email:jdoe@example.com" {
+		t.Fatalf("unexpected exact query: %v", exactQueries)
+	}
+}
+
+func TestSearchUsers_ExactLookupDedupesAndToleratesFailure(t *testing.T) {
+	t.Run("same user from both queries appears once", func(t *testing.T) {
+		api := &fakeManagementAPI{body: "[" + userJSON("john") + "]"}
+		search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+		token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+		got, err := search.SearchUsers(context.Background(), token, "john", 10)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("got %+v, err %v", got, err)
+		}
+	})
+
+	t.Run("a failed exact lookup falls back to the prefix page", func(t *testing.T) {
+		api := &fakeManagementAPI{respond: func(q string) (int, string) {
+			if strings.HasPrefix(q, "username:john AND") {
+				return http.StatusServiceUnavailable, "{}"
+			}
+			return 200, "[" + userJSON("johnny") + "]"
+		}}
+		search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+		token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+		got, err := search.SearchUsers(context.Background(), token, "john", 10)
+		if err != nil || len(got) != 1 || got[0].Username != "johnny" {
+			t.Fatalf("got %+v, err %v", got, err)
+		}
+	})
+}
+
+func TestSearchUsers_MultipleTermsHaveNoExactLookup(t *testing.T) {
+	api := &fakeManagementAPI{body: "[]"}
+	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+	if _, err := search.SearchUsers(context.Background(), token, "john smith", 10); err != nil {
+		t.Fatal(err)
+	}
+	if api.count() != 1 {
+		t.Fatalf("expected only the prefix query, got %d calls", api.count())
+	}
+}
+
+func TestBuildExactUserSearchQuery(t *testing.T) {
+	if q, ok := buildExactUserSearchQuery([]string{"jdoe"}); !ok ||
+		q != `username:jdoe AND identities.connection:"Username-Password-Authentication"` {
+		t.Errorf("got %q, %v", q, ok)
+	}
+	if q, ok := buildExactUserSearchQuery([]string{"a.b@x.org"}); !ok || q != "email:a.b@x.org" {
+		t.Errorf("got %q, %v", q, ok)
+	}
+	if _, ok := buildExactUserSearchQuery([]string{"john", "smith"}); ok {
+		t.Error("several terms have no single exact value")
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
@@ -39,6 +40,13 @@ const (
 	userSearchFetchFactor = 2
 	// userSearchTimeout bounds one Management API search call.
 	userSearchTimeout = 10 * time.Second
+	// userSearchExactFetchSize is how many users the exact lookup asks for; one
+	// LFID or email is unique, the margin only covers duplicate-looking data.
+	userSearchExactFetchSize = 5
+
+	// errUserSearchUnavailable is the only failure text returned for an
+	// upstream problem, so nothing from Auth0 reaches the caller.
+	errUserSearchUnavailable = "user search is unavailable"
 
 	// userSearchFields limits the Auth0 response to what the filter and the
 	// picker read.
@@ -86,8 +94,8 @@ func NewUserSearcher(ctx context.Context, domain string, flow port.Impersonator)
 }
 
 // SearchUsers authorizes subjectToken as an impersonator, then returns users
-// matching query. The query is never logged: it is free text that can contain
-// names and emails.
+// matching query. The query is never logged by this service: it is free text
+// that can contain names and emails.
 func (s *userSearch) SearchUsers(ctx context.Context, subjectToken, query string, limit int) ([]model.UserSearchResult, error) {
 	// Authorize before anything else so an unauthorized caller learns nothing,
 	// not even whether its query was well-formed.
@@ -104,31 +112,28 @@ func (s *userSearch) SearchUsers(ctx context.Context, subjectToken, query string
 
 	m2mToken, err := s.tokens.GetToken(ctx)
 	if err != nil {
-		return nil, errors.NewUnexpected("failed to get M2M token", err)
+		// The wrapped error can carry the token endpoint's response body, so it
+		// is logged here and never returned to the caller.
+		slog.ErrorContext(ctx, "failed to get M2M token for user search", "error", err)
+		return nil, errors.NewServiceUnavailable(errUserSearchUnavailable)
 	}
 
-	endpoint := fmt.Sprintf("https://%s/api/v2/users?q=%s&search_engine=v3&per_page=%d&fields=%s&include_fields=true",
-		s.domain,
-		url.QueryEscape(buildUserSearchQuery(terms)),
-		limit*userSearchFetchFactor,
-		url.QueryEscape(userSearchFields),
-	)
-
-	var users []Auth0User
-	statusCode, err := httpclient.NewAPIRequest(
-		s.httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(endpoint),
-		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("user search"),
-	).Call(ctx, &users)
+	users, err := s.fetch(ctx, m2mToken, buildUserSearchQuery(terms), limit*userSearchFetchFactor)
 	if err != nil {
-		// Do not forward the upstream message: it can echo the query.
-		slog.ErrorContext(ctx, "user search failed",
-			"error", err,
-			"status_code", statusCode,
-		)
-		return nil, errors.NewServiceUnavailable("user search is unavailable")
+		return nil, err
+	}
+
+	// Auth0 returns an unranked page, so a short exact LFID or email can be
+	// missing from it when many accounts share the prefix. Look the exact value
+	// up directly and merge it in before ranking. Best effort: the prefix page
+	// is already a usable answer.
+	if exactQuery, ok := buildExactUserSearchQuery(terms); ok {
+		exact, errExact := s.fetch(ctx, m2mToken, exactQuery, userSearchExactFetchSize)
+		if errExact != nil {
+			slog.WarnContext(ctx, "exact user lookup failed, using prefix results only")
+		} else {
+			users = mergeAuth0Users(exact, users)
+		}
 	}
 
 	results := rankUserSearchResults(toUserSearchResults(users), terms)
@@ -144,6 +149,47 @@ func (s *userSearch) SearchUsers(ctx context.Context, subjectToken, query string
 	return results, nil
 }
 
+// fetch runs one Management API user search. A failure is reported with a fixed
+// message: the upstream body can echo the query.
+func (s *userSearch) fetch(ctx context.Context, m2mToken, q string, perPage int) ([]Auth0User, error) {
+	endpoint := fmt.Sprintf("https://%s/api/v2/users?q=%s&search_engine=v3&per_page=%d&fields=%s&include_fields=true",
+		s.domain,
+		url.QueryEscape(q),
+		perPage,
+		url.QueryEscape(userSearchFields),
+	)
+
+	var users []Auth0User
+	// The HTTP client already logs the failure (status only, no query).
+	if _, err := httpclient.NewAPIRequest(
+		s.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(endpoint),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("user search"),
+	).Call(ctx, &users); err != nil {
+		return nil, errors.NewServiceUnavailable(errUserSearchUnavailable)
+	}
+	return users, nil
+}
+
+// mergeAuth0Users returns first followed by the users of rest that are not
+// already in it, keyed by user_id.
+func mergeAuth0Users(first, rest []Auth0User) []Auth0User {
+	seen := make(map[string]struct{}, len(first)+len(rest))
+	merged := make([]Auth0User, 0, len(first)+len(rest))
+	for _, group := range [][]Auth0User{first, rest} {
+		for _, user := range group {
+			if _, dup := seen[user.UserID]; dup {
+				continue
+			}
+			seen[user.UserID] = struct{}{}
+			merged = append(merged, user)
+		}
+	}
+	return merged
+}
+
 // clampUserSearchLimit applies the default and the maximum result count.
 func clampUserSearchLimit(limit int) int {
 	switch {
@@ -155,15 +201,31 @@ func clampUserSearchLimit(limit int) int {
 	return limit
 }
 
+// isUserSearchChar reports whether r may appear in a search term. This is an
+// allowlist on purpose: Auth0 search is Lucene query_string syntax, which has
+// operators that cannot be backslash-escaped (such as the < and > range
+// operators), so anything not known to be safe is a separator, not escaped.
+func isUserSearchChar(r rune) bool {
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return true
+	}
+	switch r {
+	case '.', '_', '-', '+', '\'', '@':
+		return true
+	}
+	return false
+}
+
 // parseUserSearchTerms splits free-text input into lowercase search terms.
-// Terms shorter than userSearchMinTermLength are dropped, since the user is
-// typically still typing them; at least one longer term must remain.
+// Characters outside isUserSearchChar separate terms, so "smith, john" is two
+// terms. Terms shorter than userSearchMinTermLength are dropped, since the user
+// is typically still typing them; at least one longer term must remain.
 func parseUserSearchTerms(input string) ([]string, error) {
 	if utf8.RuneCountInString(input) > userSearchMaxQueryLength {
 		return nil, errors.NewValidation("query is too long")
 	}
 
-	fields := strings.Fields(strings.ToLower(input))
+	fields := strings.FieldsFunc(strings.ToLower(input), func(r rune) bool { return !isUserSearchChar(r) })
 	if len(fields) > userSearchMaxTerms {
 		return nil, errors.NewValidation(fmt.Sprintf("query has too many terms (maximum %d)", userSearchMaxTerms))
 	}
@@ -221,6 +283,20 @@ func buildUserSearchQuery(terms []string) string {
 	}
 	clauses = append(clauses, fmt.Sprintf("identities.connection:%q", constants.Auth0UsernamePasswordConnection))
 	return strings.Join(clauses, " AND ")
+}
+
+// buildExactUserSearchQuery builds the lookup for a query that is a single
+// term, which is how an admin types a known LFID or email. It reports false
+// for several terms, where there is no single exact value to look up.
+func buildExactUserSearchQuery(terms []string) (string, bool) {
+	if len(terms) != 1 {
+		return "", false
+	}
+	escaped := escapeLucene(terms[0])
+	if strings.Contains(terms[0], "@") {
+		return "email:" + escaped, true
+	}
+	return fmt.Sprintf("username:%s AND identities.connection:%q", escaped, constants.Auth0UsernamePasswordConnection), true
 }
 
 // toUserSearchResults maps Auth0 users to search results, keeping only accounts

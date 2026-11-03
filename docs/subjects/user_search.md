@@ -59,14 +59,16 @@ nats request lfx.auth-service.user.search \
 - The query is split on whitespace and lowercased. Each term of 3 or more characters is a **prefix** match on `name`, `given_name`, `family_name`, `username` or `email`; all terms must match (AND), so `john smith` and `smith john` both find John Smith.
 - A term containing `@` is matched against `email` only.
 - Terms shorter than 3 characters are ignored (the caller is usually still typing them). At least one term of 3 or more characters is required, and at most 4 terms are accepted; the query may be at most 200 characters.
-- Lucene operator characters in the input are escaped, so input is only ever a literal prefix.
+- Only letters, digits and `. _ - + ' @` are accepted in a term; any other character separates terms (so `smith, john` is two terms). This is an allowlist because Auth0 search is Lucene syntax with operators, such as the `<` and `>` range operators, that cannot be escaped. The allowed characters that are Lucene operators (`-` and `+`) are escaped, so input is only ever a literal prefix.
 - Only accounts with an LFID (a `Username-Password-Authentication` identity) are returned. Results are ordered exact username, exact email, username prefix, email prefix, then other matches, because Auth0 does not rank results.
+- Auth0 returns an unranked page, so when many accounts share a prefix the exact one may not be in it. For a single-term query the service therefore also looks up the exact username (or, for a term with `@`, the exact email) and merges it into the results before ranking. For several terms there is no single exact value, so only the prefix query runs. If the exact lookup fails, the prefix results are returned.
 
 ### Important Notes
 
 - The `subject_token` is authorized exactly as for the token exchange (signature, issuer, expiry, LFX V2 audience, and `http://lfx.dev/claims/can_impersonate` set to boolean `true`) **before** anything is sent to Auth0. A request that fails any check gets an error reply and no search is performed; validation of `query` happens only after authorization.
 - The search runs with the service's M2M client (`read:users` on the Management API), not with the caller's token, so results are not limited to what the caller could see. This lets any impersonator find any user by prefix; it is why the check above matters.
-- The query text and returned emails are never logged. The log records only the caller's (redacted) subject, the number of terms and the number of results.
+- The service never logs the query text or returned emails. Its log records only the caller's (redacted) subject, the number of terms and the number of results. Like the other Auth0 calls in this service, the outgoing HTTP client is traced and its spans record the request URL, which includes the search terms, so trace data should be treated as sensitive.
+- Failures to obtain the M2M token or to reach Auth0 reply with the fixed message `user search is unavailable`; details stay in the server log.
 - Auth0 user search is eventually consistent, returns at most 1,000 matches, and times out (HTTP 503) after about 2 seconds. A search that fails or times out replies `user search is unavailable`; the upstream error is not forwarded because it can echo the query. Callers should debounce, and may retry.
 - Searches share the M2M client's Management API rate limit with login and profile flows. There is currently no per-caller rate limit in this service, so callers (for example the UI backend) should rate-limit.
 - Only available when the Auth0 provider is active.
