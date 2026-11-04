@@ -309,7 +309,7 @@ func TestSanitizeURL_SensitiveQueryKeys(t *testing.T) {
 // change to the query shape must keep this test green.
 func TestSanitizeURL_UserSearchQueryIsFullyRedacted(t *testing.T) {
 	queries := map[string]string{
-		"prefix":      `(name:jane* OR given_name:jane* OR family_name:jane* OR username:jane* OR identities.user_id:jane* OR email:jane*) AND identities.connection:"Username-Password-Authentication"`,
+		"prefix":      `(name:jane* OR given_name:jane* OR family_name:jane* OR username:jane* OR email:jane*) AND identities.connection:"Username-Password-Authentication"`,
 		"exact id":    `(username:jane OR identities.user_id:"jane") AND identities.connection:"Username-Password-Authentication"`,
 		"exact email": `email:jane.doe@acme.test AND identities.connection:"Username-Password-Authentication"`,
 	}
