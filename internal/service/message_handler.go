@@ -52,6 +52,7 @@ type messageHandlerOrchestrator struct {
 	identityUnlinker port.IdentityLinker
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
+	userSearcher     port.UserSearcher
 	eventPublisher   port.EventPublisher
 	aliasManager     port.AliasManager
 }
@@ -105,6 +106,13 @@ func WithPasswordHandlerForMessageHandler(passwordHandler port.PasswordHandler) 
 func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
 		m.impersonator = impersonator
+	}
+}
+
+// WithUserSearcherForMessageHandler sets the user searcher for the message handler orchestrator
+func WithUserSearcherForMessageHandler(userSearcher port.UserSearcher) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.userSearcher = userSearcher
 	}
 }
 
@@ -1168,6 +1176,59 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 		return m.errorResponse("failed to marshal response"), nil
 	}
 
+	return responseJSON, nil
+}
+
+// userSearchRequest is the JSON payload for lfx.auth-service.user.search.
+type userSearchRequest struct {
+	SubjectToken string `json:"subject_token"`
+	Query        string `json:"query"`
+	Limit        int    `json:"limit,omitempty"`
+}
+
+// userSearchResponse is the reply for lfx.auth-service.user.search on success.
+// Errors go through the shared errorResponse (UserDataResponse) instead.
+type userSearchResponse struct {
+	Success bool                     `json:"success"`
+	Users   []model.UserSearchResult `json:"users"`
+}
+
+// SearchUsers handles a user search request over NATS. The caller must hold the can_impersonate claim, which the searcher verifies.
+// Request: JSON {"subject_token": "...", "query": "...", "limit": 10}
+// Response: {"success": true, "users": [...]} on success, or UserDataResponse with Error on failure.
+func (m *messageHandlerOrchestrator) SearchUsers(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.userSearcher == nil {
+		return m.errorResponse("user search unavailable"), nil
+	}
+
+	var req userSearchRequest
+	if err := json.Unmarshal(msg.Data(), &req); err != nil {
+		return m.errorResponse("invalid request: " + err.Error()), nil
+	}
+
+	req.SubjectToken = strings.TrimSpace(req.SubjectToken)
+	req.Query = strings.TrimSpace(req.Query)
+
+	if req.SubjectToken == "" {
+		return m.errorResponse("subject_token is required"), nil
+	}
+	if req.Query == "" {
+		return m.errorResponse("query is required"), nil
+	}
+
+	users, err := m.userSearcher.SearchUsers(ctx, req.SubjectToken, req.Query, req.Limit)
+	if err != nil {
+		slog.WarnContext(ctx, "user search failed", "error", err)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	if users == nil {
+		users = []model.UserSearchResult{}
+	}
+	responseJSON, err := json.Marshal(userSearchResponse{Success: true, Users: users})
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
 	return responseJSON, nil
 }
 

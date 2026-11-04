@@ -255,7 +255,7 @@ func NewClient(config Config) *Client {
 		config: config,
 		httpClient: &http.Client{
 			Timeout:   config.Timeout,
-			Transport: otelhttp.NewTransport(base),
+			Transport: otelhttp.NewTransport(base, config.OTelOptions...),
 		},
 	}
 }

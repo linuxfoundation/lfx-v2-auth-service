@@ -60,6 +60,11 @@ const (
 	// in the request and must be present in ALLOWED_ALIAS_DOMAINS.
 	// The subject is of the form: lfx.auth-service.add_alias
 	UserAddAliasSubject = "lfx.auth-service.add_alias"
+
+	// UserSearchSubject is the subject for searching users by LFID, email or name.
+	// The caller must present an access token carrying the can_impersonate claim.
+	// The subject is of the form: lfx.auth-service.user.search
+	UserSearchSubject = "lfx.auth-service.user.search"
 )
 
 const (

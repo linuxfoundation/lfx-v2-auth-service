@@ -453,6 +453,13 @@ func QueueSubscriptions(ctx context.Context) error {
 			slog.WarnContext(ctx, "impersonation flow unavailable", "error", err)
 		} else {
 			opts = append(opts, service.WithImpersonatorForMessageHandler(impersonationFlow))
+
+			userSearcher, errSearcher := auth0.NewUserSearcher(ctx, auth0Domain, impersonationFlow)
+			if errSearcher != nil {
+				slog.WarnContext(ctx, "user search unavailable", "error", errSearcher)
+			} else {
+				opts = append(opts, service.WithUserSearcherForMessageHandler(userSearcher))
+			}
 		}
 	}
 
@@ -484,6 +491,7 @@ func QueueSubscriptions(ctx context.Context) error {
 		constants.PasswordUpdateSubject:               messageHandlerService.HandleMessage,
 		constants.PasswordResetLinkSubject:            messageHandlerService.HandleMessage,
 		constants.ImpersonationTokenExchangeSubject:   messageHandlerService.HandleMessage,
+		constants.UserSearchSubject:                   messageHandlerService.HandleMessage,
 	}
 
 	for subject, handler := range subjects {

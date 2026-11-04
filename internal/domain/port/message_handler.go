@@ -31,6 +31,7 @@ type UserReaderHandler interface {
 	GetUserMetadata(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	GetUserEmails(ctx context.Context, msg TransportMessenger) ([]byte, error)
 	ListIdentities(ctx context.Context, msg TransportMessenger) ([]byte, error)
+	SearchUsers(ctx context.Context, msg TransportMessenger) ([]byte, error)
 }
 
 // UserLookupHandler defines the behavior of the user lookup domain handlers

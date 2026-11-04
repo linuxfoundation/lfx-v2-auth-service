@@ -303,6 +303,30 @@ func TestSanitizeURL_SensitiveQueryKeys(t *testing.T) {
 	}
 }
 
+// These are the shapes the user search sends as `q`. The quoted
+// `identities.connection:"..."` clause is what makes sanitizeLuceneQuery redact
+// the whole value, so the searched name or email never reaches a debug log; a
+// change to the query shape must keep this test green.
+func TestSanitizeURL_UserSearchQueryIsFullyRedacted(t *testing.T) {
+	queries := map[string]string{
+		"prefix":      `(name:jane* OR given_name:jane* OR family_name:jane* OR username:jane* OR identities.user_id:jane* OR email:jane*) AND identities.connection:"Username-Password-Authentication"`,
+		"exact id":    `(username:jane OR identities.user_id:"jane") AND identities.connection:"Username-Password-Authentication"`,
+		"exact email": `email:jane.doe@acme.test AND identities.connection:"Username-Password-Authentication"`,
+	}
+	for name, q := range queries {
+		t.Run(name, func(t *testing.T) {
+			got := sanitizeURL("https://auth.example.com/api/v2/users?q=" + url.QueryEscape(q) + "&search_engine=v3&per_page=20")
+
+			if strings.Contains(got, "jane") || strings.Contains(got, "acme.test") {
+				t.Errorf("sanitizeURL leaked part of the search text: %q", got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Errorf("expected the q value to be redacted: %q", got)
+			}
+		})
+	}
+}
+
 func TestSanitizeError_RedactsJWT(t *testing.T) {
 	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	got := SanitizeError(errors.New("Get failed: Authorization Bearer " + jwt))
