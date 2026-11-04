@@ -182,14 +182,18 @@ func (s *userSearch) fetch(ctx context.Context, m2mToken, q string, perPage int)
 	)
 
 	var users []Auth0User
-	// The HTTP client already logs the failure (status only, no query).
-	if _, err := httpclient.NewAPIRequest(
+	statusCode, err := httpclient.NewAPIRequest(
 		s.httpClient,
 		httpclient.WithMethod(http.MethodGet),
 		httpclient.WithURL(endpoint),
 		httpclient.WithToken(m2mToken),
 		httpclient.WithDescription("user search"),
-	).Call(ctx, &users); err != nil {
+	).Call(ctx, &users)
+	if err != nil {
+		// The HTTP client logs a client error (4xx) only at debug level, so a query
+		// Auth0 rejects would otherwise leave no trace. Log the status alone: not the
+		// query, nor Auth0's message, which can echo it.
+		slog.WarnContext(ctx, "user search request to Auth0 failed", "status_code", statusCode)
 		return nil, errors.NewServiceUnavailable(errUserSearchUnavailable)
 	}
 	return users, nil
@@ -296,6 +300,12 @@ func escapeLucene(term string) string {
 // the result page is not filled with accounts that have no LFID. It cannot
 // replace the per-result check (see toUserSearchResults): Auth0 matches
 // identities.* fields independently, not as one identity.
+//
+// identities.user_id is deliberately not searched by prefix: Auth0 rejects a
+// wildcard on it (400 "operator 'wildcard' is not supported on field
+// 'identities.user_id'"), which fails the whole query. An LFID held only in a
+// linked database identity is found by typing it exactly, through
+// buildExactUserSearchQuery.
 func buildUserSearchQuery(terms []string) string {
 	clauses := make([]string, 0, len(terms)+1)
 	for _, term := range terms {
@@ -305,7 +315,7 @@ func buildUserSearchQuery(terms []string) string {
 			continue
 		}
 		clauses = append(clauses, fmt.Sprintf(
-			"(name:%[1]s* OR given_name:%[1]s* OR family_name:%[1]s* OR username:%[1]s* OR identities.user_id:%[1]s* OR email:%[1]s*)",
+			"(name:%[1]s* OR given_name:%[1]s* OR family_name:%[1]s* OR username:%[1]s* OR email:%[1]s*)",
 			escaped,
 		))
 	}

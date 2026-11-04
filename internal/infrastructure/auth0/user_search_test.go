@@ -4,10 +4,12 @@
 package auth0
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	stderrors "errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -97,14 +99,14 @@ func TestBuildUserSearchQuery(t *testing.T) {
 		{
 			name:  "single term searches every field",
 			terms: []string{"jdoe"},
-			want: `(name:jdoe* OR given_name:jdoe* OR family_name:jdoe* OR username:jdoe* OR identities.user_id:jdoe* OR email:jdoe*)` +
+			want: `(name:jdoe* OR given_name:jdoe* OR family_name:jdoe* OR username:jdoe* OR email:jdoe*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 		{
 			name:  "terms are AND-ed",
 			terms: []string{"john", "smith"},
-			want: `(name:john* OR given_name:john* OR family_name:john* OR username:john* OR identities.user_id:john* OR email:john*)` +
-				` AND (name:smith* OR given_name:smith* OR family_name:smith* OR username:smith* OR identities.user_id:smith* OR email:smith*)` +
+			want: `(name:john* OR given_name:john* OR family_name:john* OR username:john* OR email:john*)` +
+				` AND (name:smith* OR given_name:smith* OR family_name:smith* OR username:smith* OR email:smith*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 		{
@@ -115,7 +117,7 @@ func TestBuildUserSearchQuery(t *testing.T) {
 		{
 			name:  "operators are escaped",
 			terms: []string{"a)or(b"},
-			want: `(name:a\)or\(b* OR given_name:a\)or\(b* OR family_name:a\)or\(b* OR username:a\)or\(b* OR identities.user_id:a\)or\(b* OR email:a\)or\(b*)` +
+			want: `(name:a\)or\(b* OR given_name:a\)or\(b* OR family_name:a\)or\(b* OR username:a\)or\(b* OR email:a\)or\(b*)` +
 				` AND identities.connection:"Username-Password-Authentication"`,
 		},
 	}
@@ -629,5 +631,42 @@ func TestToUserSearchResults_IdentityIDs(t *testing.T) {
 				t.Fatalf("got %+v, want username %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// Auth0 rejects a wildcard on identities.user_id (400), which fails the whole
+// search, so the prefix query must never use one.
+func TestBuildUserSearchQuery_NoWildcardOnIdentityID(t *testing.T) {
+	for _, terms := range [][]string{{"jane"}, {"john", "smith"}, {"jane@exa"}, {"o'brien"}} {
+		if q := buildUserSearchQuery(terms); strings.Contains(q, "identities.user_id") {
+			t.Errorf("prefix query must not search identities.user_id: %s", q)
+		}
+	}
+}
+
+// A query Auth0 rejects must leave a trace in the logs: the status code, and
+// nothing that could echo what was searched.
+func TestSearchUsers_LogsUpstreamStatusWithoutQuery(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	api := &fakeManagementAPI{status: http.StatusBadRequest, body: `{"message":"invalid query for jane.doe@acme.test"}`}
+	search, tenantKey := newTestUserSearch(t, api, searchTokenSource{token: "m2m-token"})
+	token := signRS256(t, tenantKey, testTenantKID, subjectClaims(nil))
+
+	_, err := search.SearchUsers(context.Background(), token, "jane.doe@acme.test", 10)
+	var unavailable errors.ServiceUnavailable
+	if !stderrors.As(err, &unavailable) {
+		t.Fatalf("expected ServiceUnavailable, got %T: %v", err, err)
+	}
+
+	got := logs.String()
+	if !strings.Contains(got, "user search request to Auth0 failed") || !strings.Contains(got, "status_code=400") {
+		t.Errorf("expected a warning with the upstream status, got:\n%s", got)
+	}
+	if strings.Contains(got, "jane.doe") || strings.Contains(got, "acme.test") {
+		t.Errorf("logs must not contain the searched text:\n%s", got)
 	}
 }
