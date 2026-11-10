@@ -17,6 +17,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/log"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
@@ -29,6 +30,14 @@ type UserProfileUpdatedEvent struct {
 	Principal string              `json:"principal"`
 	Metadata  *model.UserMetadata `json:"user_metadata"`
 	Timestamp time.Time           `json:"timestamp"`
+}
+
+// UserEmailLinkedEvent is published after a verified email identity is linked
+// to a user account. Email is trimmed and lowercased; LinkedAt is RFC 3339 UTC.
+type UserEmailLinkedEvent struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	LinkedAt string `json:"linked_at"`
 }
 
 // UserDataResponse represents the response structure for user update operations
@@ -921,6 +930,8 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 		return m.errorResponse(errLinkIdentity.Error()), nil
 	}
 
+	m.publishEmailLinked(ctx, linkRequest.LinkWith.IdentityToken, user)
+
 	// Return success response
 	response := UserDataResponse{
 		Success: true,
@@ -934,6 +945,85 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 	}
 
 	return responseJSON, nil
+}
+
+// emailIdentitySubPrefix marks the subject of a passwordless email identity token.
+const emailIdentitySubPrefix = "email|"
+
+// publishEmailLinked publishes UserEmailLinkedEvent after a successful link when
+// the linked identity is an email identity. It runs only after the identity
+// provider has accepted the identity token, so the token's claims are read
+// without re-verifying its signature. Fire-and-forget: every failure is logged
+// and never changes the link response.
+func (m *messageHandlerOrchestrator) publishEmailLinked(ctx context.Context, identityToken string, principal *model.User) {
+	if m.eventPublisher == nil {
+		return
+	}
+
+	claims, errParse := jwt.ParseUnverified(ctx, identityToken, &jwt.ParseOptions{AllowBearerPrefix: true})
+	if errParse != nil {
+		slog.WarnContext(ctx, "failed to read linked identity token; skipping email linked event",
+			"error", errParse,
+			"user_id", redaction.Redact(principal.UserID),
+		)
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	if !strings.HasPrefix(claims.Subject, emailIdentitySubPrefix) || email == "" {
+		slog.DebugContext(ctx, "linked identity is not an email identity; skipping email linked event",
+			"user_id", redaction.Redact(principal.UserID),
+		)
+		return
+	}
+
+	username := strings.TrimSpace(principal.Username)
+	if username == "" {
+		// Fetch the canonical record with the service's credentials (empty Token):
+		// the link token is only scoped to identity updates.
+		fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{
+			UserID:   principal.UserID,
+			Sub:      principal.Sub,
+			Username: principal.Username,
+		})
+		if errGetUser != nil {
+			slog.WarnContext(ctx, "failed to resolve username; skipping email linked event",
+				"error", errGetUser,
+				"user_id", redaction.Redact(principal.UserID),
+			)
+			return
+		}
+		if fullUser != nil {
+			username = strings.TrimSpace(fullUser.Username)
+		}
+	}
+	if username == "" {
+		slog.WarnContext(ctx, "resolved user has no username; skipping email linked event",
+			"user_id", redaction.Redact(principal.UserID),
+		)
+		return
+	}
+
+	event := UserEmailLinkedEvent{
+		Username: username,
+		Email:    email,
+		LinkedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	eventJSON, errMarshal := json.Marshal(event)
+	if errMarshal != nil {
+		slog.WarnContext(ctx, "failed to marshal email linked event",
+			"error", errMarshal,
+			"user_id", redaction.Redact(principal.UserID),
+		)
+		return
+	}
+	if errPublish := m.eventPublisher.Publish(ctx, constants.UserEmailLinkedSubject, eventJSON); errPublish != nil {
+		slog.WarnContext(ctx, "failed to publish email linked event",
+			"error", errPublish,
+			"user_id", redaction.Redact(principal.UserID),
+			"email", redaction.RedactEmail(email),
+		)
+	}
 }
 
 // UnlinkIdentity removes a secondary identity from a user account

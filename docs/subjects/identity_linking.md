@@ -135,6 +135,33 @@ nats request lfx.auth-service.user_identity.link '{
 }'
 ```
 
+### Published event: `lfx.user_email.linked`
+
+When a link succeeds and the linked identity is a verified email identity (an identity token whose `sub` starts with `email|` and that carries an `email` claim), the service publishes a fire-and-forget event so other services can react to the newly confirmed address — for example, to promote pending invites sent to it.
+
+**Subject:** `lfx.user_email.linked`
+**Pattern:** Publish (no reply)
+
+```json
+{
+  "username": "jdoe",
+  "email": "jane.doe@example.org",
+  "linked_at": "2026-01-15T10:30:00Z"
+}
+```
+
+- `username`: the LFID of the account the email was linked to.
+- `email`: the linked address, trimmed and lowercased.
+- `linked_at`: when the link completed, in RFC 3339 (UTC).
+
+The event is published for every successful email link on this subject, whichever client sent the request. It is **not** published when:
+
+- the link fails or is refused (validation, authorization, or identity-provider error);
+- the linked identity is a social identity (Google, GitHub, LinkedIn, …);
+- the account's username cannot be resolved.
+
+Publishing is best-effort: a publish failure is logged and never changes the link reply.
+
 ---
 
 ## Unlink Identity

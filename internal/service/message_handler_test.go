@@ -11,11 +11,13 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2445,6 +2447,194 @@ func TestMessageHandlerOrchestrator_LinkIdentity_IsScopeGated(t *testing.T) {
 		t.Errorf("MetadataLookup scopes = %v, want [%s]",
 			reader.capturedLookupScopes, constants.UserUpdateIdentityRequiredScope)
 	}
+}
+
+func TestMessageHandlerOrchestrator_LinkIdentity_EmailLinkedEvent(t *testing.T) {
+	ctx := context.Background()
+
+	emailToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(
+		"  Linked.User@Example.ORG ", "email|abc123", time.Hour)
+	require.NoError(t, err)
+	socialToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(
+		"social.user@example.org", "google-oauth2|123456", time.Hour)
+	require.NoError(t, err)
+
+	requestWith := func(identityToken string) []byte {
+		r := &model.LinkIdentity{}
+		r.User.AuthToken = "some-auth-token"
+		r.LinkWith.IdentityToken = identityToken
+		data, _ := json.Marshal(r)
+		return data
+	}
+
+	principalLookup := func(_ context.Context, _ string) (*model.User, error) {
+		return &model.User{UserID: "auth0|user123", Sub: "auth0|user123"}, nil
+	}
+	getUserReturnsUsername := func(_ context.Context, user *model.User) (*model.User, error) {
+		if user.Token != "" {
+			t.Errorf("username lookup must use service credentials, got caller token")
+		}
+		return &model.User{UserID: user.UserID, Username: "linkeduser"}, nil
+	}
+	linkSucceeds := func(_ context.Context, _ *model.LinkIdentity) error { return nil }
+
+	tests := []struct {
+		name          string
+		identityToken string
+		linker        *mockIdentityLinker
+		reader        *mockUserServiceReader
+		publishErr    error
+		expectSuccess bool
+		expectEvent   bool
+	}{
+		{
+			name:          "successful email link publishes event",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			},
+			expectSuccess: true,
+			expectEvent:   true,
+		},
+		{
+			name:          "successful social link publishes nothing",
+			identityToken: socialToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			},
+			expectSuccess: true,
+		},
+		{
+			name:          "failed link publishes nothing",
+			identityToken: emailToken,
+			linker: &mockIdentityLinker{
+				linkIdentityFunc: func(_ context.Context, _ *model.LinkIdentity) error {
+					return errors.NewUnexpected("failed to link identity to user")
+				},
+			},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			},
+		},
+		{
+			name:          "refused link publishes nothing",
+			identityToken: emailToken,
+			linker: &mockIdentityLinker{
+				validateLinkRequestFunc: func(_ context.Context, _ *model.LinkIdentity) error {
+					return errors.NewValidation("the provided identity token belongs to an existing LFID account and cannot be linked")
+				},
+			},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			},
+		},
+		{
+			name:          "unauthorized caller publishes nothing",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+					return nil, errors.NewUnauthorized("a valid JWT token is required")
+				},
+			},
+		},
+		{
+			name:          "username lookup failure keeps link success and publishes nothing",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc: func(_ context.Context, _ *model.User) (*model.User, error) {
+					return nil, errors.NewUnexpected("lookup failed")
+				},
+			},
+			expectSuccess: true,
+		},
+		{
+			name:          "empty username keeps link success and publishes nothing",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc: func(_ context.Context, user *model.User) (*model.User, error) {
+					return &model.User{UserID: user.UserID}, nil
+				},
+			},
+			expectSuccess: true,
+		},
+		{
+			name:          "publish failure does not affect successful response",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			},
+			publishErr:    fmt.Errorf("NATS connection lost"),
+			expectSuccess: true,
+			expectEvent:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := &mockEventPublisher{}
+			if tt.publishErr != nil {
+				publisher.publishFunc = func(context.Context, string, []byte) error { return tt.publishErr }
+			}
+
+			orchestrator := NewMessageHandlerOrchestrator(
+				WithIdentityLinkerForMessageHandler(tt.linker),
+				WithUserReaderForMessageHandler(tt.reader),
+				WithEventPublisherForMessageHandler(publisher),
+			)
+
+			result, errLink := orchestrator.LinkIdentity(ctx, &mockTransportMessenger{data: requestWith(tt.identityToken)})
+			require.NoError(t, errLink)
+
+			var response UserDataResponse
+			require.NoError(t, json.Unmarshal(result, &response))
+			require.Equal(t, tt.expectSuccess, response.Success, "error: %s", response.Error)
+
+			if !tt.expectEvent {
+				require.Empty(t, publisher.calls)
+				return
+			}
+
+			require.Len(t, publisher.calls, 1)
+			require.Equal(t, constants.UserEmailLinkedSubject, publisher.calls[0].Subject)
+
+			var event UserEmailLinkedEvent
+			require.NoError(t, json.Unmarshal(publisher.calls[0].Data, &event))
+			require.Equal(t, "linkeduser", event.Username)
+			require.Equal(t, "linked.user@example.org", event.Email)
+			_, errTime := time.Parse(time.RFC3339, event.LinkedAt)
+			require.NoError(t, errTime, "linked_at must be RFC 3339")
+		})
+	}
+
+	t.Run("nil publisher keeps link success", func(t *testing.T) {
+		orchestrator := NewMessageHandlerOrchestrator(
+			WithIdentityLinkerForMessageHandler(&mockIdentityLinker{linkIdentityFunc: linkSucceeds}),
+			WithUserReaderForMessageHandler(&mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsUsername,
+			}),
+		)
+
+		result, errLink := orchestrator.LinkIdentity(ctx, &mockTransportMessenger{data: requestWith(emailToken)})
+		require.NoError(t, errLink)
+
+		var response UserDataResponse
+		require.NoError(t, json.Unmarshal(result, &response))
+		require.True(t, response.Success, "error: %s", response.Error)
+	})
 }
 
 func TestMessageHandlerOrchestrator_GetUserEmails_RefetchesLFIDAfterPrimaryChange(t *testing.T) {
