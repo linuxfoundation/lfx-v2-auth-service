@@ -950,10 +950,16 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 // emailIdentitySubPrefix marks the subject of a passwordless email identity token.
 const emailIdentitySubPrefix = "email|"
 
-// lfidOf returns the user's LFID: the user id of a linked database identity,
-// falling back to the root username when there is none. The root username of a
-// linked account whose primary is another connection belongs to that
-// connection and does not identify the LFID account.
+// databaseUserIDPrefix marks an Auth0 user whose primary identity is the
+// database connection, the case where the root username is an LFID outright.
+const databaseUserIDPrefix = "auth0|"
+
+// lfidOf returns the user's LFID, or "" when the account has none: the user id
+// of a linked database identity, else the root username. An Auth0 user id
+// ("provider|id") whose primary is another connection has a root username that
+// belongs to that connection and does not identify an LFID account. Backends
+// whose user ids carry no provider prefix, such as Authelia, keep the LFID as
+// the root username.
 func lfidOf(user *model.User) string {
 	if user == nil {
 		return ""
@@ -965,6 +971,9 @@ func lfidOf(user *model.User) string {
 		if id := strings.TrimSpace(identity.IdentityID); id != "" {
 			return id
 		}
+	}
+	if strings.Contains(user.UserID, "|") && !strings.HasPrefix(user.UserID, databaseUserIDPrefix) {
+		return ""
 	}
 	return strings.TrimSpace(user.Username)
 }

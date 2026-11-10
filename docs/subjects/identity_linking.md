@@ -150,7 +150,7 @@ When a link succeeds and the linked identity is a verified email identity (an id
 }
 ```
 
-- `username`: the LFID of the account the email was linked to.
+- `username`: the LFID of the account the email was linked to — the linked database identity's user id, not a social connection's username.
 - `email`: the linked address, trimmed and lowercased.
 - `linked_at`: when the link completed, in RFC 3339 (UTC).
 
@@ -158,7 +158,7 @@ The event is published for every successful email link on this subject, whicheve
 
 - the link fails or is refused (validation, authorization, or identity-provider error);
 - the linked identity is a social identity (Google, GitHub, LinkedIn, …);
-- the account's username cannot be resolved.
+- the account's LFID cannot be resolved, including an account with no database (LFID) identity.
 
 Publishing is best-effort: a publish failure is logged and never changes the link reply.
 

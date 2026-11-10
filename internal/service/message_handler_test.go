@@ -2553,6 +2553,36 @@ func TestMessageHandlerOrchestrator_LinkIdentity_EmailLinkedEvent(t *testing.T) 
 			expectUsername: "linkedlfid",
 		},
 		{
+			name:          "Auth0 social-primary account without a database identity publishes nothing",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc: func(_ context.Context, _ *model.User) (*model.User, error) {
+					return &model.User{
+						UserID:     "github|987654",
+						Username:   "social-handle",
+						Identities: []model.Identity{{Provider: "github", IdentityID: "987654", Connection: "github", IsSocial: true}},
+					}, nil
+				},
+			},
+			expectSuccess: true,
+		},
+		{
+			name:          "user id without a provider prefix publishes the root username",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc: func(_ context.Context, _ *model.User) (*model.User, error) {
+					return &model.User{UserID: "6f1c2a7e-authelia-sub", Username: "autheliauser"}, nil
+				},
+			},
+			expectSuccess:  true,
+			expectEvent:    true,
+			expectUsername: "autheliauser",
+		},
+		{
 			name:          "successful social link publishes nothing",
 			identityToken: socialToken,
 			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
