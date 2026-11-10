@@ -950,6 +950,25 @@ func (m *messageHandlerOrchestrator) LinkIdentity(ctx context.Context, msg port.
 // emailIdentitySubPrefix marks the subject of a passwordless email identity token.
 const emailIdentitySubPrefix = "email|"
 
+// lfidOf returns the user's LFID: the user id of a linked database identity,
+// falling back to the root username when there is none. The root username of a
+// linked account whose primary is another connection belongs to that
+// connection and does not identify the LFID account.
+func lfidOf(user *model.User) string {
+	if user == nil {
+		return ""
+	}
+	for _, identity := range user.Identities {
+		if identity.Connection != constants.Auth0UsernamePasswordConnection {
+			continue
+		}
+		if id := strings.TrimSpace(identity.IdentityID); id != "" {
+			return id
+		}
+	}
+	return strings.TrimSpace(user.Username)
+}
+
 // publishEmailLinked publishes UserEmailLinkedEvent after a successful link when
 // the linked identity is an email identity. It runs only after the identity
 // provider has accepted the identity token, so the token's claims are read
@@ -993,9 +1012,7 @@ func (m *messageHandlerOrchestrator) publishEmailLinked(ctx context.Context, ide
 			)
 			return
 		}
-		if fullUser != nil {
-			username = strings.TrimSpace(fullUser.Username)
-		}
+		username = lfidOf(fullUser)
 	}
 	if username == "" {
 		slog.WarnContext(ctx, "resolved user has no username; skipping email linked event",

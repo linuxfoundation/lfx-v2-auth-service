@@ -2476,16 +2476,29 @@ func TestMessageHandlerOrchestrator_LinkIdentity_EmailLinkedEvent(t *testing.T) 
 		}
 		return &model.User{UserID: user.UserID, Username: "linkeduser"}, nil
 	}
+	getUserReturnsLinkedDatabaseIdentity := func(rootUsername string) func(context.Context, *model.User) (*model.User, error) {
+		return func(_ context.Context, user *model.User) (*model.User, error) {
+			return &model.User{
+				UserID:   user.UserID,
+				Username: rootUsername,
+				Identities: []model.Identity{
+					{Provider: "github", IdentityID: "987654", Connection: "github", IsSocial: true},
+					{Provider: "auth0", IdentityID: "linkedlfid", Connection: constants.Auth0UsernamePasswordConnection},
+				},
+			}, nil
+		}
+	}
 	linkSucceeds := func(_ context.Context, _ *model.LinkIdentity) error { return nil }
 
 	tests := []struct {
-		name          string
-		identityToken string
-		linker        *mockIdentityLinker
-		reader        *mockUserServiceReader
-		publishErr    error
-		expectSuccess bool
-		expectEvent   bool
+		name           string
+		identityToken  string
+		linker         *mockIdentityLinker
+		reader         *mockUserServiceReader
+		publishErr     error
+		expectSuccess  bool
+		expectEvent    bool
+		expectUsername string
 	}{
 		{
 			name:          "successful email link publishes event",
@@ -2497,6 +2510,47 @@ func TestMessageHandlerOrchestrator_LinkIdentity_EmailLinkedEvent(t *testing.T) 
 			},
 			expectSuccess: true,
 			expectEvent:   true,
+		},
+		{
+			name:          "principal username is published without a user lookup",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: func(_ context.Context, _ string) (*model.User, error) {
+					return &model.User{UserID: "authelia-user", Username: "directlfid"}, nil
+				},
+				getUserFunc: func(_ context.Context, _ *model.User) (*model.User, error) {
+					t.Errorf("username lookup must be skipped when the principal carries a username")
+					return nil, errors.NewUnexpected("unexpected lookup")
+				},
+			},
+			expectSuccess:  true,
+			expectEvent:    true,
+			expectUsername: "directlfid",
+		},
+		{
+			name:          "social-primary account publishes the linked database LFID, not the root username",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsLinkedDatabaseIdentity("social-handle"),
+			},
+			expectSuccess:  true,
+			expectEvent:    true,
+			expectUsername: "linkedlfid",
+		},
+		{
+			name:          "empty root username publishes the linked database LFID",
+			identityToken: emailToken,
+			linker:        &mockIdentityLinker{linkIdentityFunc: linkSucceeds},
+			reader: &mockUserServiceReader{
+				metadataLookupFunc: principalLookup,
+				getUserFunc:        getUserReturnsLinkedDatabaseIdentity(""),
+			},
+			expectSuccess:  true,
+			expectEvent:    true,
+			expectUsername: "linkedlfid",
 		},
 		{
 			name:          "successful social link publishes nothing",
@@ -2612,7 +2666,11 @@ func TestMessageHandlerOrchestrator_LinkIdentity_EmailLinkedEvent(t *testing.T) 
 
 			var event UserEmailLinkedEvent
 			require.NoError(t, json.Unmarshal(publisher.calls[0].Data, &event))
-			require.Equal(t, "linkeduser", event.Username)
+			expectUsername := tt.expectUsername
+			if expectUsername == "" {
+				expectUsername = "linkeduser"
+			}
+			require.Equal(t, expectUsername, event.Username)
 			require.Equal(t, "linked.user@example.org", event.Email)
 			_, errTime := time.Parse(time.RFC3339, event.LinkedAt)
 			require.NoError(t, errTime, "linked_at must be RFC 3339")
