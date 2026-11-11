@@ -2874,8 +2874,9 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 					return &model.User{
 						UserID: "auth0|123",
 						Identities: []model.Identity{
-							{Provider: "google-oauth2", IdentityID: "google123", Email: "user@gmail.com", IsSocial: true},
+							{Provider: "google-oauth2", IdentityID: "google123", Connection: "google-oauth2", Email: "user@gmail.com", IsSocial: true},
 							{Provider: "github", IdentityID: "gh456", Nickname: "octocat", IsSocial: true},
+							{Provider: "oauth2", IdentityID: "gitlab|789", Connection: "gitlab", IsSocial: true},
 						},
 					}, nil
 				},
@@ -2889,8 +2890,27 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 				if err := json.Unmarshal(result, &response); err != nil {
 					t.Fatalf("failed to unmarshal response: %v", err)
 				}
-				if len(response.Data) != 2 {
-					t.Fatalf("expected 2 identities, got %d", len(response.Data))
+				if len(response.Data) != 3 {
+					t.Fatalf("expected 3 identities, got %d", len(response.Data))
+				}
+				if response.Data[0].Connection != "google-oauth2" {
+					t.Errorf("expected connection google-oauth2, got %s", response.Data[0].Connection)
+				}
+				if response.Data[2].Provider != "oauth2" {
+					t.Errorf("expected provider oauth2 for GitLab identity, got %s", response.Data[2].Provider)
+				}
+				if response.Data[2].Connection != "gitlab" {
+					t.Errorf("expected connection gitlab for GitLab identity, got %s", response.Data[2].Connection)
+				}
+
+				var raw struct {
+					Data []map[string]any `json:"data"`
+				}
+				if err := json.Unmarshal(result, &raw); err != nil {
+					t.Fatalf("failed to unmarshal raw response: %v", err)
+				}
+				if _, ok := raw.Data[1]["connection"]; ok {
+					t.Error("expected no connection key for an identity without a connection")
 				}
 				if response.Data[0].Provider != "google-oauth2" {
 					t.Errorf("expected provider google-oauth2, got %s", response.Data[0].Provider)
