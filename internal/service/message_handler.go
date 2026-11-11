@@ -399,6 +399,7 @@ type identityListRequest struct {
 type identityResponse struct {
 	Provider    string               `json:"provider"`
 	UserID      string               `json:"user_id"`
+	Connection  string               `json:"connection,omitempty"`
 	IsSocial    bool                 `json:"isSocial"`
 	ProfileData *identityProfileData `json:"profileData,omitempty"`
 }
@@ -459,9 +460,10 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 	identities := make([]identityResponse, 0, len(fullUser.Identities))
 	for _, id := range fullUser.Identities {
 		resp := identityResponse{
-			Provider: id.Provider,
-			UserID:   id.IdentityID,
-			IsSocial: id.IsSocial,
+			Provider:   id.Provider,
+			UserID:     id.IdentityID,
+			Connection: id.Connection,
+			IsSocial:   id.IsSocial,
 		}
 		if id.Email != "" || id.Nickname != "" || id.Name != "" {
 			resp.ProfileData = &identityProfileData{

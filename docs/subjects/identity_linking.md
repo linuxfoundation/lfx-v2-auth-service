@@ -40,6 +40,7 @@ Retrieves all identities linked to the authenticated user's account.
     {
       "provider": "google-oauth2",
       "user_id": "google123",
+      "connection": "google-oauth2",
       "isSocial": true,
       "profileData": {
         "email": "user@gmail.com",
@@ -49,11 +50,20 @@ Retrieves all identities linked to the authenticated user's account.
     {
       "provider": "github",
       "user_id": "gh456",
+      "connection": "github",
+      "isSocial": true
+    },
+    {
+      "provider": "oauth2",
+      "user_id": "gitlab|789",
+      "connection": "gitlab",
       "isSocial": true
     }
   ]
 }
 ```
+
+`connection` is the Auth0 connection name the identity signed in through. It is the only way to tell generic OAuth2 accounts apart: a GitLab account has `provider: "oauth2"` and `connection: "gitlab"`. The field is omitted when the backend has no connection for the identity (Authelia, mock). Unlinking still uses `provider` and `user_id` as returned here, so a GitLab identity is removed with `provider: "oauth2"`.
 
 **Error Reply:**
 ```json
