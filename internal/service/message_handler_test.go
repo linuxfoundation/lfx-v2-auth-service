@@ -2852,6 +2852,8 @@ func TestMessageHandlerOrchestrator_GetUserEmails(t *testing.T) {
 	}
 }
 
+// TestMessageHandlerOrchestrator_ListIdentities verifies authenticated identity listing,
+// including connection values, their serialized JSON keys, and omission when unavailable.
 func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 	ctx := context.Background()
 
@@ -2908,6 +2910,12 @@ func TestMessageHandlerOrchestrator_ListIdentities(t *testing.T) {
 				}
 				if err := json.Unmarshal(result, &raw); err != nil {
 					t.Fatalf("failed to unmarshal raw response: %v", err)
+				}
+				if raw.Data[0]["connection"] != "google-oauth2" {
+					t.Errorf("expected raw connection google-oauth2, got %v", raw.Data[0]["connection"])
+				}
+				if raw.Data[2]["connection"] != "gitlab" {
+					t.Errorf("expected raw connection gitlab, got %v", raw.Data[2]["connection"])
 				}
 				if _, ok := raw.Data[1]["connection"]; ok {
 					t.Error("expected no connection key for an identity without a connection")

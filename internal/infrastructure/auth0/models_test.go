@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestAuth0User_ToUser verifies conversion of Auth0 users and linked identities,
+// preserving connection names, provider identifiers, and profile metadata.
 func TestAuth0User_ToUser(t *testing.T) {
 	tests := []struct {
 		name      string
