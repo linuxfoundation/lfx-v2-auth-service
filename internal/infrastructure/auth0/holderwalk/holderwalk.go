@@ -10,6 +10,7 @@ package holderwalk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -66,7 +67,16 @@ type Walker struct {
 	// RetryBackoff overrides the initial retry backoff; zero means the
 	// production default. Tests shrink it to keep retry paths fast.
 	RetryBackoff time.Duration
+
+	// now supplies the walk's start time; nil means time.Now. Tests pin it so
+	// the number of windows to the open-ended last one is fixed.
+	now func() time.Time
 }
+
+// errSearchUnavailable marks a 503 from a walk page returned without
+// retrying, so the walk can narrow its window instead of re-sending a search
+// too heavy for Auth0 to finish.
+var errSearchUnavailable = errors.New("user search unavailable")
 
 const (
 	walkPageSize = 100
@@ -78,6 +88,24 @@ const (
 	// walkInitialBound predates every Auth0 user, so the first page starts at
 	// the beginning of the population.
 	walkInitialBound = "1970-01-01T00:00:00.000Z"
+
+	// Auth0 user search runs under a short query time limit and answers a
+	// search too heavy for it with a 503 (an HTML error page, so the cause is
+	// not readable from the body). On the production tenant the unbounded
+	// first search from walkInitialBound is that heavy
+	// (linuxfoundation/lfx-self-serve-ops#2007), so the walk bounds searches
+	// above by a window once one is rejected: a 503 halves the window and
+	// re-issues at once. A window walked to its end doubles the next one —
+	// without limit while windows come back empty, so the years before any
+	// holder are crossed in a few searches, and up to walkMaxWindow once they
+	// hold rows. At walkMinWindow a 503 is no longer taken for the query's
+	// weight and gets the ordinary backoff retries instead.
+	walkMaxWindow = 30 * 24 * time.Hour
+	walkMinWindow = time.Minute
+
+	// updatedAtLayout is the millisecond UTC form Auth0 returns updated_at
+	// in, used for the window bounds the walk computes itself.
+	updatedAtLayout = "2006-01-02T15:04:05.000Z"
 
 	// holderQuery selects every user carrying the stored key. Wildcard
 	// searches are not supported on app_metadata fields; `_exists_` is the
@@ -125,7 +153,7 @@ func linkedDatabaseUsername(identities []MgmtIdentity) string {
 // inconclusive, not silently shrink the population.
 //
 // Auth0's user search rejects reading past the 1,000th result of a query, so
-// plain page-walking cannot reach a ~43k population. This walks page 0 of an
+// plain page-walking cannot reach the population. This walks page 0 of an
 // ascending `updated_at` lower bound instead: bound advanced to the last row
 // seen, boundary kept inclusive so a timestamp shared across a page edge is
 // not skipped, and a seen-set to drop the overlap that inclusivity
@@ -137,6 +165,11 @@ func linkedDatabaseUsername(identities []MgmtIdentity) string {
 // and the walk resumes with an exclusive bound strictly past the drained
 // timestamp.
 //
+// The first search is the unbounded one. Once Auth0 rejects a search as too
+// heavy, searches are bounded above by an adaptive window (see
+// walkMaxWindow). A short page ends its window; the window that reaches the
+// walk's start time is open-ended, and a short page there ends the walk.
+//
 // `updated_at` moves when a user logs in, so a user active during the walk can
 // migrate across the bound and be missed. Acceptable for drawing a sample;
 // a census run should quiesce or re-run.
@@ -145,13 +178,12 @@ func (w *Walker) ListCDPUUIDHolders(ctx context.Context) ([]Holder, []string, er
 	var malformed []string
 	seen := make(map[string]struct{})
 
-	absorb := func(rows []MgmtUser) (newRows int) {
+	absorb := func(rows []MgmtUser) {
 		for _, row := range rows {
 			if _, dup := seen[row.UserID]; dup {
 				continue
 			}
 			seen[row.UserID] = struct{}{}
-			newRows++
 
 			stored, _ := row.AppMetadata["cdp_uuid"].(string)
 			stored = strings.TrimSpace(stored)
@@ -183,24 +215,70 @@ func (w *Walker) ListCDPUUIDHolders(ctx context.Context) ([]Holder, []string, er
 				StoredUUID:    strings.ToLower(stored),
 			})
 		}
-		return newRows
 	}
 
+	walkStart := time.Now
+	if w.now != nil {
+		walkStart = w.now
+	}
+	start := walkStart().UTC()
+
 	bound := walkInitialBound
+	boundAt, err := time.Parse(time.RFC3339Nano, bound)
+	if err != nil {
+		return nil, nil, fmt.Errorf("population walk initial bound %s: %w", bound, err)
+	}
 	exclusive := false
+	window := start.Sub(boundAt)
+	windowEnd := start
+	windowHadRows := false
 	for fetches := 1; ; fetches++ {
-		rows, err := w.fetchWalkPage(ctx, bound, exclusive)
+		// The window reaching the walk's start is left open so users updated
+		// during the walk stay reachable, as with an unbounded walk.
+		openEnded := !windowEnd.Before(start)
+		upper := "*"
+		remaining := start.Sub(boundAt)
+		if !openEnded {
+			upper = windowEnd.Format(updatedAtLayout)
+			remaining = windowEnd.Sub(boundAt)
+		}
+
+		rows, err := w.fetchWalkPage(ctx, bound, exclusive, upper, remaining > walkMinWindow)
+		if errors.Is(err, errSearchUnavailable) {
+			window = remaining / 2
+			windowEnd = boundAt.Add(window)
+			slog.WarnContext(ctx, "user search unavailable, narrowing the walk window",
+				"bound", bound, "window", window.String())
+			continue
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("population walk failed at bound %s: %w", bound, err)
 		}
-		newRows := absorb(rows)
+		absorb(rows)
+		if len(rows) > 0 {
+			windowHadRows = true
+		}
 
-		if len(rows) == 0 || (len(rows) < walkPageSize && newRows == 0) {
-			break // a short page of only already-seen rows is the end
+		if len(rows) < walkPageSize {
+			// Page 0 came back short: nothing else matches up to the window's
+			// end.
+			if openEnded {
+				break
+			}
+			// The window's exclusive upper bound becomes the next inclusive
+			// lower bound, so no timestamp falls between windows.
+			bound, boundAt, exclusive = upper, windowEnd, false
+			window *= 2
+			if windowHadRows {
+				window = min(window, walkMaxWindow)
+			}
+			windowHadRows = false
+			windowEnd = boundAt.Add(window)
+			continue
 		}
 
 		nextBound := rows[len(rows)-1].UpdatedAt
-		if nextBound == bound && len(rows) == walkPageSize {
+		if nextBound == bound {
 			if exclusive {
 				// An exclusive lower bound must move strictly past itself; a
 				// server ignoring it would loop this walk forever.
@@ -214,8 +292,12 @@ func (w *Walker) ListCDPUUIDHolders(ctx context.Context) ([]Holder, []string, er
 			exclusive = true
 			continue
 		}
+		nextAt, err := time.Parse(time.RFC3339Nano, nextBound)
+		if err != nil {
+			return nil, nil, fmt.Errorf("population walk cannot advance past updated_at %q: %w", nextBound, err)
+		}
 		exclusive = false
-		bound = nextBound
+		bound, boundAt = nextBound, nextAt
 
 		if fetches%10 == 0 {
 			slog.InfoContext(ctx, "population walk progress", "pages", fetches, "users", len(population))
@@ -271,7 +353,10 @@ func (w *Walker) drainTieBlock(ctx context.Context, ts string) ([]MgmtUser, erro
 	return nil, fmt.Errorf("tie-block drain at updated_at %s incomplete after %d passes: %d of %d users seen", ts, drainPasses, len(collected), total)
 }
 
-func (w *Walker) fetchWalkPage(ctx context.Context, bound string, exclusive bool) ([]MgmtUser, error) {
+// fetchWalkPage reads page 0 above bound, up to upper ("*" for none). With
+// narrowable set, a 503 returns errSearchUnavailable at once so the walk can
+// shrink the window instead of retrying the same search.
+func (w *Walker) fetchWalkPage(ctx context.Context, bound string, exclusive bool, upper string, narrowable bool) ([]MgmtUser, error) {
 	// The exclusive open bracket steps strictly past a fully drained tie
 	// block; everywhere else the bound stays inclusive so a timestamp shared
 	// across a page edge is not skipped.
@@ -279,9 +364,15 @@ func (w *Walker) fetchWalkPage(ctx context.Context, bound string, exclusive bool
 	if exclusive {
 		open = "{"
 	}
-	q := fmt.Sprintf("%s AND updated_at:%s%s TO *]", holderQuery, open, bound)
+	// A window's upper bound is exclusive: a row stamped exactly at it
+	// belongs to the next window, which starts there inclusively.
+	closing := "]"
+	if upper != "*" {
+		closing = "}"
+	}
+	q := fmt.Sprintf("%s AND updated_at:%s%s TO %s%s", holderQuery, open, bound, upper, closing)
 	var rows []MgmtUser
-	if err := w.searchUsers(ctx, q, 0, false, &rows); err != nil {
+	if err := w.searchUsers(ctx, q, 0, false, narrowable, &rows); err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -296,13 +387,13 @@ type mgmtUserPage struct {
 func (w *Walker) fetchTiePage(ctx context.Context, ts string, page int) ([]MgmtUser, int, error) {
 	q := fmt.Sprintf("%s AND updated_at:[%s TO %s]", holderQuery, ts, ts)
 	var envelope mgmtUserPage
-	if err := w.searchUsers(ctx, q, page, true, &envelope); err != nil {
+	if err := w.searchUsers(ctx, q, page, true, false, &envelope); err != nil {
 		return nil, 0, err
 	}
 	return envelope.Users, envelope.Total, nil
 }
 
-func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTotals bool, out any) error {
+func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTotals, narrowable bool, out any) error {
 	params := url.Values{}
 	params.Set("q", q)
 	params.Set("sort", "updated_at:1")
@@ -334,6 +425,9 @@ func (w *Walker) searchUsers(ctx context.Context, q string, page int, includeTot
 		statusCode, errCall := request.Call(ctx, out)
 		if errCall == nil {
 			return nil
+		}
+		if narrowable && statusCode == http.StatusServiceUnavailable {
+			return fmt.Errorf("%w: status code: %d", errSearchUnavailable, statusCode)
 		}
 		if attempt >= mgmtMaxAttempts {
 			return fmt.Errorf("status code: %d after %d attempts: %w", statusCode, attempt, errCall)
