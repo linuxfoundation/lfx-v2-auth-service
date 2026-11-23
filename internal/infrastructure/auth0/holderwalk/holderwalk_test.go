@@ -95,74 +95,195 @@ func TestCallWithRateLimitRetry(t *testing.T) {
 }
 
 func TestPopulationWalker(t *testing.T) {
-	t.Run("walks with updated_at bounds and deduplicates overlap", func(t *testing.T) {
-		pageOne := []MgmtUser{{
-			UserID:    "auth0|1",
-			Username:  "alice",
-			UpdatedAt: "2026-01-01T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "UUID-1",
-			},
-		}, {
-			UserID:    "auth0|2",
-			Username:  "bob",
-			UpdatedAt: "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-2",
-			},
-		}}
-		pageTwo := []MgmtUser{{
-			UserID:    "auth0|2",
-			Username:  "bob",
-			UpdatedAt: "2026-01-02T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-2",
-			},
-		}, {
-			UserID:    "auth0|3",
-			Username:  "carol",
-			UpdatedAt: "2026-01-03T00:00:00.000Z",
-			AppMetadata: map[string]any{
-				"cdp_uuid": "uuid-3",
-			},
-		}}
-
-		var queries []string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			queries = append(queries, r.URL.RawQuery)
-			switch {
-			case strings.Contains(r.URL.RawQuery, "1970-01-01"):
-				require.NoError(t, json.NewEncoder(w).Encode(pageOne))
-			case strings.Contains(r.URL.RawQuery, "2026-01-02"):
-				require.NoError(t, json.NewEncoder(w).Encode(pageTwo))
-			default:
-				require.NoError(t, json.NewEncoder(w).Encode([]MgmtUser{}))
-			}
-		}))
-		defer server.Close()
-
+	epoch, err := time.Parse(time.RFC3339Nano, walkInitialBound)
+	require.NoError(t, err)
+	ts := func(d time.Duration) string { return epoch.Add(d).Format(updatedAtLayout) }
+	pinnedAt := func(d time.Duration) func() time.Time {
+		return func() time.Time { return epoch.Add(d) }
+	}
+	walkerFor := func(t *testing.T, server *httptest.Server, now func() time.Time) *Walker {
+		t.Helper()
 		target, err := url.Parse(server.URL)
 		require.NoError(t, err)
-
-		walker := &Walker{
+		return &Walker{
 			HTTPClient: httpclient.NewClient(httpclient.Config{
 				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
 			}),
-			Domain: "tenant.auth0.com",
-			Tokens: fakeTokenProvider{token: "mgmt-token"},
+			Domain:       "tenant.auth0.com",
+			Tokens:       fakeTokenProvider{token: "mgmt-token"},
+			RetryBackoff: time.Millisecond,
+			now:          now,
 		}
+	}
+	holder := func(id, updatedAt string) MgmtUser {
+		return MgmtUser{
+			UserID:      "auth0|" + id,
+			Username:    id,
+			UpdatedAt:   updatedAt,
+			AppMetadata: map[string]any{"cdp_uuid": "UUID-" + id},
+		}
+	}
+	// queryLog serves each query from respond and records the q parameters.
+	queryLog := func(t *testing.T, respond func(q string, w http.ResponseWriter)) (*httptest.Server, *[]string) {
+		t.Helper()
+		var queries []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query().Get("q")
+			queries = append(queries, q)
+			respond(q, w)
+		}))
+		t.Cleanup(server.Close)
+		return server, &queries
+	}
+	encode := func(t *testing.T, w http.ResponseWriter, rows []MgmtUser) {
+		t.Helper()
+		require.NoError(t, json.NewEncoder(w).Encode(rows))
+	}
+	rangeOf := func(lower, upper string) string {
+		if upper == "*" {
+			return fmt.Sprintf("%s AND updated_at:[%s TO *]", holderQuery, lower)
+		}
+		return fmt.Sprintf("%s AND updated_at:[%s TO %s}", holderQuery, lower, upper)
+	}
 
-		population, malformed, err := walker.ListCDPUUIDHolders(context.Background())
+	t.Run("walks with updated_at bounds and deduplicates overlap", func(t *testing.T) {
+		fullPage := make([]MgmtUser, walkPageSize)
+		for i := range fullPage {
+			fullPage[i] = holder(fmt.Sprintf("p1-%03d", i), fmt.Sprintf("2026-01-01T00:%02d:%02d.000Z", i/60, i%60))
+		}
+		fullPage[0].AppMetadata["cdp_uuid"] = "UUID-MIXED-CASE"
+		last := fullPage[walkPageSize-1]
+		server, queries := queryLog(t, func(q string, w http.ResponseWriter) {
+			switch q {
+			case rangeOf(walkInitialBound, "*"):
+				encode(t, w, fullPage)
+			case rangeOf(last.UpdatedAt, "*"):
+				// The inclusive bound re-presents the last row.
+				encode(t, w, []MgmtUser{last, holder("p2", "2026-01-02T00:00:00.000Z")})
+			default:
+				t.Errorf("unexpected query %q", q)
+				encode(t, w, nil)
+			}
+		})
+
+		population, malformed, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, malformed)
-		require.Len(t, population, 3)
-		assert.Equal(t, "uuid-1", population[0].StoredUUID)
-		assert.Equal(t, "uuid-2", population[1].StoredUUID)
-		assert.Equal(t, "uuid-3", population[2].StoredUUID)
-		require.GreaterOrEqual(t, len(queries), 2)
-		assert.Contains(t, queries[0], "_exists_%3Aapp_metadata.cdp_uuid")
-		assert.Contains(t, queries[0], "updated_at%3A%5B1970-01-01T00%3A00%3A00.000Z+TO+%2A%5D")
-		assert.Contains(t, queries[1], "updated_at%3A%5B2026-01-02T00%3A00%3A00.000Z+TO+%2A%5D")
+		require.Len(t, population, walkPageSize+1, "the overlap row is counted once")
+		assert.Equal(t, "uuid-mixed-case", population[0].StoredUUID)
+		assert.Equal(t, "uuid-p2", population[walkPageSize].StoredUUID)
+		assert.Equal(t, []string{rangeOf(walkInitialBound, "*"), rangeOf(last.UpdatedAt, "*")}, *queries,
+			"an unbounded walk that Auth0 answers needs no windows")
+	})
+
+	t.Run("narrows the window on a 503 and continues without a gap", func(t *testing.T) {
+		server, queries := queryLog(t, func(q string, w http.ResponseWriter) {
+			switch q {
+			case rangeOf(walkInitialBound, "*"):
+				w.WriteHeader(http.StatusServiceUnavailable)
+			case rangeOf(walkInitialBound, ts(48*time.Hour)):
+				encode(t, w, []MgmtUser{holder("early", ts(time.Hour))})
+			case rangeOf(ts(48*time.Hour), "*"):
+				encode(t, w, []MgmtUser{holder("late", ts(72*time.Hour))})
+			default:
+				t.Errorf("unexpected query %q", q)
+				encode(t, w, nil)
+			}
+		})
+
+		population, malformed, err := walkerFor(t, server, pinnedAt(96*time.Hour)).ListCDPUUIDHolders(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, malformed)
+		require.Len(t, population, 2)
+		assert.Equal(t, []string{
+			rangeOf(walkInitialBound, "*"),
+			rangeOf(walkInitialBound, ts(48*time.Hour)),
+			rangeOf(ts(48*time.Hour), "*"),
+		}, *queries, "the 503 halves the window instead of re-sending it; the next window starts where it ended")
+	})
+
+	t.Run("keeps a narrowed window's upper bound across full pages and a tie drain", func(t *testing.T) {
+		windowEnd := ts(48 * time.Hour)
+		firstPage := make([]MgmtUser, walkPageSize)
+		for i := range firstPage {
+			firstPage[i] = holder(fmt.Sprintf("w-%03d", i), ts(time.Hour+time.Duration(i)*time.Second))
+		}
+		lastOfFirst := firstPage[walkPageSize-1].UpdatedAt
+		tie := ts(2 * time.Hour)
+		tiePage := make([]MgmtUser, walkPageSize)
+		for i := range tiePage {
+			tiePage[i] = holder(fmt.Sprintf("tie-%03d", i), tie)
+		}
+		drain := fmt.Sprintf("%s AND updated_at:[%s TO %s]", holderQuery, tie, tie)
+		pastTie := fmt.Sprintf("%s AND updated_at:{%s TO %s}", holderQuery, tie, windowEnd)
+
+		server, queries := queryLog(t, func(q string, w http.ResponseWriter) {
+			switch q {
+			case rangeOf(walkInitialBound, "*"):
+				w.WriteHeader(http.StatusServiceUnavailable)
+			case rangeOf(walkInitialBound, windowEnd):
+				encode(t, w, firstPage)
+			case rangeOf(lastOfFirst, windowEnd), rangeOf(tie, windowEnd):
+				// A block of one shared timestamp fills the page: the first
+				// read advances the bound onto it, the second cannot.
+				encode(t, w, tiePage)
+			case drain:
+				require.NoError(t, json.NewEncoder(w).Encode(mgmtUserPage{Total: len(tiePage), Users: tiePage}))
+			case pastTie:
+				encode(t, w, []MgmtUser{holder("after-tie", ts(3*time.Hour))})
+			case rangeOf(windowEnd, "*"):
+				encode(t, w, nil)
+			default:
+				t.Errorf("unexpected query %q", q)
+				encode(t, w, nil)
+			}
+		})
+
+		population, malformed, err := walkerFor(t, server, pinnedAt(96*time.Hour)).ListCDPUUIDHolders(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, malformed)
+		assert.Len(t, population, 2*walkPageSize+1)
+		assert.Equal(t, []string{
+			rangeOf(walkInitialBound, "*"),
+			rangeOf(walkInitialBound, windowEnd),
+			rangeOf(lastOfFirst, windowEnd),
+			rangeOf(tie, windowEnd),
+			drain,
+			pastTie,
+			rangeOf(windowEnd, "*"),
+		}, *queries, "pages and the post-drain exclusive bound stay inside the narrowed window")
+	})
+
+	t.Run("grows empty windows past the cap but caps windows that held rows", func(t *testing.T) {
+		const day = 24 * time.Hour
+		half := 200 * day
+		cases := []struct {
+			name       string
+			firstRows  []MgmtUser
+			nextWindow string
+		}{
+			{"empty", nil, rangeOf(ts(half), "*")},
+			{"with rows", []MgmtUser{holder("first", ts(day))}, rangeOf(ts(half), ts(half+walkMaxWindow))},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				server, queries := queryLog(t, func(q string, w http.ResponseWriter) {
+					switch q {
+					case rangeOf(walkInitialBound, "*"):
+						w.WriteHeader(http.StatusServiceUnavailable)
+					case rangeOf(walkInitialBound, ts(half)):
+						encode(t, w, tc.firstRows)
+					default:
+						encode(t, w, nil)
+					}
+				})
+
+				_, _, err := walkerFor(t, server, pinnedAt(2*half)).ListCDPUUIDHolders(context.Background())
+				require.NoError(t, err)
+				require.GreaterOrEqual(t, len(*queries), 3)
+				assert.Equal(t, tc.nextWindow, (*queries)[2])
+			})
+		}
 	})
 
 	t.Run("reports malformed cdp_uuid holders, blanks bare social usernames, and derives LFIDs from linked database identities", func(t *testing.T) {
@@ -204,18 +325,7 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-
-		walker := &Walker{
-			HTTPClient: httpclient.NewClient(httpclient.Config{
-				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
-			}),
-			Domain: "tenant.auth0.com",
-			Tokens: fakeTokenProvider{token: "mgmt-token"},
-		}
-
-		population, malformed, err := walker.ListCDPUUIDHolders(context.Background())
+		population, malformed, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, []string{"auth0|bad"}, malformed)
 		require.Len(t, population, 3)
@@ -226,20 +336,6 @@ func TestPopulationWalker(t *testing.T) {
 		assert.Equal(t, "google-oauth2|789", population[2].UserID)
 		assert.Empty(t, population[2].Username, "a non-string database user id derives nothing")
 	})
-
-	newTieWalker := func(t *testing.T, server *httptest.Server) *Walker {
-		t.Helper()
-		target, err := url.Parse(server.URL)
-		require.NoError(t, err)
-		return &Walker{
-			HTTPClient: httpclient.NewClient(httpclient.Config{
-				Transport: &rewriteTransport{target: target, inner: server.Client().Transport},
-			}),
-			Domain:       "tenant.auth0.com",
-			Tokens:       fakeTokenProvider{token: "mgmt-token"},
-			RetryBackoff: time.Millisecond,
-		}
-	}
 
 	const tie = "2026-01-01T00:00:00.000Z"
 	makeTiePage := func() []MgmtUser {
@@ -292,7 +388,7 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		population, malformed, err := newTieWalker(t, server).ListCDPUUIDHolders(context.Background())
+		population, malformed, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, malformed)
 		assert.Len(t, population, walkPageSize+1, "the tie block and the row after it are all enumerated")
@@ -313,7 +409,7 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, _, err := newTieWalker(t, server).ListCDPUUIDHolders(context.Background())
+		_, _, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "incomplete after")
 	})
@@ -331,12 +427,12 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, _, err := newTieWalker(t, server).ListCDPUUIDHolders(context.Background())
+		_, _, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot enumerate")
 	})
 
-	t.Run("retries a 5xx page and succeeds", func(t *testing.T) {
+	t.Run("retries a 503 with backoff once the window cannot narrow", func(t *testing.T) {
 		var calls int
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls++
@@ -348,11 +444,13 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		population, malformed, err := newTieWalker(t, server).ListCDPUUIDHolders(context.Background())
+		// Started within walkMinWindow of the initial bound: nothing is left
+		// to halve, so the 503 is treated as an outage.
+		population, malformed, err := walkerFor(t, server, pinnedAt(30*time.Second)).ListCDPUUIDHolders(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, population)
 		assert.Empty(t, malformed)
-		assert.Equal(t, 2, calls, "the transient 503 is retried exactly once")
+		assert.Equal(t, 2, calls, "the 503 is retried exactly once")
 	})
 
 	t.Run("fails immediately on a non-retryable 4xx", func(t *testing.T) {
@@ -363,7 +461,7 @@ func TestPopulationWalker(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, _, err := newTieWalker(t, server).ListCDPUUIDHolders(context.Background())
+		_, _, err := walkerFor(t, server, nil).ListCDPUUIDHolders(context.Background())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "status code: 400")
 		assert.Equal(t, 1, calls, "a 4xx is a caller bug, never retried")
