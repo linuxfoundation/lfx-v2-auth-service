@@ -63,6 +63,11 @@ type Auth0AppMetadata struct {
 
 	// CDPUUIDCheckedAt is the RFC3339 timestamp of the last CDP check.
 	CDPUUIDCheckedAt string `json:"cdp_uuid_checked_at,omitempty"`
+
+	// EmailVerifiedAnnouncedAt is the RFC3339 timestamp at which the
+	// user_email_verified event was published for this user. Its presence
+	// is what keeps the event to once per user.
+	EmailVerifiedAnnouncedAt string `json:"email_verified_announced_at,omitempty"`
 }
 
 // systemManagedUserPayload is the body for POST /api/v2/users when creating a

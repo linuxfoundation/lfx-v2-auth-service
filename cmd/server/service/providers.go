@@ -280,6 +280,29 @@ func newProvisioningAuth0Config(ctx context.Context) (auth0.Config, bool) {
 	return config, true
 }
 
+// newEmailVerifiedAnnouncer wires the user_email_verified publisher. It returns
+// nil, which leaves the event unpublished, when it cannot be built.
+//
+// Retries stay off and the timeout matches the provisioning writer's, for the
+// same reason: the consumer handles one event at a time while holding the lease.
+func newEmailVerifiedAnnouncer(ctx context.Context, auth0Config auth0.Config) provisioning.Announcer {
+	store, err := auth0.NewUserAnnouncementStore(httpclient.Config{
+		Timeout:    provisioningAuth0Timeout,
+		MaxRetries: 0,
+	}, auth0Config)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create the announcement store, user_email_verified will not be published", "error", err)
+		return nil
+	}
+
+	announcer, err := provisioning.NewAnnouncer(store, getNATSClient())
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to create the email verified announcer, user_email_verified will not be published", "error", err)
+		return nil
+	}
+	return announcer
+}
+
 // startProvisioningConsumer reads the Auth0 events stream on one replica.
 //
 // The stream fans out rather than load balancing — every connection receives
@@ -319,6 +342,10 @@ func startProvisioningConsumer(ctx context.Context) {
 		return
 	}
 
+	// The announcer is optional: if it cannot be built the consumer still
+	// provisions, and only the user_email_verified event is lost.
+	announcer := newEmailVerifiedAnnouncer(ctx, auth0Config)
+
 	lease := k8s.LeaseConfig{
 		Name:      constants.LeaseNameProvisioningConsumer,
 		Namespace: namespace,
@@ -339,6 +366,7 @@ func startProvisioningConsumer(ctx context.Context) {
 		consumer, err := provisioning.NewConsumer(
 			provisioning.WithEventsClient(eventsClient),
 			provisioning.WithProvisioner(orchestrator),
+			provisioning.WithAnnouncer(announcer),
 			provisioning.WithOffsetStore(offsets),
 			provisioning.WithReplayWindow(provisioningReplayWindow(ctx)),
 		)

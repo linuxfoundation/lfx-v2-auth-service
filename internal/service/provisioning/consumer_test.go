@@ -253,6 +253,15 @@ func userEvent(offset, userID string) auth0.EventMessage {
 	}
 }
 
+// mockAnnouncer records the requests it is handed.
+type mockAnnouncer struct {
+	requests []Request
+}
+
+func (m *mockAnnouncer) Announce(_ context.Context, req Request) {
+	m.requests = append(m.requests, req)
+}
+
 func newTestConsumer(t *testing.T, events auth0.EventsClient, provisioner Orchestrator, offsets OffsetStore) *Consumer {
 	t.Helper()
 
@@ -323,6 +332,27 @@ func TestConsumerHandle(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, provisioner.calls)
 		assert.Equal(t, []string{"o2"}, offsets.saves)
+	})
+
+	t.Run("a user event is announced even when provisioning fails", func(t *testing.T) {
+		provisioner := &mockProvisioner{err: errs.NewUnexpected("cdp down")}
+		announcer := &mockAnnouncer{}
+		consumer := newTestConsumer(t, &mockEventsClient{}, provisioner, &mockOffsetStore{})
+		consumer.announcer = announcer
+
+		err := consumer.handle(ctx, userEvent("o2a", "auth0|1"))
+
+		require.Error(t, err, "the provisioning failure still reconnects")
+		require.Len(t, announcer.requests, 1)
+		assert.Equal(t, "auth0|1", announcer.requests[0].UserID)
+	})
+
+	t.Run("a consumer with no announcer still provisions", func(t *testing.T) {
+		provisioner := &mockProvisioner{}
+		consumer := newTestConsumer(t, &mockEventsClient{}, provisioner, &mockOffsetStore{})
+
+		require.NoError(t, consumer.handle(ctx, userEvent("o2b", "auth0|1")))
+		assert.Equal(t, 1, provisioner.calls)
 	})
 
 	t.Run("an unparseable event is skipped rather than retried forever", func(t *testing.T) {

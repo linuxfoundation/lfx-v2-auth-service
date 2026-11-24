@@ -108,6 +108,7 @@ const maxRateLimitWait = 5 * time.Minute
 type Consumer struct {
 	events       auth0.EventsClient
 	provisioner  Orchestrator
+	announcer    Announcer
 	offsets      OffsetStore
 	eventTypes   []string
 	replayWindow time.Duration
@@ -160,6 +161,12 @@ func WithEventsClient(client auth0.EventsClient) ConsumerOption {
 // WithProvisioner sets the orchestrator each event is handed to.
 func WithProvisioner(orchestrator Orchestrator) ConsumerOption {
 	return func(c *Consumer) { c.provisioner = orchestrator }
+}
+
+// WithAnnouncer sets the announcer that publishes the user_email_verified
+// event. It is optional: without one, no event is published.
+func WithAnnouncer(announcer Announcer) ConsumerOption {
+	return func(c *Consumer) { c.announcer = announcer }
 }
 
 // WithOffsetStore sets where the stream position is persisted.
@@ -477,6 +484,13 @@ func (c *Consumer) handle(ctx context.Context, message auth0.EventMessage) error
 		"has_cdp_uuid", request.StoredCDPUUID != "",
 		"has_database_identity", request.HasDatabaseIdentity,
 	)
+
+	// Announced before provisioning, and independent of its outcome: a skipped
+	// or failed CDP attempt says nothing about whether the user's verified
+	// email should reach other services. It never fails the event.
+	if c.announcer != nil {
+		c.announcer.Announce(ctx, request)
+	}
 
 	result, err := c.provisioner.Provision(ctx, request)
 	if err != nil {

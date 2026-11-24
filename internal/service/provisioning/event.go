@@ -39,6 +39,10 @@ type EventUser struct {
 // EventMetadata is the subset of `app_metadata` the gate reads.
 type EventMetadata struct {
 	CDPUUID string `json:"cdp_uuid"`
+
+	// EmailVerifiedAnnouncedAt is set once the user_email_verified event has
+	// been published for the user.
+	EmailVerifiedAnnouncedAt string `json:"email_verified_announced_at"`
 }
 
 // EventIdentity is one identity on the event's user record.
@@ -120,8 +124,10 @@ func ParseEvent(raw []byte) (Event, EventUser, error) {
 // ToRequest maps an event's user record onto a provisioning request.
 func (u EventUser) ToRequest() Request {
 	storedUUID := ""
+	announcedAt := ""
 	if u.AppMetadata != nil {
 		storedUUID = u.AppMetadata.CDPUUID
+		announcedAt = u.AppMetadata.EmailVerifiedAnnouncedAt
 	}
 
 	return Request{
@@ -130,6 +136,7 @@ func (u EventUser) ToRequest() Request {
 		Email:               u.Email,
 		EmailVerified:       u.EmailVerified,
 		StoredCDPUUID:       storedUUID,
+		AnnouncedAt:         announcedAt,
 		HasDatabaseIdentity: u.hasDatabaseIdentity(),
 		DisplayName:         u.Name,
 	}
