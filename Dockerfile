@@ -22,7 +22,7 @@ COPY . .
 RUN go build -o /go/bin/auth-service -trimpath -ldflags="-w -s" github.com/linuxfoundation/lfx-v2-auth-service/cmd/server
 
 # Run our go binary standalone
-FROM cgr.dev/chainguard/static:latest
+FROM cgr.dev/chainguard/static@sha256:599c3cd7597b84aa149c4282beecc8c6d4e1cb5c95dc8d982e70cd0a2a9147a2
 
 # Implicit with base image; setting explicitly for linters.
 USER nonroot
