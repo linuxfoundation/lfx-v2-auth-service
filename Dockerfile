@@ -1,7 +1,10 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 
-FROM golang:1.26.11 AS builder
+# checkov:skip=CKV_DOCKER_7:No free access to Chainguard versioned labels.
+# hadolint global ignore=DL3007
+
+FROM cgr.dev/chainguard/go:latest AS builder
 
 # Set necessary environment variables needed for our image. Allow building to
 # other architectures via cross-compilation build-arg.
@@ -22,10 +25,10 @@ COPY . .
 RUN go build -o /go/bin/auth-service -trimpath -ldflags="-w -s" github.com/linuxfoundation/lfx-v2-auth-service/cmd/server
 
 # Run our go binary standalone
-FROM cgr.dev/chainguard/static@sha256:599c3cd7597b84aa149c4282beecc8c6d4e1cb5c95dc8d982e70cd0a2a9147a2
+FROM cgr.dev/chainguard/static:latest
 
-# Run as the Chainguard nonroot user.
-USER 65532
+# Implicit with base image; setting explicitly for linters.
+USER nonroot
 
 # Expose port 8080 for health checks and metrics (if needed)
 EXPOSE 8080
