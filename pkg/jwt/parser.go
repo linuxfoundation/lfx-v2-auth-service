@@ -18,6 +18,7 @@ import (
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
@@ -49,6 +50,10 @@ type ParseOptions struct {
 	VerifySignature bool
 	// SigningKey is the key used for signature verification (RSA public key)
 	SigningKey *rsa.PublicKey
+	// KeyLookup resolves the RSA public key for the 'kid' named in the token's
+	// protected header. When set, it takes precedence over SigningKey, so keys
+	// can be rotated and revoked without rebuilding the options.
+	KeyLookup func(ctx context.Context, kid string) (*rsa.PublicKey, error)
 	// ExpectedIssuer validates the 'iss' claim matches this value
 	ExpectedIssuer string
 	// ExpectedAudience validates the 'aud' claim matches this value
@@ -148,8 +153,13 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 		}
 	}
 
+	keyOption, err := opts.verificationKeyOption(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Parse the token with jwx
-	token, errParse := jwt.Parse([]byte(cleanToken), jwt.WithKey(jwa.RS256, opts.SigningKey))
+	token, errParse := jwt.Parse([]byte(cleanToken), keyOption)
 	if errParse != nil {
 		return nil, errParse
 	}
@@ -204,6 +214,33 @@ func ParseVerified(ctx context.Context, tokenString string, opts *ParseOptions) 
 	)
 
 	return claims, nil
+}
+
+// verificationKeyOption returns the jwx option that supplies the RS256
+// verification key, failing closed when no key source is configured.
+func (o *ParseOptions) verificationKeyOption(ctx context.Context) (jwt.ParseOption, error) {
+	if o.KeyLookup != nil {
+		return jwt.WithKeyProvider(jws.KeyProviderFunc(func(_ context.Context, sink jws.KeySink, sig *jws.Signature, _ *jws.Message) error {
+			headers := sig.ProtectedHeaders()
+			if headers.Algorithm() != jwa.RS256 {
+				return errors.NewValidation("unsupported token signing algorithm")
+			}
+			kid := headers.KeyID()
+			if kid == "" {
+				return errors.NewValidation("missing 'kid' header in token")
+			}
+			key, err := o.KeyLookup(ctx, kid)
+			if err != nil {
+				return err
+			}
+			sink.Key(jwa.RS256, key)
+			return nil
+		})), nil
+	}
+	if o.SigningKey == nil {
+		return nil, errors.NewValidation("signature verification key is required")
+	}
+	return jwt.WithKey(jwa.RS256, o.SigningKey), nil
 }
 
 // extractClaimsFromJWT extracts claims from a jwx JWT token

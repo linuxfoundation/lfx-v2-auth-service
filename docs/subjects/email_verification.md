@@ -21,7 +21,6 @@ sequenceDiagram
     SSRApp->>AuthService: NATS: email_linking.send_verification<br/>(alternate email)
 
     AuthService->>AuthService: Validate email format
-    AuthService->>AuthService: Check email doesn't exist<br/>(primary or alternate)
 
     AuthService->>Auth0: Start Passwordless Flow<br/>(send OTP to email)
     Auth0-->>User: Email with OTP code
@@ -32,14 +31,28 @@ sequenceDiagram
     Note over User,Auth0: Step 2: Verify Email with OTP
 
     User->>SSRApp: Submit OTP code
-    SSRApp->>AuthService: NATS: email_linking.verify<br/>(email + OTP)
+    SSRApp->>AuthService: NATS: email_linking.verify<br/>(email + OTP [+ optional user.auth_token])
 
     AuthService->>AuthService: Validate email format
-    AuthService->>AuthService: Check email still doesn't exist<br/>(prevent race condition)
+    opt user.auth_token present
+        AuthService->>AuthService: Resolve verified caller<br/>(failure returns before OTP exchange)
+    end
 
     AuthService->>Auth0: Exchange OTP for ID token<br/>(using service credentials)
-    Auth0-->>AuthService: ID token
-    AuthService-->>SSRApp: {"success": true,<br/>"data": {"token": "..."}}
+    alt OTP invalid, expired, or provider failure
+        Auth0-->>AuthService: Verification failure
+        AuthService-->>SSRApp: Failure without account lookup or tokens
+    else OTP validated
+        Auth0-->>AuthService: ID token
+        AuthService->>AuthService: Check caller's own record (token only),<br/>then existing primary/alternate holder
+        alt Address already owned by the caller (token only)
+            AuthService-->>SSRApp: {"success": true,<br/>"data": {"status": "already_connected"}}<br/>(no tokens; skip Step 3)
+        else Conflict or lookup failure
+            AuthService-->>SSRApp: Failure without tokens
+        else No existing holder
+            AuthService-->>SSRApp: {"success": true,<br/>"data": {"token": "..."}}
+        end
+    end
 
     Note over User,Auth0: Step 3: Link Identity to User
 
@@ -66,7 +79,6 @@ sequenceDiagram
     SSRApp->>AuthService: NATS: email_linking.send_verification<br/>(alternate email)
 
     AuthService->>AuthService: Validate email format
-    AuthService->>AuthService: Check email doesn't exist<br/>(primary or alternate)
 
     AuthService->>AuthService: Generate OTP
     AuthService->>NATSKV: Store OTP (with TTL)
@@ -77,11 +89,26 @@ sequenceDiagram
     Note over User,NATSKV: Step 2: Verify Email with OTP
 
     User->>SSRApp: Submit OTP code
-    SSRApp->>AuthService: NATS: email_linking.verify<br/>(email + OTP)
+    SSRApp->>AuthService: NATS: email_linking.verify<br/>(email + OTP [+ optional user.auth_token])
 
+    opt user.auth_token present
+        AuthService->>AuthService: Resolve verified caller<br/>(failure returns before OTP exchange)
+    end
     AuthService->>NATSKV: Retrieve stored OTP
-    AuthService->>AuthService: Compare OTP — generate internal ID token<br/>(sub: "email|<email>", signed by auth-service)
-    AuthService-->>SSRApp: {"success": true,<br/>"data": {"token": "..."}}
+    AuthService->>AuthService: Validate and consume OTP
+    alt OTP invalid, missing, or expired
+        AuthService-->>SSRApp: Failure without account lookup or tokens
+    else OTP validated
+        AuthService->>AuthService: Generate internal ID token<br/>(sub: "email|<email>", signed by auth-service)
+        AuthService->>AuthService: Check caller's own record (token only),<br/>then existing primary/alternate holder
+        alt Address already owned by the caller (token only)
+            AuthService-->>SSRApp: {"success": true,<br/>"data": {"status": "already_connected"}}<br/>(no tokens; skip Step 3)
+        else Conflict or lookup failure
+            AuthService-->>SSRApp: Failure without tokens
+        else No existing holder
+            AuthService-->>SSRApp: {"success": true,<br/>"data": {"token": "..."}}
+        end
+    end
 
     Note over User,NATSKV: Step 3: Link Identity to User
 
@@ -115,7 +142,7 @@ alternate-email@example.com
 
 ### Reply
 
-The service sends a one-time password (OTP) to the provided email address and returns a success confirmation:
+For an eligible, valid non-reserved address, the service requests OTP delivery without looking up whether the address is linked. Linked and unlinked addresses receive the same success confirmation under equivalent provider conditions:
 
 **Success Reply:**
 ```json
@@ -125,15 +152,18 @@ The service sends a one-time password (OTP) to the provided email address and re
 }
 ```
 
-**Error Reply (Email Already Linked):**
+Send does not return an already-linked conflict. Invalid input, reserved alias domains, missing dependencies, and genuine provider delivery/rate-limit failures still return failures; success is not fabricated when dispatch fails.
+
+**Error Reply (Reserved Domain):**
+
+Addresses on a domain listed in `ALLOWED_ALIAS_DOMAINS` are system-managed and can only be claimed through [`add_alias`](alias.md); no verification code is sent for them.
+
 ```json
 {
   "success": false,
-  "error": "email already linked"
+  "error": "email domain is reserved for system-managed aliases"
 }
 ```
-
-> **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
 
 **Error Reply (Invalid Email):**
 ```json
@@ -147,14 +177,15 @@ The service sends a one-time password (OTP) to the provided email address and re
 
 ```bash
 # Send verification code to alternate email
-nats request lfx.auth-service.email_linking.send_verification "john.personal@gmail.com"
+nats request lfx.auth-service.email_linking.send_verification "alternate-email@example.com"
 
 # Expected response: {"success":true,"message":"alternate email verification sent"}
 ```
 
 **Important Notes:**
-- The service checks if the email is already linked to any user account before sending the verification code
-- An OTP code is available to be used for a valid time period
+- No address lookup occurs during send; an account-search outage does not block dispatch, but an unconfigured reader still returns `auth_service_unavailable`. A missing email handler still returns `email service unavailable`.
+- Input is trimmed and lowercased, and send accepts only bare email addresses; display-name and quoted forms are rejected.
+- OTP expiry, resend, and attempt limits remain provider-controlled.
 
 ---
 
@@ -167,23 +198,30 @@ After receiving the OTP code via email, verify the email address by exchanging t
 
 ### Request Payload
 
-The request payload must be a JSON object containing the email address and the OTP code:
+The request payload must be a JSON object containing the email address and the OTP code. It may also carry the caller's token so the service can recognize an address the caller already owns:
 
 ```json
 {
-  "email": "john.personal@gmail.com",
-  "otp": "123456"
+  "email": "alternate-email@example.com",
+  "otp": "123456",
+  "user": {
+    "auth_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
 }
 ```
 
 ### Required Fields
 
-- `email`: The email address that received the verification code
+- `email`: The email address that received the verification code. As with send, only a bare address is accepted; display-name and quoted forms return `invalid email` before any OTP exchange.
 - `otp`: The one-time password code sent to the email
+
+### Optional Fields
+
+- `user.auth_token`: The caller's own token — on Auth0, a Management API audience JWT carrying `update:current_user_identities` (the same Flow C token later passed to `user_identity.link`); on Authelia, the user's Authelia access token. When present, the service resolves the caller **before** exchanging the OTP. An invalid token, or one that does not establish a verified principal, returns its error (for example `a valid JWT token is required`) without consuming the code. Omit the field, or send it blank, for the legacy behavior: replies are byte-identical to requests without it.
 
 ### Reply
 
-The service validates the OTP and returns authentication tokens if successful:
+The service validates the OTP first (after resolving `user.auth_token`, when present). Incorrect, missing, expired, or provider-rejected codes return the provider failure without any account lookup, regardless of linked state. Only after successful OTP proof does the service check alternate then primary holders (stopping at a conflict or lookup error). Tokens are returned only if both verification and the holder check succeed:
 
 **Success Reply:**
 ```json
@@ -197,6 +235,26 @@ The service validates the OTP and returns authentication tokens if successful:
 
 The returned token is an authentication token that can be used to link the verified email to the user's account.
 
+**Success Reply (Already Connected — only with `user.auth_token`, after successful OTP validation):**
+```json
+{
+  "success": true,
+  "message": "email already connected to this account",
+  "data": {
+    "status": "already_connected"
+  }
+}
+```
+
+The address already belongs to the calling account, so there is nothing to link. This reply carries no `id_token` or `access_token`: the client must not call `user_identity.link`, and should show the address as already connected. Branch on `data.status == "already_connected"`, not on the message text.
+
+After OTP proof, a caller-supplied token yields `already_connected` only when one of these holds:
+
+1. The caller's own record (fetched with service credentials, keyed on the verified principal) has the address as a **verified** primary email, a **verified** `email`-connection identity, or a **verified** alternate email. Matching is case-insensitive.
+2. Otherwise, the holder search finds an account holding the address and that account's `user_id` equals the verified caller's. A holder with no `user_id` matches when its username equals the username on the caller's own record; Authelia leaves `user_id` empty until a token-verified update persists the user's `sub`. This covers operator-provisioned primaries, such as Authelia's, that are matched as stored.
+
+Social identities (`github`, `google-oauth2`, and so on) never count, even when the provider marks their email verified. An unverified primary or alternate never counts either; it keeps the normal token reply so it can be linked as a verified email identity. A holder that is any other account returns `email already linked`, and a failure while fetching the caller's record or searching holders returns that error. Neither carries tokens.
+
 **Error Reply (Invalid OTP):**
 ```json
 {
@@ -205,7 +263,7 @@ The returned token is an authentication token that can be used to link the verif
 }
 ```
 
-**Error Reply (Email Already Linked):**
+**Error Reply (Email Already Linked — only after successful OTP validation):**
 ```json
 {
   "success": false,
@@ -214,6 +272,19 @@ The returned token is an authentication token that can be used to link the verif
 ```
 
 > **Note:** The `error` text is a human-readable diagnostic, **not** a stable contract — the exact wording can vary by provider (for example, the mock provider returns `alternate email already linked` for this same condition). Consumers should branch on the `success: false` flag, not on the exact error string.
+
+A post-proof conflict or lookup failure contains no token data. The successful OTP has already been consumed: request a fresh code before retrying after the conflict is resolved or the lookup service recovers. Discarded tokens are not cached, returned, or reused.
+
+**Error Reply (Reserved Domain):**
+
+Codes for addresses on a domain listed in `ALLOWED_ALIAS_DOMAINS` are never exchanged; those addresses can only be claimed through [`add_alias`](alias.md).
+
+```json
+{
+  "success": false,
+  "error": "email domain is reserved for system-managed aliases"
+}
+```
 
 **Error Reply (Invalid Request):**
 ```json
@@ -228,16 +299,29 @@ The returned token is an authentication token that can be used to link the verif
 ```bash
 # Verify the alternate email with OTP code
 nats request lfx.auth-service.email_linking.verify '{
-  "email": "john.personal@gmail.com",
+  "email": "alternate-email@example.com",
   "otp": "123456"
 }'
 
 # Expected response: {"success":true,"data":{"token":"eyJhbG..."}}
+
+# Verify with the caller's token so an address they already own is recognized
+nats request lfx.auth-service.email_linking.verify '{
+  "email": "alternate-email@example.com",
+  "otp": "123456",
+  "user": {"auth_token": "<management-api-token>"}
+}'
+
+# Expected response for an owned address:
+# {"success":true,"message":"email already connected to this account","data":{"status":"already_connected"}}
 ```
 
 **Important Notes:**
 - OTP codes are time-sensitive and available for a valid time period
-- The service prevents linking an email that is already verified and linked to another user
+- Conflict lookup follows successful OTP validation; wrong/expired-code failures do not reveal linked state.
+- Failure order: request validation, then `user.auth_token` resolution (when present), then the OTP exchange, then own-account and holder checks. A token failure never consumes the code.
+- Own-account recognition only compares the address against the verified caller's own account, so it reveals nothing about other accounts. `send_verification` is unchanged and still performs no lookup.
+- Existing validation, reserved-domain guards, dependency-unavailable responses, and authenticated linking permissions are unchanged.
 - The returned token (ID token) can be used to link the verified email to the user account using the identity linking operation (see [Identity Linking Documentation](identity_linking.md))
 - For detailed Auth0-specific implementation details and technical information about the passwordless flow, see: [`../../internal/infrastructure/auth0/README.md`](../../internal/infrastructure/auth0/README.md)
 
@@ -247,14 +331,20 @@ nats request lfx.auth-service.email_linking.verify '{
 
 ### Auth0
 
-The OTP is delivered via Auth0's passwordless email flow. After verification, Auth0 issues a standard ID token that is returned directly to the caller and passed to `user_identity.link`.
+The OTP is delivered via Auth0's passwordless email flow. After verification, Auth0 issues tokens to the service; they are returned to the caller only after the post-proof holder check succeeds. The ID token can then be passed to `user_identity.link`.
+
+A new standalone passwordless profile has a primary `email` identity, not a linked secondary identity with `profileData`, so it does not itself count as a canonical/linked holder. Verified database-primary and linked-passwordless holders still count as conflicts. See [Auth0 account linking](https://auth0.com/docs/manage-users/user-accounts/user-account-linking).
+
+When a post-proof check refuses the link (holder conflict, holder lookup failure, or own-account lookup failure), the service makes a best-effort delete of a candidate standalone passwordless profile. The profile is identified by the `sub` of the ID token the exchange returned, and is deleted only if all of these hold: exactly one identity is present, it is on the `email` connection and has no linked-secondary `profileData`, the profile is not `system_managed`, `created_at` is within 5 minutes, and `logins_count` is at most 1. A missing or unparsable `created_at` skips the delete. Linked accounts are never eligible; age and login-count heuristics alone do not prove that this exchange created a single-identity profile. Cleanup has a one-second total budget for its provider calls and retries and uses only a still-valid M2M token previously obtained by a lookup. It never initiates or waits for token refresh; a missing/expired cached token skips cleanup. A failed, timed-out, or guard-skipped delete is logged and never replaces the refusal reply, though a profile may remain. The success and already-connected paths keep the profile. Authelia and the mock keep no external profile, so they do nothing.
+
+Live delivery also depends on tenant configuration: Auth0's **Disable Sign Ups** setting can prevent new-user delivery. Because the OTP exchange itself creates the profile, setting it on the email connection is expected to stop codes reaching addresses with no account yet and break the linking flow, so it is not used as the cleanup. This change does not alter that configuration, delivery errors, or provider limits. See [Auth0 email OTP configuration](https://auth0.com/docs/authenticate/passwordless/authentication-methods/email-otp).
 
 ### Authelia
 
 The Authelia flow is fully self-contained — no external provider is called:
 
 1. **Send verification** (`email_linking.send_verification`): The auth-service generates a random OTP, emails it via the configured SMTP sender, and stores the OTP in the NATS KV email-OTP bucket with a TTL.
-2. **Verify OTP** (`email_linking.verify`): The auth-service reads the stored OTP from NATS KV and compares it against the submitted code. On success, it generates an **internal ID token** (signed with the auth-service's own key) with:
+2. **Verify OTP** (`email_linking.verify`): The auth-service validates and consumes the stored OTP from NATS KV. On success, it generates an **internal ID token** (signed with the auth-service's own key); the orchestration layer then checks existing holders before returning it. The token has:
    - `email` claim set to the verified email address
    - `sub` claim set to `email|<email-address>`
 3. **Link identity** (`user_identity.link`): The `sub` prefix `email|` signals the email flow — the verified email is appended to the user's `alternate_emails` in NATS KV using optimistic concurrency.
@@ -263,9 +353,26 @@ The Authelia flow is fully self-contained — no external provider is called:
 
 The Mock flow is fully self-contained — no NATS KV or SMTP is involved:
 
-1. **Send verification** (`email_linking.send_verification`): Generates a 6-digit OTP stored in-memory with a 5-minute TTL. The OTP is logged to stdout (no email is sent).
-2. **Verify OTP** (`email_linking.verify`): Compares the submitted code against the in-memory entry. On success, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
-3. **Link identity** (`user_identity.link`): Same `email|` dispatch — the verified email is appended to the user's `alternate_emails` in the in-memory store.
+1. **Send verification** (`email_linking.send_verification`): Generates a 6-digit OTP for eligible linked and unlinked addresses, stored in-memory with a 5-minute TTL. The OTP is logged to stdout (no email is sent).
+2. **Verify OTP** (`email_linking.verify`): Checks the submitted code before inspecting linked state. A valid code is consumed before the conflict check, which matches the service policy: a primary email or a verified alternate email is a conflict, while an unverified alternate is not; no token is generated on conflict. Otherwise, generates an **internal ID token** with `sub: "email|<email-address>"` — identical sub format to the Authelia flow.
+3. **Link identity** (`user_identity.link`): Refused — the mock cannot verify tokens, so it rejects link requests. Steps 1–2 still work for local testing of the OTP exchange.
+
+A verify request that carries `user.auth_token` is also refused on the mock: its scope-gated token lookup always fails, so the request returns that error before the OTP exchange. Omit the token to exercise verify locally.
 
 > The Mock provider returns `alternate email already linked` (rather than `email already linked`) for an already-linked address — see the note under the error replies above.
 
+## Security Rationale and Frontend Boundary
+
+This is the auth-service follow-up to [linuxfoundation/lfx-self-serve-ops#443](https://github.com/linuxfoundation/lfx-self-serve-ops/issues/443), tracked in [#504](https://github.com/linuxfoundation/lfx-self-serve-ops/issues/504). BFF response masking alone cannot deliver an OTP if the upstream service rejects a linked address first. Sending without account lookup and validating the OTP before conflict disclosure removes that pre-proof account-state signal.
+
+This contract applies to NATS callers. The current Self Serve BFF masks verification failures, including post-proof conflicts, to generic HTTP 400 responses. Restoring specific frontend conflict guidance is deferred; this auth-service change does not promise a browser-visible explanation. A later link-time conflict is a separate response.
+
+## Self Serve Integration (Own-Account Recognition)
+
+Tracked in [linuxfoundation/lfx-self-serve-ops#936](https://github.com/linuxfoundation/lfx-self-serve-ops/issues/936). Adding an address the signed-in account already owns used to fail with `email already linked` after OTP proof, which Self Serve shows as "linked to another account" or as a generic verification failure. Auth-service now reports that case as `already_connected` when the caller identifies itself. Self Serve needs these follow-up changes to use it:
+
+- Send the user's Management API token (the Flow C token already obtained for `user_identity.link`) as `user.auth_token` in the `email_linking.verify` payload, including on the Flow C callback re-run. Do not send a client-credentials (M2M) fallback token: it never resolves to the user, so it cannot produce `already_connected` and may fail the verify instead.
+- Handle `data.status == "already_connected"` in the add-account, verify-identity, and Account Settings dialogs as a success that skips `user_identity.link`.
+- Correct the 409 "another account" copy so it is not shown for the user's own address.
+
+The already-connected message deliberately avoids the substrings Self Serve uses to detect a linked-to-another-account error.

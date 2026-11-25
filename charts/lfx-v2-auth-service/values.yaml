@@ -42,6 +42,9 @@ image:
   repository: ghcr.io/linuxfoundation/lfx-v2-auth-service/server
   # tag is the container image tag (overrides appVersion from Chart.yaml)
   tag: ""
+  # digest pins the image by digest (e.g. "sha256:..."); when set it takes
+  # precedence over tag, so a re-pushed tag cannot change what runs
+  digest: ""
   # pullPolicy is the image pull policy
   pullPolicy: IfNotPresent
 
@@ -103,6 +106,9 @@ mergeRepair:
     # tag pins the job image. Unset means the deployment image.tag, which
     # itself falls back to appVersion from Chart.yaml.
     tag: ""
+    # digest pins the job image by digest (e.g. "sha256:..."); when set it
+    # takes precedence over every tag. Not inherited from image.digest.
+    digest: ""
   # resources overrides the shared deployment resources for the job; unset
   # means the shared block below.
   resources: {}

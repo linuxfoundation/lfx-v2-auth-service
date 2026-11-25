@@ -37,6 +37,9 @@ type Auth0User struct {
 	// identity, when one exists. It can predate CreatedAt, in which case it
 	// is the true join date. See ToUser.
 	LDAPCreatedAt string `json:"ldap_created_at,omitempty"`
+	// LoginsCount is the number of logins Auth0 has recorded for the user. Read
+	// only by the fresh-stub delete guard; never written back.
+	LoginsCount int `json:"logins_count"`
 }
 
 // Auth0AppMetadata represents the application-level metadata Auth0 stores on a user.
@@ -69,6 +72,41 @@ type systemManagedUserPayload struct {
 	Email         string            `json:"email"`
 	EmailVerified bool              `json:"email_verified"`
 	AppMetadata   *Auth0AppMetadata `json:"app_metadata,omitempty"`
+}
+
+// systemManagedIdentityKeyPrefix prefixes the per-identity app_metadata key
+// that marks a linked email identity as a system-managed alias on the primary
+// user, e.g. app_metadata.system_managed_identity_<id> = true.
+//
+// Each alias gets its own top-level key rather than a shared array: Auth0
+// merges top-level app_metadata keys natively (see cdpMetadataPatch), so a
+// marker is added with a single PATCH that cannot overwrite, or be overwritten
+// by, a concurrent marker write for another alias on the same user.
+const systemManagedIdentityKeyPrefix = "system_managed_identity_"
+
+// systemManagedIdentityKey returns the app_metadata key that marks identityID
+// (the provider-local id, without the "email|" prefix) as system-managed.
+func systemManagedIdentityKey(identityID string) string {
+	return systemManagedIdentityKeyPrefix + identityID
+}
+
+// unlinkGuardUser is the subset of the primary user the unlink guard reads.
+// app_metadata is kept raw because system-managed markers use per-identity
+// keys that a fixed struct cannot model.
+type unlinkGuardUser struct {
+	Identities  []Auth0Identity            `json:"identities"`
+	AppMetadata map[string]json.RawMessage `json:"app_metadata"`
+}
+
+// hasSystemManagedIdentityMarker reports whether appMetadata marks identityID
+// as system-managed (its marker key is present and set to true).
+func (g *unlinkGuardUser) hasSystemManagedIdentityMarker(identityID string) bool {
+	raw, ok := g.AppMetadata[systemManagedIdentityKey(identityID)]
+	if !ok {
+		return false
+	}
+	var marked bool
+	return json.Unmarshal(raw, &marked) == nil && marked
 }
 
 // linkSubIdentityPayload is the body for POST /api/v2/users/{id}/identities when
@@ -147,15 +185,7 @@ func (u *Auth0User) ToUser() *model.User {
 
 	var identities []model.Identity
 	for _, auth0Id := range u.Identities {
-		var identityID string
-		switch v := auth0Id.UserID.(type) {
-		case float64:
-			identityID = strconv.FormatFloat(v, 'f', -1, 64)
-		case string:
-			identityID = v
-		default:
-			identityID = fmt.Sprintf("%v", v)
-		}
+		identityID := identityIDString(auth0Id.UserID)
 
 		identity := model.Identity{
 			Provider:   auth0Id.Provider,
@@ -179,6 +209,22 @@ func (u *Auth0User) ToUser() *model.User {
 		Identities:   identities,
 		UserMetadata: meta,
 		CreatedAt:    earliestCreatedAt(u.CreatedAt, u.LDAPCreatedAt),
+		// Carried so callers can refuse to treat an unverified root email as owned.
+		PrimaryEmailVerified: u.EmailVerified,
+	}
+}
+
+// identityIDString renders an identity's user_id. Auth0 returns it as a string
+// for most connections but as a JSON number for some providers, which decodes
+// as float64 and must not be rendered in exponent form.
+func identityIDString(v any) string {
+	switch id := v.(type) {
+	case float64:
+		return strconv.FormatFloat(id, 'f', -1, 64)
+	case string:
+		return id
+	default:
+		return fmt.Sprintf("%v", id)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/mail"
 	"os"
 	"strings"
 	"time"
@@ -51,6 +52,7 @@ type messageHandlerOrchestrator struct {
 	identityUnlinker port.IdentityLinker
 	passwordHandler  port.PasswordHandler
 	impersonator     port.Impersonator
+	userSearcher     port.UserSearcher
 	eventPublisher   port.EventPublisher
 	aliasManager     port.AliasManager
 }
@@ -107,6 +109,13 @@ func WithImpersonatorForMessageHandler(impersonator port.Impersonator) MessageHa
 	}
 }
 
+// WithUserSearcherForMessageHandler sets the user searcher for the message handler orchestrator
+func WithUserSearcherForMessageHandler(userSearcher port.UserSearcher) MessageHandlerOrchestratorOption {
+	return func(m *messageHandlerOrchestrator) {
+		m.userSearcher = userSearcher
+	}
+}
+
 // WithEventPublisherForMessageHandler sets the event publisher for the message handler orchestrator
 func WithEventPublisherForMessageHandler(eventPublisher port.EventPublisher) MessageHandlerOrchestratorOption {
 	return func(m *messageHandlerOrchestrator) {
@@ -133,6 +142,20 @@ func (m *messageHandlerOrchestrator) errorResponse(error string) []byte {
 		)
 	}
 	return responseJSON
+}
+
+// errUnverifiedPrincipal is returned when an operation scoped to the caller's
+// own account is requested by a principal that was not established from a
+// verified token.
+const errUnverifiedPrincipal = "a valid JWT token is required"
+
+// isVerifiedPrincipal reports whether the user returned by a scope-gated
+// MetadataLookup was established from the caller's token, which the backend
+// verified (a signed JWT for Auth0, the OIDC userinfo endpoint for Authelia).
+// A bare sub or username leaves Token empty and
+// must never authorize a write performed with service credentials.
+func isVerifiedPrincipal(user *model.User) bool {
+	return user != nil && strings.TrimSpace(user.UserID) != "" && strings.TrimSpace(user.Token) != ""
 }
 
 // searchByEmail normalizes the email (lowercases and trims whitespace) and returns the matching user or an error
@@ -218,7 +241,9 @@ func (m *messageHandlerOrchestrator) UsernameToSub(_ context.Context, msg port.T
 
 // resolveUserFromAuthInput resolves a user from an auth token, subject identifier, or LFID username.
 // Supported inputs follow MetadataLookup: JWT (Auth0 or Authelia), Auth0 sub or Authelia UUID,
-// or a plain LFID username resolved via SearchUser when no UserID is present.
+// or a plain LFID username resolved via SearchUser when no UserID is present. The search
+// result only identifies the account; GetUser fetches current data directly from the
+// identity provider (by user ID for Auth0, or by username for Authelia) before returning.
 // Callers that receive a structured JSON payload (e.g. user_emails.read) should
 // extract user.auth_token first; handlers with a raw string body (e.g.
 // user_metadata.read) should use getUserByInput instead.
@@ -237,10 +262,13 @@ func (m *messageHandlerOrchestrator) resolveUserFromAuthInput(ctx context.Contex
 		return nil, err
 	}
 
-	if user.UserID != "" {
-		return m.userReader.GetUser(ctx, user)
+	if user.UserID == "" {
+		user, err = m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return m.userReader.SearchUser(ctx, user, constants.CriteriaTypeUsername)
+	return m.userReader.GetUser(ctx, user)
 }
 
 // getUserByInput resolves a user when the NATS payload is a raw auth input string
@@ -371,6 +399,7 @@ type identityListRequest struct {
 type identityResponse struct {
 	Provider    string               `json:"provider"`
 	UserID      string               `json:"user_id"`
+	Connection  string               `json:"connection,omitempty"`
 	IsSocial    bool                 `json:"isSocial"`
 	ProfileData *identityProfileData `json:"profileData,omitempty"`
 }
@@ -411,6 +440,15 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 		return m.errorResponse(err.Error()), nil
 	}
 
+	// Identities are listed only for the caller's own account, so the principal
+	// must come from a token the backend verified, not a bare sub or username.
+	// Token shape alone is not proof: a username like "first.middle.last" parses
+	// as a JWT structure, so rely on the backend's verification flag instead.
+	if user == nil || !user.PrincipalVerified {
+		slog.WarnContext(ctx, "identity list rejected: input is not a verified token")
+		return m.errorResponse(errUnverifiedPrincipal), nil
+	}
+
 	fullUser, err := m.userReader.GetUser(ctx, user)
 	if err != nil {
 		slog.ErrorContext(ctx, "error getting user for identity list",
@@ -422,9 +460,10 @@ func (m *messageHandlerOrchestrator) ListIdentities(ctx context.Context, msg por
 	identities := make([]identityResponse, 0, len(fullUser.Identities))
 	for _, id := range fullUser.Identities {
 		resp := identityResponse{
-			Provider: id.Provider,
-			UserID:   id.IdentityID,
-			IsSocial: id.IsSocial,
+			Provider:   id.Provider,
+			UserID:     id.IdentityID,
+			Connection: id.Connection,
+			IsSocial:   id.IsSocial,
 		}
 		if id.Email != "" || id.Nickname != "" || id.Name != "" {
 			resp.ProfileData = &identityProfileData{
@@ -527,7 +566,9 @@ func (m *messageHandlerOrchestrator) UpdateUser(ctx context.Context, msg port.Tr
 	return responseJSON, nil
 }
 
-func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email string) error {
+// findEmailHolder returns the account that already holds email as its primary,
+// a verified alternate, or a verified email identity, or nil when none does.
+func (m *messageHandlerOrchestrator) findEmailHolder(ctx context.Context, email string) (*model.User, error) {
 
 	email = strings.ToLower(strings.TrimSpace(email))
 
@@ -535,20 +576,23 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 	for _, criteria := range []string{constants.CriteriaTypeAlternateEmail, constants.CriteriaTypeEmail} {
 		user, errSearch := m.searchByEmail(ctx, criteria, email)
 		if errSearch != nil && !errors.As(errSearch, &notFound) {
-			return errSearch
+			return nil, errSearch
 		}
 		if user != nil && (user.UserID != "" || user.Username != "") {
 			slog.DebugContext(ctx, "user found", "user_id", redaction.Redact(user.UserID))
 
+			// The Auth0 adapter's SearchUser only resolves verified matches, so an
+			// unverified Auth0 record never blocks here. Authelia and mock users
+			// are provisioned by an operator and are matched as stored.
 			if strings.EqualFold(user.PrimaryEmail, email) {
-				return errs.NewValidation("email already linked")
+				return user, nil
 			}
 
 			// Authelia and Mock adapters expose linked emails via AlternateEmails;
 			// the Auth0 adapter exposes them as identities with Connection == "email".
 			for _, alternateEmail := range user.AlternateEmails {
 				if strings.EqualFold(alternateEmail.Email, email) && alternateEmail.Verified {
-					return errs.NewValidation("email already linked")
+					return user, nil
 				}
 			}
 			for _, id := range user.Identities {
@@ -556,13 +600,90 @@ func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email
 					continue
 				}
 				if strings.EqualFold(id.Email, email) && id.EmailVerified {
-					return errs.NewValidation("email already linked")
+					return user, nil
 				}
 			}
 		}
 	}
 
+	return nil, nil
+}
+
+// checkEmailExists returns a validation error when an account already holds email,
+// preserving the conflict response for verification requests without a caller token.
+func (m *messageHandlerOrchestrator) checkEmailExists(ctx context.Context, email string) error {
+	holder, errFind := m.findEmailHolder(ctx, email)
+	if errFind != nil {
+		return errFind
+	}
+	if holder != nil {
+		return errs.NewValidation(errEmailAlreadyLinked)
+	}
 	return nil
+}
+
+// ownsVerifiedEmail reports whether user's own record holds email as a verified
+// primary, a verified email-connection identity, or a verified alternate.
+// Social identities and unverified addresses never count, whatever the
+// provider reports for them.
+func ownsVerifiedEmail(user *model.User, email string) bool {
+	if user == nil {
+		return false
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+
+	if user.PrimaryEmailVerified && strings.EqualFold(strings.TrimSpace(user.PrimaryEmail), email) {
+		return true
+	}
+	for _, id := range user.Identities {
+		if id.Connection == constants.EmailConnection && id.EmailVerified && strings.EqualFold(strings.TrimSpace(id.Email), email) {
+			return true
+		}
+	}
+	for _, alternateEmail := range user.AlternateEmails {
+		if alternateEmail.Verified && strings.EqualFold(strings.TrimSpace(alternateEmail.Email), email) {
+			return true
+		}
+	}
+	return false
+}
+
+// isEmailConnectedToPrincipal reports whether a proven email already belongs to
+// the verified caller: their own record holds it verified, or the account that
+// holds it is the caller's. Another holder is a conflict.
+func (m *messageHandlerOrchestrator) isEmailConnectedToPrincipal(ctx context.Context, principal *model.User, email string) (bool, error) {
+	// Fetch the canonical record with the service's credentials (empty Token):
+	// Auth0 keys on UserID over M2M, Authelia on Username or Sub.
+	fullUser, errGetUser := m.userReader.GetUser(ctx, &model.User{
+		UserID:   principal.UserID,
+		Sub:      principal.Sub,
+		Username: principal.Username,
+	})
+	if errGetUser != nil {
+		return false, errGetUser
+	}
+	if ownsVerifiedEmail(fullUser, email) {
+		slog.DebugContext(ctx, "email already connected to caller", "user_id", redaction.Redact(principal.UserID))
+		return true, nil
+	}
+
+	holder, errFind := m.findEmailHolder(ctx, email)
+	if errFind != nil {
+		return false, errFind
+	}
+	if holder == nil {
+		return false, nil
+	}
+	// Authelia leaves UserID empty until a token-verified update persists the
+	// user's sub, so a holder without a UserID is matched on its username (the
+	// Authelia storage key) against the caller's canonical record instead.
+	heldByCaller := holder.UserID == principal.UserID ||
+		(holder.UserID == "" && holder.Username != "" && fullUser != nil && holder.Username == fullUser.Username)
+	if heldByCaller {
+		slog.DebugContext(ctx, "email held by caller", "user_id", redaction.Redact(principal.UserID))
+		return true, nil
+	}
+	return false, errs.NewValidation(errEmailAlreadyLinked)
 }
 
 // StartEmailLinking starts the email linking process
@@ -582,11 +703,29 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 		return m.errorResponse("invalid email"), nil
 	}
 
-	err := m.checkEmailExists(ctx, alternateEmailInput)
-	if err != nil {
-		return m.errorResponse(err.Error()), nil
+	// Addresses on system-managed alias domains are claimed only through
+	// add_alias. Starting a passwordless flow for them would provision an
+	// email-connection user in the identity provider for an address the
+	// caller has not proven they own.
+	// Only a bare address is accepted: display-name or quoted forms accepted by
+	// IsValidEmail would otherwise let the checked domain differ from the
+	// string sent to the provider.
+	if !isBareEmailAddress(alternateEmailInput) {
+		return m.errorResponse("invalid email"), nil
+	}
+	at := strings.LastIndex(alternateEmailInput, "@")
+	if at < 0 {
+		return m.errorResponse("invalid email"), nil
+	}
+	if isAllowedAliasDomain(alternateEmailInput[at+1:]) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
 	}
 
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	// Sending must not inspect linked state before the caller proves inbox ownership.
 	errLinkAlternateEmail := m.emailHandler.SendVerificationAlternateEmail(ctx, alternateEmailInput)
 	if errLinkAlternateEmail != nil {
 		return m.errorResponse(errLinkAlternateEmail.Error()), nil
@@ -607,33 +746,116 @@ func (m *messageHandlerOrchestrator) StartEmailLinking(ctx context.Context, msg 
 	return responseJSON, nil
 }
 
-// VerifyEmailLinking verifies the email linking
+// verifyEmailLinkingRequest represents the JSON payload for email_linking.verify
+// requests. user.auth_token is optional; when present it identifies the caller
+// so an address they already own can be reported as already connected.
+type verifyEmailLinkingRequest struct {
+	User struct {
+		AuthToken string `json:"auth_token"`
+	} `json:"user"`
+	Email string `json:"email"`
+	OTP   string `json:"otp"`
+}
+
+// errEmailAlreadyLinked is shared by both conflict paths; Self Serve matches its text.
+const errEmailAlreadyLinked = "email already linked"
+
+// The already-connected reply must avoid the substrings Self Serve treats as
+// a linked-to-another-account error ("already linked", "belongs to an
+// existing", "existing lfid account").
+const (
+	emailAlreadyConnectedMessage = "email already connected to this account"
+	emailAlreadyConnectedStatus  = "already_connected"
+)
+
+// emailLinkingStatusData is the data payload of the already-connected reply.
+// It carries no tokens, so nothing can be linked from it.
+type emailLinkingStatusData struct {
+	Status string `json:"status"`
+}
+
+// VerifyEmailLinking proves inbox ownership with an OTP and returns linking tokens.
+// An optional caller token is validated before OTP proof; if the caller already
+// owns the proven email, the reply reports already_connected without tokens.
 func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
 
 	if m.emailHandler == nil {
 		return m.errorResponse("email service unavailable"), nil
 	}
 
-	email := &model.Email{}
-	err := json.Unmarshal(msg.Data(), email)
+	var request verifyEmailLinkingRequest
+	err := json.Unmarshal(msg.Data(), &request)
 	if err != nil {
 		responseJSON := m.errorResponse("failed to unmarshal email data")
 		return responseJSON, nil
 	}
+	email := &model.Email{Email: request.Email, OTP: request.OTP}
 
 	if !email.IsValidEmail() {
 		return m.errorResponse("invalid email"), nil
 	}
 
-	//
-	errExists := m.checkEmailExists(ctx, email.Email)
-	if errExists != nil {
-		return m.errorResponse(errExists.Error()), nil
+	// Mirror the send_verification bare-address rule: the holder lookup after
+	// proof must search the same address the provider verified.
+	if !isBareEmailAddress(strings.TrimSpace(email.Email)) {
+		return m.errorResponse("invalid email"), nil
 	}
 
+	// Mirror the send_verification guard: alias-domain addresses are claimed
+	// only through add_alias, so a code obtained outside this service (or issued
+	// before the guard existed) cannot be exchanged for one either.
+	if isAliasDomainAddress(email.Email) {
+		return m.errorResponse("email domain is reserved for system-managed aliases"), nil
+	}
+
+	if m.userReader == nil {
+		return m.errorResponse("auth_service_unavailable"), nil
+	}
+
+	// Resolve the optional caller before proof, so a bad token never consumes
+	// the code. Without a token the legacy behavior is unchanged.
+	var principal *model.User
+	if authToken := strings.TrimSpace(request.User.AuthToken); authToken != "" {
+		user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
+		if errLookup != nil {
+			return m.errorResponse(errLookup.Error()), nil
+		}
+		if !isVerifiedPrincipal(user) {
+			return m.errorResponse(errUnverifiedPrincipal), nil
+		}
+		principal = user
+	}
+
+	// Prove inbox ownership before inspecting linked state; failures must not expose tokens.
 	authResponse, errVerifyAlternateEmail := m.emailHandler.VerifyAlternateEmail(ctx, email)
 	if errVerifyAlternateEmail != nil {
 		return m.errorResponse(errVerifyAlternateEmail.Error()), nil
+	}
+
+	if principal == nil {
+		errExists := m.checkEmailExists(ctx, email.Email)
+		if errExists != nil {
+			m.discardVerifiedEmailProfile(ctx, authResponse)
+			return m.errorResponse(errExists.Error()), nil
+		}
+	} else {
+		connected, errConnected := m.isEmailConnectedToPrincipal(ctx, principal, email.Email)
+		if errConnected != nil {
+			m.discardVerifiedEmailProfile(ctx, authResponse)
+			return m.errorResponse(errConnected.Error()), nil
+		}
+		if connected {
+			response := UserDataResponse{
+				Success: true,
+				Message: emailAlreadyConnectedMessage,
+				Data:    emailLinkingStatusData{Status: emailAlreadyConnectedStatus},
+			}
+			responseJSON, errMarshal := json.Marshal(response)
+			if errMarshal != nil {
+				return m.errorResponse("failed to marshal response"), nil
+			}
+			return responseJSON, nil
+		}
 	}
 
 	// Return success response with user metadata
@@ -649,6 +871,17 @@ func (m *messageHandlerOrchestrator) VerifyEmailLinking(ctx context.Context, msg
 	}
 
 	return responseJSON, nil
+}
+
+// discardVerifiedEmailProfile removes the provider profile a proven OTP created
+// when the link is then refused. It is best-effort: a failure is logged and
+// never changes the refusal the caller returns.
+func (m *messageHandlerOrchestrator) discardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) {
+	if errDiscard := m.emailHandler.DiscardVerifiedEmailProfile(ctx, authResponse); errDiscard != nil {
+		slog.WarnContext(ctx, "failed to discard verified email profile after refused link",
+			"error", errDiscard,
+		)
+	}
 }
 
 // LinkIdentity links a verified email identity to a user account
@@ -772,6 +1005,9 @@ func (m *messageHandlerOrchestrator) ChangePassword(ctx context.Context, msg por
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
 	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
+	}
 
 	errChange := m.passwordHandler.ChangePassword(ctx, user, request.CurrentPassword, request.NewPassword)
 	if errChange != nil {
@@ -810,6 +1046,9 @@ func (m *messageHandlerOrchestrator) SendResetPasswordLink(ctx context.Context, 
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.Token, constants.UserChangePasswordRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	errReset := m.passwordHandler.SendResetPasswordLink(ctx, user)
@@ -864,6 +1103,9 @@ func (m *messageHandlerOrchestrator) SetPrimaryEmail(ctx context.Context, msg po
 	user, errMetadataLookup := m.userReader.MetadataLookup(ctx, request.User.AuthToken, constants.UserUpdateIdentityRequiredScope)
 	if errMetadataLookup != nil {
 		return m.errorResponse(errMetadataLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	errSetPrimary := m.userWriter.SetPrimaryEmail(ctx, user.UserID, email)
@@ -939,6 +1181,59 @@ func (m *messageHandlerOrchestrator) ImpersonateUser(ctx context.Context, msg po
 	return responseJSON, nil
 }
 
+// userSearchRequest is the JSON payload for lfx.auth-service.user.search.
+type userSearchRequest struct {
+	SubjectToken string `json:"subject_token"`
+	Query        string `json:"query"`
+	Limit        int    `json:"limit,omitempty"`
+}
+
+// userSearchResponse is the reply for lfx.auth-service.user.search on success.
+// Errors go through the shared errorResponse (UserDataResponse) instead.
+type userSearchResponse struct {
+	Success bool                     `json:"success"`
+	Users   []model.UserSearchResult `json:"users"`
+}
+
+// SearchUsers handles a user search request over NATS. The caller must hold the can_impersonate claim, which the searcher verifies.
+// Request: JSON {"subject_token": "...", "query": "...", "limit": 10}
+// Response: {"success": true, "users": [...]} on success, or UserDataResponse with Error on failure.
+func (m *messageHandlerOrchestrator) SearchUsers(ctx context.Context, msg port.TransportMessenger) ([]byte, error) {
+	if m.userSearcher == nil {
+		return m.errorResponse("user search unavailable"), nil
+	}
+
+	var req userSearchRequest
+	if err := json.Unmarshal(msg.Data(), &req); err != nil {
+		return m.errorResponse("invalid request: " + err.Error()), nil
+	}
+
+	req.SubjectToken = strings.TrimSpace(req.SubjectToken)
+	req.Query = strings.TrimSpace(req.Query)
+
+	if req.SubjectToken == "" {
+		return m.errorResponse("subject_token is required"), nil
+	}
+	if req.Query == "" {
+		return m.errorResponse("query is required"), nil
+	}
+
+	users, err := m.userSearcher.SearchUsers(ctx, req.SubjectToken, req.Query, req.Limit)
+	if err != nil {
+		slog.WarnContext(ctx, "user search failed", "error", err)
+		return m.errorResponse(err.Error()), nil
+	}
+
+	if users == nil {
+		users = []model.UserSearchResult{}
+	}
+	responseJSON, err := json.Marshal(userSearchResponse{Success: true, Users: users})
+	if err != nil {
+		return m.errorResponse("failed to marshal response"), nil
+	}
+	return responseJSON, nil
+}
+
 // addAliasRequest is the JSON payload for lfx.auth-service.add_alias
 type addAliasRequest struct {
 	User struct {
@@ -953,6 +1248,30 @@ type addAliasRequest struct {
 type addAliasResponse struct {
 	Success bool   `json:"success"`
 	Email   string `json:"email,omitempty"`
+}
+
+// isAllowedAliasDomain reports whether domain is listed in ALLOWED_ALIAS_DOMAINS
+// (comma-separated, case-insensitive). Empty/unset env means no alias domains.
+func isAllowedAliasDomain(domain string) bool {
+	return model.IsAllowedAliasDomain(domain, os.Getenv(constants.AllowedAliasDomainsEnvKey))
+}
+
+// isAliasDomainAddress reports whether address (in any form net/mail accepts)
+// has its domain listed in ALLOWED_ALIAS_DOMAINS.
+func isAliasDomainAddress(address string) bool {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	return at >= 0 && isAllowedAliasDomain(parsed.Address[at+1:])
+}
+
+// isBareEmailAddress reports whether address is a plain addr-spec, rejecting
+// display-name and quoted forms that net/mail would otherwise accept.
+func isBareEmailAddress(address string) bool {
+	parsed, err := mail.ParseAddress(address)
+	return err == nil && strings.EqualFold(parsed.Address, address)
 }
 
 // hasEmailDomainSuffix reports whether email ends in domainSuffix (e.g.
@@ -996,22 +1315,16 @@ func (m *messageHandlerOrchestrator) AddAlias(ctx context.Context, msg port.Tran
 	if requestedDomain == "" {
 		return m.errorResponse("domain_not_allowed"), nil
 	}
-	allowed := false
-	if raw := strings.TrimSpace(os.Getenv(constants.AllowedAliasDomainsEnvKey)); raw != "" {
-		for _, d := range strings.Split(raw, ",") {
-			if strings.EqualFold(requestedDomain, strings.TrimSpace(d)) {
-				allowed = true
-				break
-			}
-		}
-	}
-	if !allowed {
+	if !isAllowedAliasDomain(requestedDomain) {
 		return m.errorResponse("domain_not_allowed"), nil
 	}
 
 	user, errLookup := m.userReader.MetadataLookup(ctx, authToken, constants.UserUpdateIdentityRequiredScope)
 	if errLookup != nil {
 		return m.errorResponse(errLookup.Error()), nil
+	}
+	if !isVerifiedPrincipal(user) {
+		return m.errorResponse(errUnverifiedPrincipal), nil
 	}
 
 	// Fetch the canonical record with the service's M2M credentials (read:users),

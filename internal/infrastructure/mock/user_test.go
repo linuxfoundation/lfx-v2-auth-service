@@ -5,14 +5,78 @@ package mock
 
 import (
 	"context"
+	stderrors "errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/constants"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/converters"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	jwtpkg "github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
+	"github.com/stretchr/testify/require"
 )
+
+// TestUserReaderWriter_MetadataLookup_ScopeGatedRejected verifies that the mock,
+// which cannot verify tokens, never authorizes a write (scope-gated) lookup.
+func TestUserReaderWriter_MetadataLookup_ScopeGatedRejected(t *testing.T) {
+	ctx := context.Background()
+	writer := &userWriter{}
+	unverifiedJWT := createTestJWT(t, "auth0|123456789")
+
+	for name, input := range map[string]string{
+		"unverified JWT": unverifiedJWT,
+		"bare sub":       "auth0|123456789",
+		"username":       "john.doe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			user, err := writer.MetadataLookup(ctx, input, constants.UserUpdateIdentityRequiredScope)
+			if user != nil {
+				t.Errorf("MetadataLookup() returned user %+v, expected nil", user)
+			}
+			var unauthorized errors.Unauthorized
+			if !stderrors.As(err, &unauthorized) {
+				t.Errorf("MetadataLookup() error = %v, expected Unauthorized", err)
+			}
+		})
+	}
+
+	t.Run("read lookup without scopes still resolves the JWT sub", func(t *testing.T) {
+		user, err := writer.MetadataLookup(ctx, unverifiedJWT)
+		if err != nil {
+			t.Fatalf("MetadataLookup() unexpected error: %v", err)
+		}
+		if user.UserID != "auth0|123456789" {
+			t.Errorf("MetadataLookup() UserID = %q, expected %q", user.UserID, "auth0|123456789")
+		}
+		if user.Token != "" {
+			t.Errorf("MetadataLookup() Token = %q, expected empty", user.Token)
+		}
+	})
+}
+
+// TestUserReaderWriter_MetadataLookup_PrincipalVerified verifies that the mock
+// treats only a parsed JWT as the caller, never a bare sub or username.
+func TestUserReaderWriter_MetadataLookup_PrincipalVerified(t *testing.T) {
+	ctx := context.Background()
+	writer := &userWriter{}
+
+	for _, tc := range []struct {
+		input string
+		want  bool
+	}{
+		{createTestJWT(t, "auth0|123456789"), true},
+		{"auth0|123456789", false},
+		{"john.doe", false},
+		{"first.middle.last", false},
+	} {
+		user, err := writer.MetadataLookup(ctx, tc.input)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, user.PrincipalVerified, tc.input)
+	}
+}
 
 // TestUserReaderWriter_MetadataLookup tests the MetadataLookup method for Mock implementation
 func TestUserReaderWriter_MetadataLookup(t *testing.T) {
@@ -494,6 +558,29 @@ func TestSendVerificationAlternateEmail(t *testing.T) {
 			}
 		})
 	}
+
+	for _, state := range []string{"unlinked", "primary", "alternate"} {
+		t.Run(state+" receives stored code", func(t *testing.T) {
+			writer := &userWriter{users: map[string]*model.User{}, otps: map[string]*otpEntry{}}
+			if state != "unlinked" {
+				user := &model.User{UserID: "holder", PrimaryEmail: "other@example.com"}
+				if state == "primary" {
+					user.PrimaryEmail = "TARGET@example.com"
+				} else {
+					user.AlternateEmails = []model.Email{{Email: "TARGET@example.com", Verified: true}}
+				}
+				writer.users[user.UserID] = user
+			}
+			before := time.Now()
+			require.NoError(t, writer.SendVerificationAlternateEmail(ctx, "Target@Example.com"))
+			after := time.Now()
+			entry := writer.otps["target@example.com"]
+			require.NotNil(t, entry)
+			require.Regexp(t, `^\d{6}$`, entry.otp)
+			require.False(t, entry.expiresAt.Before(before.Add(5*time.Minute)), "expiresAt earlier than send time + 5m")
+			require.False(t, entry.expiresAt.After(after.Add(5*time.Minute)), "expiresAt later than return time + 5m")
+		})
+	}
 }
 
 // TestVerifyAlternateEmail tests the VerifyAlternateEmail method
@@ -542,10 +629,15 @@ func TestVerifyAlternateEmail(t *testing.T) {
 			t.Fatalf("SendVerificationAlternateEmail() error = %v", err)
 		}
 
+		wrongOTP := "000000"
+		if writer.(*userWriter).otps[testEmail].otp == wrongOTP {
+			wrongOTP = "111111"
+		}
+
 		// Verify with wrong OTP
 		emailModel := &model.Email{
 			Email: testEmail,
-			OTP:   "000000",
+			OTP:   wrongOTP,
 		}
 
 		_, err = writer.VerifyAlternateEmail(ctx, emailModel)
@@ -567,6 +659,59 @@ func TestVerifyAlternateEmail(t *testing.T) {
 			t.Error("VerifyAlternateEmail() expected error for nonexistent OTP but got none")
 		}
 	})
+
+	for _, state := range []string{"unlinked", "primary", "alternate", "unverified alternate"} {
+		for _, codeState := range []string{"wrong", "missing", "expired", "empty", "valid"} {
+			t.Run(state+"/"+codeState, func(t *testing.T) {
+				const address = "target@example.com"
+				writer := &userWriter{users: map[string]*model.User{}, otps: map[string]*otpEntry{}}
+				if state != "unlinked" {
+					user := &model.User{UserID: "holder", PrimaryEmail: "other@example.com"}
+					if state == "primary" {
+						user.PrimaryEmail = "TARGET@example.com"
+					} else {
+						user.AlternateEmails = []model.Email{{Email: "TARGET@example.com", Verified: state != "unverified alternate"}}
+					}
+					writer.users[user.UserID] = user
+				}
+				entry := &otpEntry{otp: "123456", expiresAt: time.Now().Add(time.Minute)}
+				if codeState != "missing" {
+					writer.otps[address] = entry
+				}
+				submitted, wantError := entry.otp, ""
+				switch codeState {
+				case "wrong":
+					submitted, wantError = "654321", "invalid OTP"
+				case "missing":
+					wantError = "OTP not found or expired"
+				case "expired":
+					entry.expiresAt = time.Now().Add(-time.Minute)
+					wantError = "OTP expired"
+				case "empty":
+					submitted, wantError = "", "email and OTP are required"
+				case "valid":
+					if state != "unlinked" && state != "unverified alternate" {
+						wantError = "alternate email already linked"
+					}
+				}
+				response, err := writer.VerifyAlternateEmail(ctx, &model.Email{Email: "Target@Example.com", OTP: submitted})
+				if wantError == "" {
+					require.NoError(t, err)
+					require.NotEmpty(t, response.IDToken)
+				} else {
+					require.EqualError(t, err, wantError, "pre-proof failures must be identical across linked states")
+					require.Nil(t, response, "no token may escape a failure")
+				}
+				_, stored := writer.otps[address]
+				require.Equal(t, codeState == "wrong" || codeState == "empty", stored)
+				if codeState == "valid" {
+					response, err = writer.VerifyAlternateEmail(ctx, &model.Email{Email: address, OTP: submitted})
+					require.EqualError(t, err, "OTP not found or expired", "valid code is consumed even on conflict")
+					require.Nil(t, response)
+				}
+			})
+		}
+	}
 }
 
 // TestLinkIdentity tests the LinkIdentity method
@@ -706,45 +851,30 @@ func TestUserWriter_SetPrimaryEmail(t *testing.T) {
 	})
 }
 
-// TestUserWriter_UpdateUser_Skills verifies that the mock adapter's manual
-// PATCH-semantics field list (UpdateUser) picks up the Skills field: both in
-// the returned user and in what ends up persisted in the in-memory store.
-func TestUserWriter_UpdateUser_Skills(t *testing.T) {
+// TestUserWriter_UpdateUser_Rejected verifies that the mock, which cannot
+// verify tokens, refuses user updates and leaves the store untouched.
+func TestUserWriter_UpdateUser_Rejected(t *testing.T) {
 	ctx := context.Background()
 
-	writer := &userWriter{users: map[string]*model.User{
-		"auth0|u1": {
-			UserID: "auth0|u1",
-			UserMetadata: &model.UserMetadata{
-				Name:   converters.StringPtr("Jane Doe"),
-				Skills: converters.StringPtr("Go, Python"),
-			},
-		},
-	}}
+	existing := &model.User{
+		UserID:       "auth0|u1",
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Jane Doe")},
+	}
+	writer := &userWriter{users: map[string]*model.User{"auth0|u1": existing}}
 
 	updated, err := writer.UpdateUser(ctx, &model.User{
-		UserID: "auth0|u1",
-		UserMetadata: &model.UserMetadata{
-			Skills: converters.StringPtr("Rust, Kubernetes"),
-		},
+		Token:        "unverified-token",
+		UserID:       "auth0|u1",
+		UserMetadata: &model.UserMetadata{Name: converters.StringPtr("Mallory")},
 	})
-	if err != nil {
-		t.Fatalf("UpdateUser() unexpected error: %v", err)
+	if updated != nil {
+		t.Errorf("UpdateUser() returned user %+v, expected nil", updated)
 	}
-
-	if updated.UserMetadata == nil || updated.UserMetadata.Skills == nil || *updated.UserMetadata.Skills != "Rust, Kubernetes" {
-		t.Errorf("UpdateUser() returned Skills = %v, want %q", updated.UserMetadata.Skills, "Rust, Kubernetes")
+	var unauthorized errors.Unauthorized
+	if !stderrors.As(err, &unauthorized) {
+		t.Errorf("UpdateUser() error = %v, expected Unauthorized", err)
 	}
-	if updated.UserMetadata.Name == nil || *updated.UserMetadata.Name != "Jane Doe" {
-		t.Errorf("UpdateUser() should preserve Name when not specified in input, got %v", updated.UserMetadata.Name)
-	}
-
-	// Assert the store write-back by identity rather than by re-reading the
-	// Skills field: updatedUser (mock/user.go) is a shallow copy that
-	// aliases the existing UserMetadata pointer, so the stored and returned
-	// objects already share the same struct and a field comparison here
-	// can't fail independently of the assertion above.
-	if stored := writer.users["auth0|u1"]; stored != updated {
-		t.Error("UpdateUser() did not write the updated user back to the store")
+	if *writer.users["auth0|u1"].UserMetadata.Name != "Jane Doe" {
+		t.Error("UpdateUser() must not modify the stored user")
 	}
 }

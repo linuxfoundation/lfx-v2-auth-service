@@ -38,8 +38,12 @@ sequenceDiagram
     
     Note over SSR: SSR already has<br/>access_token_mgmt_self from Flow C<br/>(Management API token)
 
-    SSR->>NATS: E3: Publish to lfx.auth-service.email_linking.verify<br/>with code + access_token_mgmt_self
+    SSR->>NATS: E3: Publish to lfx.auth-service.email_linking.verify<br/>with email + code + optional user.auth_token<br/>(access_token_mgmt_self)
     NATS->>AuthSvc: Deliver request
+
+    opt user.auth_token present
+        AuthSvc->>AuthSvc: Resolve verified caller from token<br/>(failure returns before the code is used)
+    end
 
     AuthSvc->>Auth0: E4: POST /oauth2/token<br/>[passwordless grant]<br/>w/ "LFX One Profile" client credentials<br/>username=new_email@example.com<br/>otp=verification_code<br/>[NO audience]
 
@@ -47,13 +51,23 @@ sequenceDiagram
 
     AuthSvc->>AuthSvc: E6: Validate email from<br/>id_token_pwdless matches<br/>the requested email
 
-    AuthSvc->>Auth0Mgmt: E7: Link email identity<br/>using access_token_mgmt_self<br/>w/ id_token_pwdless claims
-    
-    Auth0Mgmt-->>AuthSvc: Identity linked successfully
-    AuthSvc->>NATS: Publish response
-    NATS->>SSR: Deliver response
-    
-    SSR-->>Browser: Update UI with<br/>newly linked email
+    alt Caller's own account already holds the verified email (token sent in E3)
+        AuthSvc->>NATS: Publish {"success": true,<br/>"data": {"status": "already_connected"}}<br/>(no tokens)
+        NATS->>SSR: Deliver response
+        SSR-->>Browser: Show email as already connected<br/>(skip E7)
+    else Email not yet connected to the caller
+        AuthSvc->>Auth0Mgmt: E7: Link email identity<br/>using access_token_mgmt_self<br/>w/ id_token_pwdless claims
+
+        Auth0Mgmt-->>AuthSvc: Identity linked successfully
+        AuthSvc->>NATS: Publish response
+        NATS->>SSR: Deliver response
+
+        SSR-->>Browser: Update UI with<br/>newly linked email
+    end
     
     Note over Browser,Auth0Mgmt: Auth Service abstracts all Auth0 API calls via NATS
 ```
+
+## Already-connected outcome
+
+When E3 carries `user.auth_token`, Auth Service resolves the caller before using the code. After the code is proven, it checks the caller's own record. A verified primary, a verified email identity, a verified alternate, or a holder account that is the caller's own produces `data.status: "already_connected"` with no tokens, so E7 is skipped. Social identities and unverified addresses never count. Without the token, verify behaves as before. See [Email Verification Flow](../subjects/email_verification.md#step-2-verify-email-with-otp) for the full contract.

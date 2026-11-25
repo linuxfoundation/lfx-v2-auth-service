@@ -36,6 +36,19 @@ func ForeignLFID(held []cdp.MemberIdentity, username string) (string, bool) {
 	return "", false
 }
 
+// HoldsVerifiedLFID reports whether the member carries this user's own LFID
+// as a verified identity. Resolve consults verified identities only, so an
+// unverified carry cannot have produced the match and proves no ownership.
+func HoldsVerifiedLFID(held []cdp.MemberIdentity, username string) bool {
+	verified := make([]cdp.MemberIdentity, 0, len(held))
+	for _, identity := range held {
+		if identity.Verified {
+			verified = append(verified, identity)
+		}
+	}
+	return HoldsLFID(verified, username)
+}
+
 // HoldsLFID reports whether the member already carries this user's own LFID.
 //
 // The mirror of ForeignLFID, and case-insensitive for the same reason: CDP

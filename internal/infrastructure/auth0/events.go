@@ -89,10 +89,6 @@ const maxEventLineBytes = 1 << 20
 // legal `data:` lines and is only flushed on a blank line.
 const maxEventFrameBytes = 4 << 20
 
-// maxDrainBytes bounds discarding one oversized line before the connection is
-// given up on. A line with no terminator would otherwise be read forever.
-const maxDrainBytes = 8 << 20
-
 // linePrefixBytes is how much of a dropped line is kept, purely so the caller
 // can still tell a comment from a field.
 const linePrefixBytes = 64
@@ -582,8 +578,16 @@ func readStream(ctx context.Context, body io.Reader, handle func(context.Context
 // A dropped line still returns its first linePrefixBytes. Without them an
 // oversized comment would be indistinguishable from an oversized field, and the
 // caller has to tell those apart: a comment must not disturb the frame around
-// it. Draining is itself bounded — a line that never terminates would otherwise
-// spin here forever, resetting the idle deadline on every read.
+// it.
+//
+// Draining keeps only that prefix, so memory stays bounded however long the
+// line runs. Its length is deliberately not capped: giving up part-way through
+// a line fails the connection with the cursor still before the frame — whose
+// `id` may not even have been read yet — so every reconnect would meet the
+// same frame first and nothing behind it would ever be delivered. A line that
+// never terminates costs no more than a frame that never ends, which is
+// already possible with lines of any legal size: both are bounded by Auth0
+// recycling the connection and by the caller's context.
 func readSSELine(reader *bufio.Reader, max int) (string, bool, error) {
 	var (
 		buf     []byte
@@ -620,10 +624,6 @@ func readSSELine(reader *bufio.Reader, max int) (string, bool, error) {
 		}
 		if !tooLong {
 			buf = append(buf, line...)
-		}
-
-		if content > maxDrainBytes {
-			return "", true, errs.NewUnexpected("the events stream sent a line that never terminated")
 		}
 
 		switch {

@@ -9,7 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/model"
 	"github.com/linuxfoundation/lfx-v2-auth-service/internal/domain/port"
@@ -153,7 +157,7 @@ func (u *userReaderWriter) GetUser(ctx context.Context, user *model.User) (*mode
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, user.UserID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(user.UserID))),
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("get user details"),
 	)
@@ -227,6 +231,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		// Successfully verified JWT token
 		user.UserID = claims.Subject
 		user.Sub = claims.Subject
+		user.PrincipalVerified = true
 
 		// Only tokens minted for the Auth0 Management API may be forwarded to it
 		// on the user's behalf. Tokens verified via another allow-listed audience
@@ -249,10 +254,23 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 
 	}
 
+	// Scope-gated lookups authorize writes on the caller's own account, so the
+	// caller must prove their identity with a verified JWT. A bare sub or
+	// username carries no proof of identity and must never be accepted as the
+	// acting principal for a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "scope-gated metadata lookup rejected: input is not a JWT")
+		return nil, errors.NewUnauthorized("a valid JWT token is required")
+	}
+
 	// Determine lookup strategy based on input format
 	switch {
 	case strings.Contains(input, "|"):
 		// Input contains "|", use as sub for canonical lookup
+		if !isValidAuth0UserID(input) {
+			slog.WarnContext(ctx, "canonical lookup rejected: invalid user_id format", "sub", redaction.Redact(input))
+			return nil, errors.NewValidation("invalid user_id format")
+		}
 		user.UserID = input
 		slog.DebugContext(ctx, "canonical lookup strategy", "sub", redaction.Redact(input))
 
@@ -264,6 +282,34 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 	}
 
 	return user, nil
+}
+
+// isValidAuth0UserID reports whether s has the Auth0 user_id shape
+// "provider|id": a non-empty provider of letters, digits, '-' or '_', a
+// non-empty id, valid UTF-8, and no URL path/query metacharacters, whitespace
+// or control characters anywhere, so the value can only ever name a single user record.
+func isValidAuth0UserID(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	provider, id, found := strings.Cut(s, "|")
+	if !found || provider == "" || id == "" {
+		return false
+	}
+	for _, r := range provider {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r == '/', r == '?', r == '#', r == '%', r == '\\':
+			return false
+		case unicode.IsSpace(r), unicode.IsControl(r):
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateUser applies the provided changes to the Auth0 user via PATCH.
@@ -296,7 +342,7 @@ func (u *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 	apiRequest := httpclient.NewAPIRequest(
 		u.httpClient,
 		httpclient.WithMethod(http.MethodPatch),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, user.UserID)),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(user.UserID))),
 		httpclient.WithToken(user.Token),
 		httpclient.WithDescription("update user metadata"),
 		httpclient.WithBody(updateRequest),
@@ -479,11 +525,12 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	// Only the passwordless email connection can hold system-managed identities,
 	// so skip the guard entirely for other providers (google, github, etc.) to
 	// avoid making every social-identity unlink depend on the Management API.
-	// For email-connection unlinks, fetch the stub via M2M to read its
-	// app_metadata. The check fails closed: any error other than 404 (which
-	// means the stub never existed and there is nothing to protect) blocks the
-	// unlink so a transient Auth0 failure cannot be used to bypass immutability.
-	if request.Unlink.Provider != constants.EmailConnection {
+	// For email-connection unlinks, see isSystemManagedEmailIdentity. The check
+	// fails closed: any error, or an identity that cannot be classified, blocks
+	// the unlink so a transient Auth0 failure cannot be used to bypass
+	// immutability. The provider is compared leniently so a case or whitespace
+	// variant of "email" cannot skip the guard.
+	if !strings.EqualFold(strings.TrimSpace(request.Unlink.Provider), constants.EmailConnection) {
 		return u.identityLinkingFlow.UnlinkIdentityFromUser(
 			ctx,
 			request.User.UserID,
@@ -493,29 +540,15 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 		)
 	}
 
-	stubUserID := fmt.Sprintf("%s|%s", request.Unlink.Provider, request.Unlink.IdentityID)
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
 		return errors.NewUnexpected("failed to get M2M token for unlink guard", errToken)
 	}
-	apiRequest := httpclient.NewAPIRequest(
-		u.httpClient,
-		httpclient.WithMethod(http.MethodGet),
-		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
-		httpclient.WithToken(m2mToken),
-		httpclient.WithDescription("get stub user for unlink guard"),
-	)
-	var rawStub Auth0User
-	if statusCode, callErr := apiRequest.Call(ctx, &rawStub); callErr != nil {
-		if statusCode != http.StatusNotFound {
-			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
-				"stub_user_id", redaction.Redact(stubUserID),
-				"status_code", statusCode,
-				"error", callErr,
-			)
-			return errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
-		}
-	} else if rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged {
+	systemManaged, errGuard := u.isSystemManagedEmailIdentity(ctx, request.User.UserID, request.Unlink.IdentityID, m2mToken)
+	if errGuard != nil {
+		return errGuard
+	}
+	if systemManaged {
 		return errors.NewForbidden("system_managed_identity")
 	}
 
@@ -537,11 +570,184 @@ func (u *userReaderWriter) UnlinkIdentity(ctx context.Context, request *model.Un
 	return nil
 }
 
+// isSystemManagedEmailIdentity reports whether the email-connection identity
+// identityID linked to primaryUserID is system-managed and must not be
+// user-unlinked.
+//
+// The decision is anchored on the identity entry in the primary user's own
+// identities array (fetched with M2M), which is guaranteed to exist for as long
+// as the identity is linked. It does not depend on the standalone stub record
+// surviving the link: Auth0 may merge or discard a linked secondary's profile,
+// so the stub's app_metadata is only consulted as an additional signal.
+//
+// An identity is system-managed when the primary user's app_metadata carries
+// its system_managed_identity_<id> marker (written at claim time, so it holds
+// even after the alias domain is removed from ALLOWED_ALIAS_DOMAINS), when its
+// email is on an ALLOWED_ALIAS_DOMAINS domain (those addresses can only be
+// claimed through add_alias), or when its stub record still exists and carries
+// app_metadata.system_managed=true. An alias recognised by domain or stub but
+// not yet recorded (claimed before the marker existed) is backfilled into the
+// marker on a best-effort basis.
+//
+// The check fails closed: a lookup failure, an identity that is not linked to
+// the primary user, or an identity with no email to classify is an error.
+func (u *userReaderWriter) isSystemManagedEmailIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) (bool, error) {
+	apiPrimary := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get primary user for unlink guard"),
+	)
+	var primary unlinkGuardUser
+	if statusCode, callErr := apiPrimary.Call(ctx, &primary); callErr != nil {
+		slog.ErrorContext(ctx, "failed to fetch primary user for system-managed unlink guard",
+			"user_id", redaction.Redact(primaryUserID),
+			"status_code", statusCode,
+			"error", callErr,
+		)
+		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+	}
+
+	var linked *Auth0Identity
+	for i := range primary.Identities {
+		identity := &primary.Identities[i]
+		if identity.Provider != constants.EmailConnection {
+			continue
+		}
+		if id, ok := identity.UserID.(string); ok && id == identityID {
+			linked = identity
+			break
+		}
+	}
+	if linked == nil {
+		return false, errors.NewNotFound("identity not found")
+	}
+	if primary.hasSystemManagedIdentityMarker(identityID) {
+		return true, nil
+	}
+	if linked.ProfileData == nil || strings.TrimSpace(linked.ProfileData.Email) == "" {
+		slog.ErrorContext(ctx, "unable to classify email identity for system-managed unlink guard",
+			"user_id", redaction.Redact(primaryUserID),
+		)
+		return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard")
+	}
+	aliasDomain := isAliasDomainEmail(linked.ProfileData.Email)
+
+	// Defense in depth: honour the system_managed marker on the stub record
+	// when it is still retrievable (e.g. an alias on a domain that has since
+	// been removed from ALLOWED_ALIAS_DOMAINS). Absence of the stub is not
+	// treated as permission on its own: the identity was already classified
+	// above from the primary user's record. The stub is also consulted for
+	// alias-domain identities, only to decide whether to backfill the marker.
+	stubUserID := fmt.Sprintf("%s|%s", constants.EmailConnection, identityID)
+	apiStub := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(stubUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("get stub user for unlink guard"),
+	)
+	var rawStub Auth0User
+	stubExists := true
+	if statusCode, callErr := apiStub.Call(ctx, &rawStub); callErr != nil {
+		if statusCode != http.StatusNotFound {
+			if aliasDomain {
+				// Already refused by domain; only the backfill decision is lost.
+				return true, nil
+			}
+			slog.ErrorContext(ctx, "failed to evaluate system-managed unlink guard",
+				"stub_user_id", redaction.Redact(stubUserID),
+				"status_code", statusCode,
+				"error", callErr,
+			)
+			return false, errors.NewUnexpected("failed to evaluate system-managed unlink guard", callErr)
+		}
+		stubExists = false
+	}
+	stubManaged := stubExists && rawStub.AppMetadata != nil && rawStub.AppMetadata.SystemManaged
+
+	// Backfill the durable marker only for genuine aliases: a stub flagged
+	// system_managed, or an alias-domain identity whose stub is gone. An
+	// alias-domain identity whose stub exists without the flag (e.g. a
+	// preserved former primary) is refused by domain policy but not recorded,
+	// so it is not locked permanently if the domain is later retired.
+	if stubManaged || (aliasDomain && !stubExists) {
+		u.backfillSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
+		return true, nil
+	}
+	return aliasDomain, nil
+}
+
+// backfillSystemManagedIdentity records identityID's system-managed marker on
+// the primary user for an alias the unlink guard recognised by
+// domain or stub. It is best-effort: the unlink is refused either way, so a
+// failure is only logged.
+func (u *userReaderWriter) backfillSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) {
+	if errRecord := u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken); errRecord != nil {
+		slog.WarnContext(ctx, "failed to backfill system-managed identity marker",
+			"user_id", redaction.Redact(primaryUserID),
+			"error", errRecord,
+		)
+	}
+}
+
+// recordSystemManagedIdentity marks identityID (the provider-local id, without
+// the "email|" prefix) as system-managed on the primary user by setting
+// app_metadata.system_managed_identity_<id> = true, the durable record the
+// unlink guard consults first.
+//
+// It is a single PATCH of one top-level key: Auth0 merges top-level
+// app_metadata keys, so no read-modify-write is involved and concurrent marker
+// writes for different aliases on the same user cannot drop each other, and
+// other app_metadata keys are left untouched.
+func (u *userReaderWriter) recordSystemManagedIdentity(ctx context.Context, primaryUserID, identityID, m2mToken string) error {
+	// Auth0 rejects metadata field names containing "." or "$"; real identity
+	// ids never do, so refuse rather than send a malformed key.
+	if identityID == "" || strings.ContainsAny(identityID, ".$") {
+		return errors.NewValidation("invalid identity id for system-managed marker")
+	}
+	apiPatch := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodPatch),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(primaryUserID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("record system-managed identity marker"),
+		httpclient.WithBody(map[string]map[string]bool{
+			"app_metadata": {systemManagedIdentityKey(identityID): true},
+		}),
+		httpclient.WithSensitiveBody(),
+	)
+	if _, errPatch := apiPatch.Call(ctx, nil); errPatch != nil {
+		return errors.NewUnexpected("failed to record system-managed identity marker", errPatch)
+	}
+	return nil
+}
+
+// isAliasDomainEmail reports whether email's domain is listed in
+// ALLOWED_ALIAS_DOMAINS, using the same matching rule as alias claims and
+// email linking. Addresses on these domains can only be claimed through
+// add_alias, so any linked email identity on one is a system-managed alias.
+func isAliasDomainEmail(email string) bool {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return false
+	}
+	return model.IsAllowedAliasDomain(email[at+1:], os.Getenv(constants.AllowedAliasDomainsEnvKey))
+}
+
 // AddSystemManagedEmail creates a stub Auth0 passwordless user for email,
 // links it to primaryUserID via the Management API (M2M, no user-facing
 // magic-link), and marks it system_managed so it cannot be user-unlinked.
 // Returns the stub user_id. On link failure a best-effort cleanup of the stub
 // is attempted before the error is returned.
+//
+// After a successful link the identity is recorded in the primary user's
+// app_metadata (system_managed_identity_<id>) so the unlink guard keeps refusing it
+// even if the alias domain is later removed from ALLOWED_ALIAS_DOMAINS. That
+// write is best-effort: the alias is already linked and remains protected by
+// the domain check, which also backfills the marker on the next unlink attempt.
 func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUserID, email string) (string, error) {
 	if strings.TrimSpace(primaryUserID) == "" {
 		return "", errors.NewValidation("primary_user_id is required")
@@ -550,7 +756,184 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 		return "", errors.NewValidation("email is required")
 	}
 
-	return u.createAndLinkEmailIdentity(ctx, primaryUserID, email, &Auth0AppMetadata{SystemManaged: true})
+	// Auth0 enforces email uniqueness per connection only, so a 409 on the
+	// email-connection create cannot be relied on to detect an address held via
+	// a social or enterprise connection. Check every connection first.
+	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
+	if errToken != nil {
+		return "", errors.NewUnexpected("failed to get M2M token for alias availability check", errToken)
+	}
+	if errClaimed := u.ensureEmailUnclaimed(ctx, email, m2mToken); errClaimed != nil {
+		return "", errClaimed
+	}
+
+	// Verified: system aliases are issued on LF-controlled domains, so ownership
+	// is established by the service itself rather than claimed by the user.
+	stubUserID, errLink := u.createAndLinkEmailIdentity(ctx, primaryUserID, email, true, &Auth0AppMetadata{SystemManaged: true})
+	if errLink != nil {
+		return "", errLink
+	}
+
+	identityID := stubUserID
+	if idx := strings.Index(identityID, "|"); idx >= 0 {
+		identityID = identityID[idx+1:]
+	}
+	m2mToken, errMarker := u.config.M2MTokenManager.GetToken(ctx)
+	if errMarker == nil {
+		errMarker = u.recordSystemManagedIdentity(ctx, primaryUserID, identityID, m2mToken)
+	}
+	if errMarker != nil {
+		slog.ErrorContext(ctx, "alias linked but system-managed identity marker was not recorded",
+			"user_id", redaction.Redact(primaryUserID),
+			"stub_user_id", redaction.Redact(stubUserID),
+			"error", errMarker,
+		)
+	}
+
+	return stubUserID, nil
+}
+
+// ensureEmailUnclaimed returns a validation error ("email already linked") when
+// any Auth0 user, on any connection, holds email as its root email or as the
+// profile email of any of its identities. Unlike SearchUser, the results are
+// not narrowed to database or email-connection identities. Orphaned
+// passwordless stubs (see isOrphanedEmailStub) are ignored here so that the
+// 409 reconciliation in createAndLinkEmailIdentity can still remove them.
+// Lookup failures are returned as unexpected errors so the claim fails closed.
+func (u *userReaderWriter) ensureEmailUnclaimed(ctx context.Context, email, m2mToken string) error {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	escaper := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	escaped := escaper.Replace(normalized)
+
+	identityTerms := make([]string, 0, 12)
+	for _, variant := range emailCasingVariants(normalized) {
+		identityTerms = append(identityTerms, `identities.profileData.email:"`+escaper.Replace(variant)+`"`)
+	}
+
+	// users-by-email is case-sensitive and social/enterprise connections may
+	// keep the provider's casing, so the root email is also searched through
+	// the normalized (case-insensitive) v3 "email" field. users-by-email is kept
+	// because, unlike the search index, it is not eventually consistent.
+	// identities.profileData.email has no case-insensitive search, so the
+	// common casings a provider may have stored are searched together (see
+	// emailCasingVariants); results are compared case-insensitively by
+	// holdsEmail.
+	lookups := []struct {
+		description string
+		endpoint    string
+	}{
+		{
+			description: "look up users by root email",
+			endpoint:    "users-by-email?email=" + url.QueryEscape(normalized),
+		},
+		{
+			description: "search users by root email",
+			endpoint:    "users?q=" + url.QueryEscape(`email:"`+escaped+`"`) + "&search_engine=v3",
+		},
+		{
+			description: "look up users by identity email",
+			endpoint:    "users?q=" + url.QueryEscape(strings.Join(identityTerms, " OR ")) + "&search_engine=v3",
+		},
+	}
+
+	for _, lookup := range lookups {
+		apiSearch := httpclient.NewAPIRequest(
+			u.httpClient,
+			httpclient.WithMethod(http.MethodGet),
+			httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/%s", u.config.Domain, lookup.endpoint)),
+			httpclient.WithToken(m2mToken),
+			httpclient.WithDescription(lookup.description),
+		)
+
+		var users []Auth0User
+		if statusCode, errSearch := apiSearch.Call(ctx, &users); errSearch != nil {
+			slog.ErrorContext(ctx, "failed to check email availability",
+				"error", errSearch,
+				"status_code", statusCode,
+				"lookup", lookup.description,
+				"email", redaction.RedactEmail(email),
+			)
+			return errors.NewUnexpected("failed to check email availability", errSearch)
+		}
+
+		for i := range users {
+			candidate := &users[i]
+			if !holdsEmail(candidate, normalized) || isOrphanedEmailStub(candidate, normalized) {
+				continue
+			}
+			slog.InfoContext(ctx, "email already held by an existing Auth0 user",
+				"existing_user_id", redaction.Redact(candidate.UserID),
+				"email", redaction.RedactEmail(email),
+			)
+			return errors.NewValidation("email already linked")
+		}
+	}
+
+	return nil
+}
+
+// emailCasingVariants returns the casings of a lowercased email that identity
+// providers commonly store: lowercase, uppercase, and the local part and domain
+// each either lowercase, capitalized, or (local part only) capitalized per
+// segment, e.g. "First.Last@Linux.com". Auth0 cannot search identity emails
+// case-insensitively, so these are what the identity-email lookup can cover.
+func emailCasingVariants(email string) []string {
+	local, domain, found := strings.Cut(email, "@")
+	if !found {
+		return []string{email}
+	}
+
+	capitalize := func(s string) string {
+		r, size := utf8.DecodeRuneInString(s)
+		if size == 0 {
+			return s
+		}
+		return string(unicode.ToUpper(r)) + s[size:]
+	}
+	capitalizeSegments := func(s string) string {
+		var b strings.Builder
+		start := true
+		for _, r := range s {
+			if start {
+				b.WriteRune(unicode.ToUpper(r))
+			} else {
+				b.WriteRune(r)
+			}
+			start = r == '.' || r == '_' || r == '-'
+		}
+		return b.String()
+	}
+
+	variants := []string{email, strings.ToUpper(email)}
+	seen := map[string]struct{}{email: {}, strings.ToUpper(email): {}}
+	for _, l := range []string{local, capitalize(local), capitalizeSegments(local)} {
+		for _, d := range []string{domain, capitalize(domain)} {
+			v := l + "@" + d
+			if _, dup := seen[v]; dup {
+				continue
+			}
+			seen[v] = struct{}{}
+			variants = append(variants, v)
+		}
+	}
+	return variants
+}
+
+// holdsEmail reports whether user carries email, case-insensitively, as its
+// root email or as the profile email of any identity, regardless of connection.
+func holdsEmail(user *Auth0User, email string) bool {
+	if user == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(user.Email), email) {
+		return true
+	}
+	for _, identity := range user.Identities {
+		if identity.ProfileData != nil && strings.EqualFold(strings.TrimSpace(identity.ProfileData.Email), email) {
+			return true
+		}
+	}
+	return false
 }
 
 // createAndLinkEmailIdentity creates a stub Auth0 passwordless email-connection
@@ -562,14 +945,16 @@ func (u *userReaderWriter) AddSystemManagedEmail(ctx context.Context, primaryUse
 //   - non-nil: attached as-is (e.g. {SystemManaged:true} for a system alias that
 //     must not be user-unlinked).
 //
-// EmailVerified is always set: callers guarantee the address is already verified
-// (a system alias on an LF-controlled domain, or the user's current verified
-// primary email being preserved before a switch).
+// emailVerified is written verbatim as the stub's email_verified flag. Callers
+// must pass true only when ownership of the address has been established (a
+// system alias on an LF-controlled domain, or a previous primary whose
+// verification is confirmed by Auth0); the stub is linked with M2M credentials,
+// so this flag is the only verification gate on the resulting identity.
 //
 // On link failure the just-created stub is rolled back on a best-effort basis:
 // system-managed stubs via deleteSystemManagedUser, otherwise via
 // deleteEmailConnectionStub.
-func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, primaryUserID, email string, appMetadata *Auth0AppMetadata) (string, error) {
+func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, primaryUserID, email string, emailVerified bool, appMetadata *Auth0AppMetadata) (string, error) {
 	m2mToken, errToken := u.config.M2MTokenManager.GetToken(ctx)
 	if errToken != nil {
 		return "", errors.NewUnexpected("failed to get M2M token for add email identity", errToken)
@@ -579,7 +964,7 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 	createPayload := systemManagedUserPayload{
 		Connection:    constants.EmailConnection,
 		Email:         email,
-		EmailVerified: true,
+		EmailVerified: emailVerified,
 		AppMetadata:   appMetadata,
 	}
 
@@ -595,6 +980,19 @@ func (u *userReaderWriter) createAndLinkEmailIdentity(ctx context.Context, prima
 
 	var stubUser Auth0User
 	statusCode, errCreate := apiCreate.Call(ctx, &stubUser)
+	if errCreate != nil && statusCode == http.StatusConflict {
+		// An existing email-connection user only counts as a claim when it is
+		// verified, linked, or system-managed. An orphaned, never-verified
+		// passwordless user is removed and the create is retried once.
+		reconciled, errReconcile := u.reconcileOrphanedEmailStub(ctx, email, m2mToken)
+		if errReconcile != nil {
+			return "", errReconcile
+		}
+		if reconciled {
+			stubUser = Auth0User{}
+			statusCode, errCreate = apiCreate.Call(ctx, &stubUser)
+		}
+	}
 	if errCreate != nil {
 		if statusCode == http.StatusConflict {
 			slog.InfoContext(ctx, "email stub user already exists in Auth0",
@@ -680,6 +1078,142 @@ func (u *userReaderWriter) rollbackEmailStub(ctx context.Context, userID, m2mTok
 	return u.deleteEmailConnectionStub(ctx, userID, m2mToken)
 }
 
+// reconcileOrphanedEmailStub looks up the users holding email and deletes an
+// orphaned passwordless stub: a standalone user whose only identity is on the
+// email connection, whose email was never verified, and which is not
+// system-managed. Such a record is left behind by a passwordless flow that was
+// started but never completed, so it does not represent a claim on the address.
+// It returns true when a stub was removed (the caller may retry the create)
+// and false when the existing record is a genuine claim. Lookup or delete
+// failures are returned as unexpected errors.
+func (u *userReaderWriter) reconcileOrphanedEmailStub(ctx context.Context, email, m2mToken string) (bool, error) {
+	apiSearch := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users-by-email?email=%s", u.config.Domain, url.QueryEscape(strings.ToLower(strings.TrimSpace(email))))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("look up existing email stub user"),
+	)
+
+	var users []Auth0User
+	if statusCode, errSearch := apiSearch.Call(ctx, &users); errSearch != nil {
+		slog.ErrorContext(ctx, "failed to look up existing email stub user",
+			"error", errSearch,
+			"status_code", statusCode,
+			"email", redaction.RedactEmail(email),
+		)
+		return false, errors.NewUnexpected("failed to look up existing email stub user", errSearch)
+	}
+
+	for _, candidate := range users {
+		if !isOrphanedEmailStub(&candidate, email) {
+			continue
+		}
+
+		removed, errDel := u.deleteOrphanedEmailStub(ctx, candidate.UserID, email, m2mToken)
+		if errDel != nil {
+			slog.ErrorContext(ctx, "failed to delete orphaned email stub user",
+				"error", errDel,
+				"stub_user_id", redaction.Redact(candidate.UserID),
+			)
+			return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+		}
+		if !removed {
+			// The fresh read shows the record has since become a genuine claim
+			// (verified, linked or system-managed); keep the original conflict.
+			return false, nil
+		}
+
+		slog.InfoContext(ctx, "deleted orphaned unverified email stub user",
+			"stub_user_id", redaction.Redact(candidate.UserID),
+			"email", redaction.RedactEmail(email),
+		)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// orphanedEmailStubMinAge is how old an unverified passwordless user must be
+// before it is treated as abandoned. It is well beyond the passwordless OTP
+// lifetime, so a record created by a sign-up or link that may still be in
+// progress is not removed; a newer record keeps blocking the claim until it
+// ages out.
+const orphanedEmailStubMinAge = time.Hour
+
+// isOrphanedEmailStub reports whether user is a standalone, never-verified,
+// non-system-managed passwordless user whose root email is email and which was
+// created at least orphanedEmailStubMinAge ago.
+func isOrphanedEmailStub(user *Auth0User, email string) bool {
+	if user == nil || strings.TrimSpace(user.UserID) == "" {
+		return false
+	}
+	createdAt, errParse := time.Parse(time.RFC3339, user.CreatedAt)
+	if errParse != nil || time.Since(createdAt) < orphanedEmailStubMinAge {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Email), strings.TrimSpace(email)) {
+		return false
+	}
+	if user.EmailVerified {
+		return false
+	}
+	if user.AppMetadata != nil && user.AppMetadata.SystemManaged {
+		return false
+	}
+	if len(user.Identities) != 1 || user.Identities[0].Connection != constants.EmailConnection {
+		return false
+	}
+	// The identity's own verification flag can be set even when the root flag
+	// is not; either one means the address was proven and is a genuine claim.
+	if pd := user.Identities[0].ProfileData; pd != nil && pd.EmailVerified {
+		return false
+	}
+	return true
+}
+
+// deleteOrphanedEmailStub deletes userID only if a fresh read still shows it as
+// an orphaned stub for email (see isOrphanedEmailStub), so a record that was
+// verified, linked or marked system-managed after the lookup is never removed.
+// It returns true when the stub is gone (deleted here, or a 404 on the GET or
+// DELETE because it was removed concurrently) and false, with no error, when
+// the record is no longer an orphan and therefore a genuine claim.
+func (u *userReaderWriter) deleteOrphanedEmailStub(ctx context.Context, userID, email, m2mToken string) (bool, error) {
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify orphaned email stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			return true, nil
+		}
+		return false, errors.NewUnexpected("failed to verify orphaned email stub before delete", errGet)
+	}
+	if !isOrphanedEmailStub(&target, email) {
+		return false, nil
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete orphaned email stub user"),
+	)
+	if statusCode, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		if statusCode == http.StatusNotFound {
+			// Removed concurrently between the read and the delete.
+			return true, nil
+		}
+		return false, errors.NewUnexpected("failed to delete orphaned email stub user", errDel)
+	}
+	return true, nil
+}
+
 // NewUserReaderWriter  creates a new UserReaderWriter with the provided configuration
 func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth0Config Config) (port.UserReaderWriter, error) {
 
@@ -696,7 +1230,7 @@ func NewUserReaderWriter(ctx context.Context, httpConfig httpclient.Config, auth
 
 	// JWT verification config is required
 	if auth0Config.JWTVerificationConfig == nil {
-		jwtConfig, errNewJWTVerificationConfig := NewJWTVerificationConfig(ctx, auth0Config.Domain, httpClient)
+		jwtConfig, errNewJWTVerificationConfig := NewJWTVerificationConfig(ctx, auth0Config.Domain)
 		if errNewJWTVerificationConfig != nil {
 			return nil, errors.NewUnexpected("failed to create JWT verification config", errNewJWTVerificationConfig)
 		}
@@ -763,6 +1297,24 @@ func hasSufficientPrimaryEmailIdentity(user *model.User, email string) bool {
 	return false
 }
 
+// isPrimaryEmailVerified reports whether ownership of the user's current root
+// primary email has been proven: either Auth0's root email_verified flag is set,
+// or a linked identity for the same address (case-insensitive) reports
+// email_verified. An unverified root email (e.g. a database signup that never
+// confirmed, or a social login whose provider reported email_verified:false)
+// must never be re-asserted as verified.
+func isPrimaryEmailVerified(user *model.User, email string) bool {
+	if user.PrimaryEmailVerified && strings.EqualFold(user.PrimaryEmail, email) {
+		return true
+	}
+	for _, id := range user.Identities {
+		if id.EmailVerified && strings.EqualFold(id.Email, email) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetPrimaryEmail updates the user's primary email address via the Auth0 Management API.
 // The email must already be a verified linked identity on the user's account.
 func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, email string) error {
@@ -811,9 +1363,19 @@ func (u *userReaderWriter) SetPrimaryEmail(ctx context.Context, userID string, e
 	// create+link it as a normal, user-removable verified email identity first.
 	// Done first so that any failure leaves the account unchanged rather than
 	// silently dropping the old primary.
+	//
+	// Preservation only happens when ownership of the old primary was proven
+	// (see isPrimaryEmailVerified). An unverified old primary is dropped rather
+	// than materialized: minting a verified identity would assert ownership the
+	// user never demonstrated, and even an unverified stub would claim the
+	// address's passwordless user on this account.
 	oldPrimary := fullUser.PrimaryEmail
 	if oldPrimary != "" && !strings.EqualFold(oldPrimary, email) && !hasSufficientPrimaryEmailIdentity(fullUser, oldPrimary) {
-		if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, nil); errPreserve != nil {
+		if !isPrimaryEmailVerified(fullUser, oldPrimary) {
+			slog.InfoContext(ctx, "old primary email is unverified; not preserving it as an email identity",
+				"user_id", redaction.Redact(userID),
+			)
+		} else if _, errPreserve := u.createAndLinkEmailIdentity(ctx, userID, oldPrimary, true, nil); errPreserve != nil {
 			slog.ErrorContext(ctx, "failed to preserve old primary email before switching",
 				"error", errPreserve,
 				"user_id", redaction.Redact(userID),
@@ -939,13 +1501,8 @@ func (u *userReaderWriter) deleteEmailConnectionStub(ctx context.Context, userID
 		)
 		return errors.NewUnexpected("failed to verify email-connection stub before delete", errGet)
 	}
-	if len(target.Identities) == 0 {
-		return errors.NewForbidden("refusing to delete user with no identities")
-	}
-	for _, id := range target.Identities {
-		if id.Connection != constants.EmailConnection {
-			return errors.NewForbidden("refusing to delete user with a non-email-connection identity")
-		}
+	if errIdentities := requireEmailConnectionOnly(&target); errIdentities != nil {
+		return errIdentities
 	}
 
 	apiDelete := httpclient.NewAPIRequest(
@@ -959,4 +1516,120 @@ func (u *userReaderWriter) deleteEmailConnectionStub(ctx context.Context, userID
 		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
 	}
 	return nil
+}
+
+// requireEmailConnectionOnly refuses a user that has no identities or any
+// identity outside the passwordless email connection, so a delete helper can
+// never remove a real account carrying database or social identities.
+func requireEmailConnectionOnly(target *Auth0User) error {
+	if len(target.Identities) == 0 {
+		return errors.NewForbidden("refusing to delete user with no identities")
+	}
+	for _, id := range target.Identities {
+		if id.Connection != constants.EmailConnection {
+			return errors.NewForbidden("refusing to delete user with a non-email-connection identity")
+		}
+	}
+	return nil
+}
+
+const (
+	// discardMaxProfileAge bounds how old a standalone email profile may be and
+	// still be treated as the one the just-completed OTP exchange created.
+	discardMaxProfileAge = 5 * time.Minute
+	// discardMaxLoginsCount is the highest logins_count a profile may show and
+	// still count as never used beyond the exchange that created it.
+	discardMaxLoginsCount = 1
+	// discardProfileTimeout bounds the entire best-effort GET/DELETE sequence.
+	discardProfileTimeout = time.Second
+)
+
+// deleteFreshEmailConnectionStub deletes a candidate standalone email profile
+// after a refused link. Exactly one email identity, with no linked profileData,
+// is required in addition to the metadata, age and login-count guards. Those
+// heuristics reduce risk but do not prove this exchange created the profile.
+// A missing/unparsable created_at refuses deletion; a 404 fetch is already gone.
+func (u *userReaderWriter) deleteFreshEmailConnectionStub(ctx context.Context, userID, m2mToken string, now time.Time) error {
+	if strings.TrimSpace(userID) == "" {
+		return errors.NewValidation("user_id is required")
+	}
+
+	apiGet := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodGet),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("verify fresh email-connection stub before delete"),
+	)
+	var target Auth0User
+	if statusCode, errGet := apiGet.Call(ctx, &target); errGet != nil {
+		if statusCode == http.StatusNotFound {
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to verify fresh email-connection stub before delete",
+			"user_id", redaction.Redact(userID),
+			"status_code", statusCode,
+			"error", errGet,
+		)
+		return errors.NewUnexpected("failed to verify email-connection stub before delete", errGet)
+	}
+
+	if errIdentities := requireEmailConnectionOnly(&target); errIdentities != nil {
+		return errIdentities
+	}
+	if len(target.Identities) != 1 || target.Identities[0].ProfileData != nil {
+		return errors.NewForbidden("refusing to delete user that is not a standalone email profile")
+	}
+	if target.AppMetadata != nil && target.AppMetadata.SystemManaged {
+		return errors.NewForbidden("refusing to delete system-managed user")
+	}
+	createdAt, errParse := time.Parse(time.RFC3339, target.CreatedAt)
+	if errParse != nil {
+		return errors.NewForbidden("refusing to delete user with a missing or unparsable created_at")
+	}
+	if now.Sub(createdAt) > discardMaxProfileAge {
+		return errors.NewForbidden("refusing to delete user created before the freshness window")
+	}
+	if target.LoginsCount > discardMaxLoginsCount {
+		return errors.NewForbidden("refusing to delete user that has logged in")
+	}
+
+	apiDelete := httpclient.NewAPIRequest(
+		u.httpClient,
+		httpclient.WithMethod(http.MethodDelete),
+		httpclient.WithURL(fmt.Sprintf("https://%s/api/v2/users/%s", u.config.Domain, url.PathEscape(userID))),
+		httpclient.WithToken(m2mToken),
+		httpclient.WithDescription("delete fresh email-connection stub user"),
+	)
+	if _, errDel := apiDelete.Call(ctx, nil); errDel != nil {
+		return errors.NewUnexpected("failed to delete email-connection stub user", errDel)
+	}
+	slog.InfoContext(ctx, "deleted fresh email-connection profile after refused link",
+		"user_id", redaction.Redact(userID),
+	)
+	return nil
+}
+
+// DiscardVerifiedEmailProfile attempts bounded cleanup of a candidate standalone
+// profile after an OTP exchange. The subject comes from the ID token Auth0 just
+// returned. Only an already-cached M2M token is used: cleanup never waits for a
+// refresh. The deletion still requires deleteFreshEmailConnectionStub's guard.
+func (u *userReaderWriter) DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error {
+	if authResponse == nil || strings.TrimSpace(authResponse.IDToken) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, discardProfileTimeout)
+	defer cancel()
+
+	sub, errSubject := jwt.ExtractSubject(ctx, authResponse.IDToken)
+	if errSubject != nil {
+		return errors.NewValidation("invalid identity token: unable to extract subject", errSubject)
+	}
+
+	m2mToken, errToken := u.config.M2MTokenManager.cachedAccessToken(ctx)
+	if errToken != nil {
+		return errors.NewUnexpected("failed to get M2M token", errToken)
+	}
+
+	return u.deleteFreshEmailConnectionStub(ctx, sub, m2mToken, time.Now())
 }

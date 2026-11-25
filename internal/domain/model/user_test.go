@@ -434,6 +434,88 @@ func TestUserMetadata_userMetadataSanitize(t *testing.T) {
 		}
 	})
 
+	t.Run("every other string field is capped", func(t *testing.T) {
+		// Auth0 merges user_metadata keys on PATCH, so an uncapped field lets
+		// repeated updates grow the record far past anything a profile needs.
+		huge := strings.Repeat("a", 512*1024)
+		metadata := &UserMetadata{
+			Picture:            converters.StringPtr(huge),
+			Zoneinfo:           converters.StringPtr(huge),
+			Name:               converters.StringPtr(huge),
+			GivenName:          converters.StringPtr(huge),
+			FamilyName:         converters.StringPtr(huge),
+			JobTitle:           converters.StringPtr(huge),
+			Organization:       converters.StringPtr(huge),
+			OrganizationDomain: converters.StringPtr(huge),
+			Country:            converters.StringPtr(huge),
+			StateProvince:      converters.StringPtr(huge),
+			City:               converters.StringPtr(huge),
+			Address:            converters.StringPtr(huge),
+			PostalCode:         converters.StringPtr(huge),
+			PhoneNumber:        converters.StringPtr(huge),
+			TShirtSize:         converters.StringPtr(huge),
+		}
+
+		metadata.userMetadataSanitize()
+
+		want := map[string]struct {
+			got   *string
+			limit int
+		}{
+			"picture":             {metadata.Picture, pictureMaxLength},
+			"zoneinfo":            {metadata.Zoneinfo, metadataFieldMaxLength},
+			"name":                {metadata.Name, metadataFieldMaxLength},
+			"given_name":          {metadata.GivenName, metadataFieldMaxLength},
+			"family_name":         {metadata.FamilyName, metadataFieldMaxLength},
+			"job_title":           {metadata.JobTitle, metadataFieldMaxLength},
+			"organization":        {metadata.Organization, metadataFieldMaxLength},
+			"organization_domain": {metadata.OrganizationDomain, metadataFieldMaxLength},
+			"country":             {metadata.Country, metadataFieldMaxLength},
+			"state_province":      {metadata.StateProvince, metadataFieldMaxLength},
+			"city":                {metadata.City, metadataFieldMaxLength},
+			"address":             {metadata.Address, addressMaxLength},
+			"postal_code":         {metadata.PostalCode, metadataFieldMaxLength},
+			"phone_number":        {metadata.PhoneNumber, metadataFieldMaxLength},
+			"t_shirt_size":        {metadata.TShirtSize, metadataFieldMaxLength},
+		}
+		for field, tc := range want {
+			if tc.got == nil {
+				t.Fatalf("%s = nil, want truncated value", field)
+			}
+			if got := utf8.RuneCountInString(*tc.got); got != tc.limit {
+				t.Errorf("%s length = %d, want %d", field, got, tc.limit)
+			}
+		}
+	})
+
+	t.Run("a value within the cap is kept whole", func(t *testing.T) {
+		name := strings.Repeat("n", metadataFieldMaxLength)
+		metadata := &UserMetadata{Name: converters.StringPtr("  " + name + "  ")}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.Name == nil || *metadata.Name != name {
+			t.Errorf("Name was altered although it fits the cap")
+		}
+	})
+
+	t.Run("a multibyte field is truncated on a rune boundary without trailing space", func(t *testing.T) {
+		value := strings.Repeat("é", metadataFieldMaxLength-1) + " " + strings.Repeat("é", 10)
+		metadata := &UserMetadata{City: converters.StringPtr(value)}
+
+		metadata.userMetadataSanitize()
+
+		if metadata.City == nil {
+			t.Fatal("City = nil, want truncated value")
+		}
+		if !utf8.ValidString(*metadata.City) {
+			t.Error("City is not valid UTF-8 after truncation")
+		}
+		if want := strings.Repeat("é", metadataFieldMaxLength-1); *metadata.City != want {
+			t.Errorf("City rune length = %d, want %d", utf8.RuneCountInString(*metadata.City), metadataFieldMaxLength-1)
+		}
+	})
+
 	t.Run("multibyte bio is truncated on a rune boundary", func(t *testing.T) {
 		metadata := &UserMetadata{
 			Bio: converters.StringPtr(strings.Repeat("é", bioMaxLength+50)),

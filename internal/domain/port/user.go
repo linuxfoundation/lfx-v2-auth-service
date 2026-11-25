@@ -26,6 +26,13 @@ type UserReader interface {
 	MetadataLookup(ctx context.Context, input string, requiredScopes ...string) (*model.User, error)
 }
 
+// UserSearcher searches users on behalf of a caller that is allowed to
+// impersonate. Implementations must authorize subjectToken before querying the
+// identity provider.
+type UserSearcher interface {
+	SearchUsers(ctx context.Context, subjectToken, query string, limit int) ([]model.UserSearchResult, error)
+}
+
 // UserWriter defines the behavior of the user writer
 type UserWriter interface {
 	UpdateUser(ctx context.Context, user *model.User) (*model.User, error)
@@ -43,6 +50,10 @@ type IdentityLinker interface {
 type EmailHandler interface {
 	SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error
 	VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error)
+	// DiscardVerifiedEmailProfile removes the standalone profile a successful
+	// VerifyAlternateEmail may have created, when the link is then refused.
+	// Providers with no external profile return nil.
+	DiscardVerifiedEmailProfile(ctx context.Context, authResponse *model.AuthResponse) error
 }
 
 // PasswordHandler defines the behavior of the password handler

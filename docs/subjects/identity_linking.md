@@ -15,6 +15,8 @@ This document describes the NATS subjects for listing, linking, and unlinking id
 
 Retrieves all identities linked to the authenticated user's account.
 
+`user.auth_token` must be a token the backend verifies (a JWT, or an Authelia access token). A bare `sub` or username is rejected with `a valid JWT token is required`.
+
 **Subject:** `lfx.auth-service.user_identity.list`
 **Pattern:** Request/Reply
 
@@ -38,6 +40,7 @@ Retrieves all identities linked to the authenticated user's account.
     {
       "provider": "google-oauth2",
       "user_id": "google123",
+      "connection": "google-oauth2",
       "isSocial": true,
       "profileData": {
         "email": "user@gmail.com",
@@ -47,11 +50,20 @@ Retrieves all identities linked to the authenticated user's account.
     {
       "provider": "github",
       "user_id": "gh456",
+      "connection": "github",
+      "isSocial": true
+    },
+    {
+      "provider": "oauth2",
+      "user_id": "gitlab|789",
+      "connection": "gitlab",
       "isSocial": true
     }
   ]
 }
 ```
+
+`connection` is the Auth0 connection name the identity signed in through. It is the only way to tell generic OAuth2 accounts apart: a GitLab account has `provider: "oauth2"` and `connection: "gitlab"`. The field is omitted when the backend has no connection for the identity (Authelia, mock). Unlinking still uses `provider` and `user_id` as returned here, so a GitLab identity is removed with `provider: "oauth2"`.
 
 **Error Reply:**
 ```json
@@ -67,7 +79,7 @@ Retrieves all identities linked to the authenticated user's account.
 |---|---|
 | **Auth0** | Fetched live from the Auth0 Management API on each call |
 | **Authelia** | Read from the NATS KV user bucket; populated when `user_identity.link` is called |
-| **Mock** | Pre-seeded via `users.yaml` or added at runtime via `user_identity.link` |
+| **Mock** | Pre-seeded via `users.yaml`; `user_identity.link` is refused because the mock cannot verify tokens |
 
 ### Example using NATS CLI
 
@@ -230,7 +242,7 @@ Both operations use optimistic concurrency on the NATS KV bucket — a `conflict
 
 ### Mock
 
-The Mock implementation follows the same sub-prefix dispatch and storage targets as Authelia, using an in-memory map instead of NATS KV. No external provider call is made. Social identity tokens passed to `user_identity.link` are parsed unverified — a crafted JWT with the correct `sub` claim is sufficient.
+The Mock cannot verify tokens, so it refuses `user_identity.link` and `user_identity.unlink` requests before they reach the adapter. Identities can only be pre-seeded via `users.yaml`.
 ---
 
 ## Email Verification Flow

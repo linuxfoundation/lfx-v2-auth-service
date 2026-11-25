@@ -46,7 +46,7 @@ The service automatically determines the lookup strategy based on input format:
 
 - **Token Strategy**: If input is a JWT/Authelia token, validates the token and extracts the subject identifier
 - **Canonical Lookup**: If input contains `|` (pipe character) or is a UUID, treats as subject identifier for direct lookup
-- **Username Search**: If input doesn't match above patterns, treats as username for search lookup
+- **Username Search**: If input doesn't match above patterns, treats it as a username, searches for the account, then fetches its current user record directly from the identity provider (by user ID for Auth0, or by username for Authelia). Metadata is not returned from the search snapshot; a failed current-record fetch returns an error.
 
 ### Reply
 
@@ -220,8 +220,9 @@ nats request lfx.auth-service.user_metadata.update '{
 ```
 
 **Important Notes:**
-- The service works with Auth0, Authelia, and mock repositories based on configuration
+- The service works with Auth0 and Authelia repositories based on configuration; the mock repository refuses updates because it cannot verify tokens
 - `bio` is trimmed and capped at 2000 characters; longer values are silently truncated rather than rejected
+- Every other string field is trimmed and capped the same way: `picture` at 4096 characters, `address` at 1000, and all remaining fields (`name`, `given_name`, `family_name`, `job_title`, `organization`, `organization_domain`, `country`, `state_province`, `city`, `postal_code`, `phone_number`, `t_shirt_size`, `zoneinfo`) at 255
 - `skills` accepts a comma-separated string and is normalized before storage: items are trimmed, empty items are dropped, and duplicates are removed via Unicode case folding (case-insensitive, so `"Go"` and `"go"` are treated as the same skill); when duplicates collide, the first occurrence's casing is kept
 - The raw `skills` input is capped at 4000 characters before it is split, and at most 50 unique, non-empty items are kept while splitting (empty segments and duplicates don't consume the quota); if the 4000-character cut lands inside an item, that whole item is dropped (never stored as a fragment), and if it lands inside the first item the value normalizes to empty — both caps apply before the final cap below
 - The final normalized value (items joined with `", "`) is capped at 2000 characters; each item is kept whole if it fits within that cap and dropped whole (not truncated) if it doesn't, so a later, shorter item still gets a chance to fit even if an earlier one was dropped for being too long — except when no item fits at all, in which case the first item is hard-truncated to 2000 characters since there would otherwise be nothing left to keep

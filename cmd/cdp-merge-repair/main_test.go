@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -312,15 +313,18 @@ func (s *aliasTargetClient) ListIdentities(ctx context.Context, memberID string)
 
 func TestTallyRedactedKeepsIdentifiersOutOfLogs(t *testing.T) {
 	out := tallyReport{
-		Repairs:             []repairRecord{{UserID: "auth0|johndoe123", Before: "d6f4a060-f818-4fab-bf36-73032634fe7c", After: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}},
-		ErrorSamples:        []checkError{{UserID: "auth0|janedoe456", Message: "boom"}},
+		Repairs: []repairRecord{{UserID: "auth0|johndoe123", Before: "d6f4a060-f818-4fab-bf36-73032634fe7c", After: "0a1b2c3d-4e5f-6789-abcd-ef0123456789"}},
+		ErrorSamples: []checkError{
+			{UserID: "auth0|janedoe456", Message: "boom"},
+			{UserID: "auth0|janedoe456", Message: "stored member 5e6f7a8b-1c2d-4e3f-9a0b-1c2d3e4f5a6b moved"},
+		},
 		EnumerationWarnings: []checkError{{UserID: "google-oauth2|1234567890", Message: "malformed"}},
 	}
 	out.Counters.Add(mergerepair.VerdictRepaired)
 
 	raw, err := json.Marshal(out.redacted())
 	require.NoError(t, err)
-	for _, secret := range []string{"johndoe123", "janedoe456", "1234567890", "d6f4a060-f818", "0a1b2c3d-4e5f"} {
+	for _, secret := range []string{"johndoe123", "janedoe456", "1234567890", "d6f4a060-f818", "0a1b2c3d-4e5f", "5e6f7a8b-1c2d"} {
 		assert.NotContains(t, string(raw), secret)
 	}
 	assert.Contains(t, string(raw), `"identifiers_redacted":true`)
@@ -387,6 +391,53 @@ func TestRunStdoutTallyRedactsIdentifiers(t *testing.T) {
 	assert.Contains(t, string(raw), "auth0|johndoe123", "the --out copy stays actionable")
 	assert.Contains(t, string(raw), "0a1b2c3d-4e5f-6789-abcd-ef0123456789")
 	assert.Contains(t, string(raw), `"identifiers_redacted": false`)
+}
+
+func TestRunStdoutTallyRedactsTransportErrorURLs(t *testing.T) {
+	// A CDP transport failure surfaces the *url.Error text, request URL and
+	// stored member id included; the stdout tally must not carry that id.
+	ctx := context.Background()
+	const storedUUID = "d6f4a060-f818-4fab-bf36-73032634fe7c"
+	population := []holderUser{
+		{UserID: "auth0|johndoe123", Username: "psmith", EmailVerified: true, StoredUUID: storedUUID},
+	}
+	newDeps := func(stdout io.Writer) repairDeps {
+		return repairDeps{
+			client: &stubCDPClient{
+				listFn: func(_ context.Context, memberID string) ([]cdp.MemberIdentity, error) {
+					return nil, lferrors.NewUnexpected("CDP member identities list failed", lferrors.NewUnexpected("API request failed",
+						fmt.Errorf("failed to make request: %w", &url.Error{
+							Op:  "Get",
+							URL: "https://cdp.example.com/v1/members/" + memberID + "/identities",
+							Err: context.DeadlineExceeded,
+						})))
+				},
+			},
+			writer: &stubWriter{},
+			list: func(context.Context) ([]holderUser, []string, error) {
+				return population, nil, nil
+			},
+			stdout: stdout,
+		}
+	}
+
+	var stdout bytes.Buffer
+	code, err := run(ctx, newDeps(&stdout), repairOptions{ratePerMinute: 6000, dryRun: true, direction: directionAsc})
+	require.NoError(t, err)
+	assert.Equal(t, 1, code)
+	logged := stdout.String()
+	for _, secret := range []string{"johndoe123", storedUUID, "d6f4a060-f818"} {
+		assert.NotContains(t, logged, secret)
+	}
+	assert.Contains(t, logged, `"errors": 1`)
+	assert.Contains(t, logged, "deadline exceeded", "diagnostics survive redaction")
+
+	outPath := filepath.Join(t.TempDir(), "tally.json")
+	_, err = run(ctx, newDeps(nil), repairOptions{ratePerMinute: 6000, dryRun: true, outPath: outPath, direction: directionAsc})
+	require.NoError(t, err)
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), storedUUID, "the --out copy stays actionable")
 }
 
 func TestRunEnumerationFailureStillEmitsATally(t *testing.T) {

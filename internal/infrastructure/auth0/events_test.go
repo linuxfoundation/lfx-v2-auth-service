@@ -385,6 +385,31 @@ func TestSubscribeStream(t *testing.T) {
 			"the last thing the caller sees must be the dropped frame's position")
 	})
 
+	t.Run("a line far past the per-line cap is drained, not a connection failure", func(t *testing.T) {
+		// Failing part-way through the line would leave the cursor before the
+		// frame, so every reconnect would meet it first and nothing behind it
+		// would ever arrive. The `id` follows the payload here, so it can only
+		// be learnt by draining the whole line.
+		huge := strings.Repeat("x", 9*maxEventLineBytes)
+		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeSSE(w,
+				"event: user.created\nid: off-1\ndata: {\"offset\":\"off-1\"}\n\n",
+				"event: user.updated\ndata: "+huge+"\nid: off-2\n\n",
+				"event: user.created\nid: off-3\ndata: {\"offset\":\"off-3\"}\n\n",
+			)
+		})
+
+		messages, err := collect(t, server, SubscribeOptions{})
+
+		require.NoError(t, err, "an outsized line must not fail the connection")
+		require.Len(t, messages, 3)
+		assert.Equal(t, EventTypeOffsetOnly, messages[1].Type, "the frame is dropped")
+		assert.Equal(t, "off-2", messages[1].Offset, "the position moves past the dropped frame")
+		assert.Empty(t, messages[1].Data)
+		assert.Equal(t, "user.created", messages[2].Type, "the event behind it is still delivered")
+		assert.Equal(t, "off-3", messages[2].Offset)
+	})
+
 	t.Run("a retry hint does not dispatch a message", func(t *testing.T) {
 		server := newEventsServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeSSE(w,

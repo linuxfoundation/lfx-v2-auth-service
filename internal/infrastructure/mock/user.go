@@ -114,124 +114,14 @@ func (u *userWriter) SearchUser(ctx context.Context, user *model.User, criteria 
 	return result, nil
 }
 
-// UpdateUser applies the provided changes to a mock user record.
-func (u *userWriter) UpdateUser(ctx context.Context, user *model.User) (*model.User, error) {
-	slog.InfoContext(ctx, "mock: updating user", "user", user)
-
-	// For mock implementation, we'll use user_id, sub, username, or primary email as key
-	key := user.UserID
-	if key == "" {
-		key = user.Sub
-	}
-	if key == "" {
-		key = user.Username
-	}
-	if key == "" {
-		key = user.PrimaryEmail
-	}
-
-	if key == "" {
-		return nil, fmt.Errorf("mock: user identifier (user_id, sub, username, or primary email) is required")
-	}
-
-	// Get existing user from storage
-	existingUser, exists := u.users[key]
-	if !exists {
-		// If user doesn't exist, create a new one with the provided data
-		u.users[key] = user
-		slog.InfoContext(ctx, "mock: new user created in storage", "key", key)
-		return user, nil
-	}
-
-	// PATCH-style update: only update fields that are provided (non-empty/non-nil)
-	updatedUser := *existingUser // Create a copy of the existing user
-
-	// Update basic fields only if they're provided (non-empty)
-	if user.Token != "" {
-		updatedUser.Token = user.Token
-	}
-	if user.UserID != "" {
-		updatedUser.UserID = user.UserID
-	}
-	if user.Sub != "" {
-		updatedUser.Sub = user.Sub
-	}
-	if user.Username != "" {
-		updatedUser.Username = user.Username
-	}
-	if user.PrimaryEmail != "" {
-		updatedUser.PrimaryEmail = user.PrimaryEmail
-	}
-
-	// Update UserMetadata only if it's provided (not nil)
-	if user.UserMetadata != nil {
-		if updatedUser.UserMetadata == nil {
-			// If existing user has no metadata, use the provided metadata
-			updatedUser.UserMetadata = user.UserMetadata
-		} else {
-			// Partial update of metadata fields - only update non-nil fields
-			if user.UserMetadata.Picture != nil {
-				updatedUser.UserMetadata.Picture = user.UserMetadata.Picture
-			}
-			if user.UserMetadata.Zoneinfo != nil {
-				updatedUser.UserMetadata.Zoneinfo = user.UserMetadata.Zoneinfo
-			}
-			if user.UserMetadata.Name != nil {
-				updatedUser.UserMetadata.Name = user.UserMetadata.Name
-			}
-			if user.UserMetadata.GivenName != nil {
-				updatedUser.UserMetadata.GivenName = user.UserMetadata.GivenName
-			}
-			if user.UserMetadata.FamilyName != nil {
-				updatedUser.UserMetadata.FamilyName = user.UserMetadata.FamilyName
-			}
-			if user.UserMetadata.JobTitle != nil {
-				updatedUser.UserMetadata.JobTitle = user.UserMetadata.JobTitle
-			}
-			if user.UserMetadata.Organization != nil {
-				updatedUser.UserMetadata.Organization = user.UserMetadata.Organization
-			}
-			if user.UserMetadata.OrganizationDomain != nil {
-				updatedUser.UserMetadata.OrganizationDomain = user.UserMetadata.OrganizationDomain
-			}
-			if user.UserMetadata.Country != nil {
-				updatedUser.UserMetadata.Country = user.UserMetadata.Country
-			}
-			if user.UserMetadata.StateProvince != nil {
-				updatedUser.UserMetadata.StateProvince = user.UserMetadata.StateProvince
-			}
-			if user.UserMetadata.City != nil {
-				updatedUser.UserMetadata.City = user.UserMetadata.City
-			}
-			if user.UserMetadata.Address != nil {
-				updatedUser.UserMetadata.Address = user.UserMetadata.Address
-			}
-			if user.UserMetadata.PostalCode != nil {
-				updatedUser.UserMetadata.PostalCode = user.UserMetadata.PostalCode
-			}
-			if user.UserMetadata.PhoneNumber != nil {
-				updatedUser.UserMetadata.PhoneNumber = user.UserMetadata.PhoneNumber
-			}
-			if user.UserMetadata.TShirtSize != nil {
-				updatedUser.UserMetadata.TShirtSize = user.UserMetadata.TShirtSize
-			}
-			if user.UserMetadata.Bio != nil {
-				updatedUser.UserMetadata.Bio = user.UserMetadata.Bio
-			}
-			if user.UserMetadata.Skills != nil {
-				updatedUser.UserMetadata.Skills = user.UserMetadata.Skills
-			}
-		}
-	}
-
-	// Store the updated user back to storage
-	u.users[key] = &updatedUser
-	slog.InfoContext(ctx, "mock: user updated in storage with PATCH semantics", "key", key)
-
-	return &updatedUser, nil
+// UpdateUser refuses user_metadata.update requests. The mock cannot verify
+// the caller's token, so it must never let a caller change an account.
+func (u *userWriter) UpdateUser(ctx context.Context, _ *model.User) (*model.User, error) {
+	slog.WarnContext(ctx, "mock: user update rejected: token verification is not supported")
+	return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
 }
 
-// SendVerificationAlternateEmail is a no-op in the mock adapter.
+// SendVerificationAlternateEmail generates an in-memory OTP without delivering email.
 func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alternateEmail string) error {
 	slog.DebugContext(ctx, "mock: sending alternate email verification", "alternate_email", redaction.Redact(alternateEmail))
 
@@ -241,21 +131,7 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 		return errors.NewValidation("invalid email format")
 	}
 
-	// Check if email is already registered as primary or alternate email
 	normalizedEmail := strings.ToLower(strings.TrimSpace(alternateEmail))
-	for _, user := range u.users {
-		// Check primary email
-		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
-			return errors.NewValidation("alternate email already linked")
-		}
-		// Check alternate emails
-		for _, altEmail := range user.AlternateEmails {
-			if strings.ToLower(altEmail.Email) == normalizedEmail {
-				return errors.NewValidation("alternate email already linked")
-			}
-		}
-	}
-
 	// Generate a 6-digit OTP
 	otp, err := password.OnlyNumbers(6)
 	if err != nil {
@@ -279,6 +155,11 @@ func (u *userWriter) SendVerificationAlternateEmail(ctx context.Context, alterna
 	return nil
 }
 
+// DiscardVerifiedEmailProfile is a no-op: the mock keeps no external profile for a verified email.
+func (u *userWriter) DiscardVerifiedEmailProfile(_ context.Context, _ *model.AuthResponse) error {
+	return nil
+}
+
 // VerifyAlternateEmail simulates verifying an alternate email in the mock store.
 func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Email) (*model.AuthResponse, error) {
 	slog.DebugContext(ctx, "mock: verifying alternate email", "email", redaction.Redact(email.Email))
@@ -294,31 +175,18 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email.Email))
 
-	// Check if email is already linked (re-check to prevent race conditions)
-	for _, user := range u.users {
-		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
-			return nil, errors.NewValidation("alternate email already linked")
-		}
-		for _, altEmail := range user.AlternateEmails {
-			if strings.ToLower(altEmail.Email) == normalizedEmail {
-				return nil, errors.NewValidation("alternate email already linked")
-			}
-		}
-	}
-
-	// Verify OTP
-	u.otpMutex.RLock()
+	// Verify and consume the OTP atomically so concurrent requests cannot reuse it.
+	u.otpMutex.Lock()
 	entry, exists := u.otps[normalizedEmail]
-	u.otpMutex.RUnlock()
 
 	if !exists {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP not found or expired")
 	}
 
 	// Check if OTP is expired
 	if time.Now().After(entry.expiresAt) {
 		// Clean up expired OTP
-		u.otpMutex.Lock()
 		delete(u.otps, normalizedEmail)
 		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("OTP expired")
@@ -326,13 +194,26 @@ func (u *userWriter) VerifyAlternateEmail(ctx context.Context, email *model.Emai
 
 	// Verify OTP matches
 	if entry.otp != email.OTP {
+		u.otpMutex.Unlock()
 		return nil, errors.NewValidation("invalid OTP")
 	}
 
-	// OTP is valid, clean it up
-	u.otpMutex.Lock()
+	// Consume successful OTP proof before inspecting linked state.
 	delete(u.otps, normalizedEmail)
 	u.otpMutex.Unlock()
+
+	// SearchUser does not index alternate emails, so the orchestrator's holder
+	// check cannot see them here; mirror its policy (verified alternates only).
+	for _, user := range u.users {
+		if strings.ToLower(user.PrimaryEmail) == normalizedEmail {
+			return nil, errors.NewValidation("alternate email already linked")
+		}
+		for _, altEmail := range user.AlternateEmails {
+			if strings.ToLower(altEmail.Email) == normalizedEmail && altEmail.Verified {
+				return nil, errors.NewValidation("alternate email already linked")
+			}
+		}
+	}
 
 	// Generate an identity token for the verified email using email| sub prefix
 	idToken, err := jwt.GenerateSimpleTestIdentityTokenWithSubject(email.Email, fmt.Sprintf("email|%s", normalizedEmail), 1*time.Hour)
@@ -613,9 +494,18 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 		return nil, errors.NewValidation("input is required")
 	}
 
+	// Scope-gated lookups authorize writes. The mock parses JWTs without
+	// verifying their signature or scopes, so it can never prove who the caller
+	// is and must not authorize a write.
+	if len(requiredScopes) > 0 {
+		slog.WarnContext(ctx, "mock: scope-gated metadata lookup rejected: token verification is not supported")
+		return nil, errors.NewUnauthorized("the mock backend cannot verify tokens; write requests are not supported")
+	}
+
 	user := &model.User{}
 
 	// First, try to parse as JWT token to extract the sub
+	subFromJWT := false
 	if cleanToken, isJWT := jwt.LooksLikeJWT(input); isJWT {
 		sub, err := u.extractSubFromJWT(ctx, cleanToken)
 		if err != nil {
@@ -624,9 +514,14 @@ func (u *userWriter) MetadataLookup(ctx context.Context, input string, requiredS
 		} else {
 			// Successfully extracted sub from JWT
 			input = sub
+			subFromJWT = true
 			slog.InfoContext(ctx, "mock: extracted sub from JWT", "sub", sub)
 		}
 	}
+	// The mock never checks signatures; it treats a parsed JWT as the caller's
+	// own token so self-service reads keep working in local development. Writes
+	// stay refused above via the scope gate.
+	user.PrincipalVerified = subFromJWT
 
 	// Determine lookup strategy based on input format
 	switch {

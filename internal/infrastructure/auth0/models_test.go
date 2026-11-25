@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestAuth0User_ToUser verifies conversion of Auth0 users and linked identities,
+// preserving connection names, provider identifiers, and profile metadata.
 func TestAuth0User_ToUser(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -73,6 +75,28 @@ func TestAuth0User_ToUser(t *testing.T) {
 				assert.True(t, id.IsSocial)
 				assert.Empty(t, id.Email)
 				assert.False(t, id.EmailVerified)
+			},
+		},
+		{
+			name: "generic oauth2 identity keeps connection name",
+			auth0User: Auth0User{
+				UserID: "auth0|abc123",
+				Identities: []Auth0Identity{
+					{
+						Connection: "gitlab",
+						Provider:   "oauth2",
+						UserID:     "gitlab|789",
+						IsSocial:   true,
+					},
+				},
+			},
+			validate: func(t *testing.T, user *model.User) {
+				require.Len(t, user.Identities, 1)
+				id := user.Identities[0]
+				assert.Equal(t, "oauth2", id.Provider)
+				assert.Equal(t, "gitlab", id.Connection)
+				assert.Equal(t, "gitlab|789", id.IdentityID)
+				assert.True(t, id.IsSocial)
 			},
 		},
 		{

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/auth0/go-auth0/authentication"
@@ -29,6 +30,9 @@ type TokenManager struct {
 	tokenSource oauth2.TokenSource
 	config      m2mConfig
 	authConfig  *authentication.Authentication
+	// cachedToken is an immutable snapshot from the last successful GetToken.
+	// Cleanup reads it without entering tokenSource's potentially blocking refresh.
+	cachedToken atomic.Pointer[oauth2.Token]
 }
 
 // m2mConfig holds the configuration for Auth0 M2M authentication
@@ -99,12 +103,29 @@ func (tm *TokenManager) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("token is not valid")
 	}
 
+	cached := *token
+	tm.cachedToken.Store(&cached)
+
 	slog.DebugContext(ctx, "M2M token retrieved successfully",
 		"token_type", token.TokenType,
 		"expires_at", token.Expiry,
 		"has_refresh_token", token.RefreshToken != "")
 
 	return token.AccessToken, nil
+}
+
+// cachedAccessToken never refreshes or waits for a refresh. Best-effort cleanup
+// must skip when no usable token is already available rather than block a reply.
+func (tm *TokenManager) cachedAccessToken(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if tm != nil {
+		if token := tm.cachedToken.Load(); token != nil && token.Valid() {
+			return token.AccessToken, nil
+		}
+	}
+	return "", fmt.Errorf("no valid cached M2M token available for cleanup")
 }
 
 // IsTokenExpired checks if the current token is expired

@@ -20,6 +20,7 @@ import (
 	errs "github.com/linuxfoundation/lfx-v2-auth-service/pkg/errors"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/httpclient"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/jwt"
+	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/password"
 	"github.com/linuxfoundation/lfx-v2-auth-service/pkg/redaction"
 )
 
@@ -174,6 +175,7 @@ func (u *userReaderWriter) MetadataLookup(ctx context.Context, input string, req
 		user.UserID = userInfo.Sub
 		user.Sub = userInfo.Sub
 		user.Username = userInfo.PreferredUsername
+		user.PrincipalVerified = true
 		return user, nil
 	}
 
@@ -199,27 +201,26 @@ func (a *userReaderWriter) UpdateUser(ctx context.Context, user *model.User) (*m
 		return nil, errs.NewValidation("user is required")
 	}
 
-	if user.Token != "" {
-		// Fetch user information from OIDC userinfo endpoint
-		userInfo, err := a.fetchOIDCUserInfo(ctx, user.Token)
-		if err != nil {
-			slog.WarnContext(ctx, "failed to fetch OIDC userinfo, skipping sub update",
-				"username", user.Username,
-				"error", err,
-			)
-		}
-		if userInfo != nil && userInfo.Sub != "" {
-			user.Sub = userInfo.Sub
-			slog.DebugContext(ctx, "updated user sub from OIDC userinfo",
-				"username", user.Username,
-				"preferred_username", userInfo.PreferredUsername,
-				"sub", userInfo.Sub,
-			)
-			if user.Username == "" {
-				user.Username = userInfo.PreferredUsername
-			}
-		}
+	// The token is the caller's only proof of identity: verify it against the
+	// OIDC userinfo endpoint and take the account to update exclusively from the
+	// verified response, never from caller-supplied fields.
+	// Return fetch errors as-is: a rejected token is already Unauthorized, while
+	// provider outages and misconfiguration stay distinguishable from bad tokens.
+	userInfo, err := a.fetchOIDCUserInfo(ctx, user.Token)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to verify token via OIDC userinfo", "error", err)
+		return nil, err
 	}
+	if userInfo == nil || strings.TrimSpace(userInfo.Sub) == "" || strings.TrimSpace(userInfo.PreferredUsername) == "" {
+		return nil, errs.NewUnauthorized("a valid token is required")
+	}
+	user.UserID = userInfo.Sub
+	user.Sub = userInfo.Sub
+	user.Username = userInfo.PreferredUsername
+	slog.DebugContext(ctx, "resolved user from OIDC userinfo",
+		"username", redaction.Redact(user.Username),
+		"sub", redaction.Redact(user.Sub),
+	)
 
 	if user.Sub == "" && user.Username == "" {
 		return nil, errs.NewValidation("username or sub is required")
@@ -287,24 +288,39 @@ func (a *userReaderWriter) SendVerificationAlternateEmail(ctx context.Context, a
 		return errs.NewValidation("alternate email is required")
 	}
 
-	otp, errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail)
-	if errSendEmail != nil {
-		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
-		return errs.NewUnexpected("failed to send email", errSendEmail)
+	otp, errGenerateOTP := password.OnlyNumbers(6)
+	if errGenerateOTP != nil {
+		slog.ErrorContext(ctx, "failed to generate OTP", "error", errGenerateOTP)
+		return errs.NewUnexpected("failed to generate OTP", errGenerateOTP)
 	}
 
+	// Store the code before sending it so the per-address resend limit is enforced
+	// before any email goes out.
 	user := &model.User{}
 	key := user.BuildAlternateEmailIndexKey(ctx, alternateEmail)
 	errCreateVerificationCode := a.storage.CreateVerificationCode(ctx, key, otp)
 	if errCreateVerificationCode != nil {
 		slog.ErrorContext(ctx, "failed to create verification code", "error", errCreateVerificationCode)
-		return errs.NewUnexpected("failed to create verification code", errCreateVerificationCode)
+		return errCreateVerificationCode
+	}
+
+	// If the send fails, the stored code is left in place rather than removed, so the
+	// attempt count and resend cooldown it carries are not reset.
+	errSendEmail := a.emailLinkingFlow.SendEmail(ctx, alternateEmail, otp)
+	if errSendEmail != nil {
+		slog.ErrorContext(ctx, "failed to send email", "error", errSendEmail)
+		return errs.NewUnexpected("failed to send email", errSendEmail)
 	}
 
 	slog.DebugContext(ctx, "alternate email verification initiated successfully",
 		"email", redaction.RedactEmail(alternateEmail),
 	)
 
+	return nil
+}
+
+// DiscardVerifiedEmailProfile is a no-op: Authelia keeps no external profile for a verified email.
+func (a *userReaderWriter) DiscardVerifiedEmailProfile(_ context.Context, _ *model.AuthResponse) error {
 	return nil
 }
 
@@ -318,13 +334,9 @@ func (a *userReaderWriter) VerifyAlternateEmail(ctx context.Context, email *mode
 	user := &model.User{}
 
 	key := user.BuildAlternateEmailIndexKey(ctx, email.Email)
-	otp, errGetVerificationCode := a.storage.GetVerificationCode(ctx, key)
-	if errGetVerificationCode != nil {
-		return nil, errGetVerificationCode
-	}
-
-	if otp != email.OTP {
-		return nil, errs.NewValidation("invalid verification code")
+	errConsumeVerificationCode := a.storage.ConsumeVerificationCode(ctx, key, email.OTP)
+	if errConsumeVerificationCode != nil {
+		return nil, errConsumeVerificationCode
 	}
 
 	expiresIn := 60 * time.Minute

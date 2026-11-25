@@ -9,7 +9,7 @@ The LFX v2 Auth Service provides authentication and profile access in the v2 Pla
 The service operates as a NATS-based microservice, responding to request/reply patterns on specific subjects.
 
 ### Prerequisites
-- Go 1.26.0+
+- Go 1.27.3+
 - NATS server
 - Auth0 configuration (optional, defaults to mock mode)
 - Kubernetes cluster (for local Authelia development setup)
@@ -69,6 +69,7 @@ has the full reference (subjects, payloads, examples):
 - **[Password Management](docs/subjects/password_management.md)** — change password and send reset links
 - **[Impersonation](docs/subjects/impersonation.md)** — exchange a token to act as another user
 - **[Aliases](docs/subjects/alias.md)** — claim a system-managed alias email
+- **[User Search](docs/subjects/user_search.md)** — search users by LFID, email, or name (impersonators only)
 - **[Indexer Contract](docs/indexer-contract.md)** — data sent to the indexer service (currently none)
 
 For end-to-end authentication flows, see **[Auth Flows](docs/auth-flows/README.md)**.
@@ -92,6 +93,7 @@ The Auth0 integration can be configured using environment variables:
 
 - `USER_REPOSITORY_TYPE`: Set to `"auth0"` to use Auth0 integration, or `"mock"` for local development
   - **If not set, defaults to `"mock"`**
+  - The mock backend cannot verify tokens, so it refuses requests that change a user's account (for example updating user metadata, setting the primary email, adding an alias, password changes, and identity linking)
 - `AUTH0_TENANT`: Auth0 tenant name (e.g., `"linuxfoundation"`, `"linuxfoundation-staging"`, `"linuxfoundation-dev"`)
   - **Required when using Auth0 repository type**
 - `AUTH0_DOMAIN`: Auth0 domain for Management API calls (e.g., `"sso.linuxfoundation.org"`)
@@ -128,6 +130,7 @@ To create a new release of the auth service:
 
 3. **The GitHub Actions workflow will automatically**:
    - Build and publish the container images (auth-service)
+   - Sign the container images with Cosign (keyless, by digest)
    - Package and publish the Helm chart to GitHub Pages
    - Publish the chart to GitHub Container Registry (GHCR)
    - Sign the chart with Cosign
@@ -142,6 +145,25 @@ To create a new release of the auth service:
 - Only update the chart `version` field when making releases - this represents the Helm chart version.
 - The container image tags are automatically managed by the consolidated CI/CD pipeline using the git tag.
 - Both container images (auth-service) and the Helm chart are published together in a single workflow.
+- Pull request builds (`ko-build-branch.yaml`) only verify the container build;
+  the workflow does not publish images or hold package write permission.
+
+### Verifying Release Images
+
+Release images are signed keylessly by the `ko-build-tag.yaml` workflow. Verify a
+release by pinning the signer to that workflow on a `v*` tag, not just checking that
+a signature exists:
+
+```bash
+repo='linuxfoundation/lfx-v2-auth-service'
+wf="ko-build-tag\\.yaml@refs/tags/v"
+id="^https://github\\.com/${repo}/\\.github/workflows/${wf}"
+for image in server cdp-merge-repair; do
+  cosign verify "ghcr.io/${repo}/${image}:v0.2.0" \
+    --certificate-identity-regexp "${id}" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+done
+```
 
 ## Development
 

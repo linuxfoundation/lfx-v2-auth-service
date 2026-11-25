@@ -131,6 +131,43 @@ func TestRedactEmail(t *testing.T) {
 	}
 }
 
+func TestRedactUUIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no uuid",
+			input:    "CDP member identities list failed: status code: 503",
+			expected: "CDP member identities list failed: status code: 503",
+		},
+		{
+			name:     "lowercase uuid in text",
+			input:    "member 0a1b2c3d-4e5f-6789-abcd-ef0123456789 not found",
+			expected: "member 0a1**** not found",
+		},
+		{
+			name:     "uppercase uuid in path",
+			input:    "/v1/members/0A1B2C3D-4E5F-6789-ABCD-EF0123456789/identities",
+			expected: "/v1/members/0A1****/identities",
+		},
+		{
+			name:     "uuid adjacent to word characters",
+			input:    "member_d6f4a060-f818-4fab-bf36-73032634fe7cx",
+			expected: "member_d6f****x",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RedactUUIDs(tt.input); got != tt.expected {
+				t.Errorf("RedactUUIDs(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestRedactJWTs(t *testing.T) {
 	// JWT-shaped strings built from repeated chars to avoid triggering secret scanners.
 	// Pattern: three base64url segments separated by dots, each ≥10 chars.

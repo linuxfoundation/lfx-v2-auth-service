@@ -79,8 +79,8 @@ func (m *mockStorageReaderWriter) CreateVerificationCode(ctx context.Context, em
 	return nil
 }
 
-func (m *mockStorageReaderWriter) GetVerificationCode(ctx context.Context, email string) (string, error) {
-	return "123456", nil
+func (m *mockStorageReaderWriter) ConsumeVerificationCode(ctx context.Context, email, otp string) error {
+	return nil
 }
 
 type mockOrchestrator struct {

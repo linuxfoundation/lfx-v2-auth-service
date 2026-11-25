@@ -16,9 +16,11 @@ jobs:
     name: Publish Container
     if: ${{ github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
+    # pull_request runs the workflow file from the PR head, so its author
+    # controls every step here. This job must never hold packages: write:
+    # it only verifies the container build and never pushes to GHCR.
     permissions:
       contents: read
-      packages: write
     steps:
       # checkout/setup-go versions here predate this workflow's SHA-pinning
       # pass and differ from ko-build-main.yaml/ko-build-tag.yaml (which were
@@ -27,7 +29,7 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
       - uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d  # v0.9
@@ -46,7 +48,6 @@ jobs:
         env:
           VERSION: ${{ steps.container_tag.outputs.tag }}
           GIT_COMMIT: ${{ github.sha }}
-          STEPS_CONTAINER_TAG_OUTPUTS_TAG: ${{ steps.container_tag.outputs.tag }}
         run: |
           BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
           export BUILD_TIME
@@ -55,6 +56,5 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v2-auth-service/cmd/server \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.sha }} \
-            -t "${STEPS_CONTAINER_TAG_OUTPUTS_TAG}" \
-            --sbom spdx
+            --push=false \
+            --sbom none
