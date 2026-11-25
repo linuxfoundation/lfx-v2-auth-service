@@ -1,0 +1,20 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+
+title = "gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for false positives"
+paths = [
+  # Test fixtures with placeholder passwords and unsigned sample JWTs.
+  '''pkg/jwt/parser_test\.go''',
+  '''pkg/httpclient/request_test\.go''',
+  '''internal/infrastructure/authelia/sync_test\.go''',
+  '''internal/service/message_handler_test\.go''',
+  # API docs with truncated example tokens and sample passwords.
+  '''docs/subjects/.*\.md''',
+  '''internal/infrastructure/auth0/README\.md''',
+]
