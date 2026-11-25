@@ -3,6 +3,9 @@
 
 title = "gitleaks config"
 
+[extend]
+useDefault = true
+
 [allowlist]
 description = "Allowlist for false positives"
 paths = [
