@@ -323,6 +323,10 @@ func startProvisioningConsumer(ctx context.Context) {
 	if !ok {
 		return
 	}
+	// The announcer keeps the tenant domain: the events override below applies
+	// only to the events client, since the stream host may not serve the
+	// Management API.
+	announcerConfig := auth0Config
 	// Production reaches Auth0 through a custom domain. The override exists
 	// because it is unconfirmed whether every custom domain serves
 	// /api/v2/events.
@@ -344,7 +348,7 @@ func startProvisioningConsumer(ctx context.Context) {
 
 	// The announcer is optional: if it cannot be built the consumer still
 	// provisions, and only the user_email_verified event is lost.
-	announcer := newEmailVerifiedAnnouncer(ctx, auth0Config)
+	announcer := newEmailVerifiedAnnouncer(ctx, announcerConfig)
 
 	lease := k8s.LeaseConfig{
 		Name:      constants.LeaseNameProvisioningConsumer,

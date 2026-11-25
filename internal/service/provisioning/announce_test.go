@@ -46,7 +46,7 @@ type mockEventPublisher struct {
 	published []publishedMessage
 }
 
-func (m *mockEventPublisher) Publish(_ context.Context, subject string, data []byte) error {
+func (m *mockEventPublisher) PublishConfirmed(_ context.Context, subject string, data []byte) error {
 	if m.err != nil {
 		return m.err
 	}
@@ -63,7 +63,7 @@ func announceState() port.UserAnnouncementState {
 	return port.UserAnnouncementState{EmailVerified: true, Email: "jane@example.com", Username: "jane"}
 }
 
-func newTestAnnouncer(t *testing.T, store port.UserAnnouncementStore, publisher port.EventPublisher) Announcer {
+func newTestAnnouncer(t *testing.T, store port.UserAnnouncementStore, publisher port.ConfirmedEventPublisher) Announcer {
 	t.Helper()
 
 	a, err := NewAnnouncer(store, publisher)
@@ -106,7 +106,6 @@ func TestAnnounce(t *testing.T) {
 		unverified := false
 		cases := map[string]Request{
 			"unverified":        {UserID: "auth0|1", EmailVerified: &unverified},
-			"unknown":           {UserID: "auth0|1"},
 			"already announced": {UserID: "auth0|1", EmailVerified: announceRequest().EmailVerified, AnnouncedAt: "2026-11-01T00:00:00Z"},
 			"no user id":        {EmailVerified: announceRequest().EmailVerified},
 		}
@@ -121,6 +120,17 @@ func TestAnnounce(t *testing.T) {
 				assert.Empty(t, publisher.published)
 			})
 		}
+	})
+
+	t.Run("a payload that omits the verified flag is decided by the record", func(t *testing.T) {
+		store := &mockAnnouncementStore{state: announceState()}
+		publisher := &mockEventPublisher{}
+
+		newTestAnnouncer(t, store, publisher).Announce(ctx, Request{UserID: "auth0|1"})
+
+		assert.Equal(t, 1, store.reads)
+		require.Len(t, publisher.published, 1)
+		assert.Equal(t, []string{"auth0|1"}, store.marked)
 	})
 
 	t.Run("the record overrides a stale payload", func(t *testing.T) {

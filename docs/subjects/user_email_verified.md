@@ -39,7 +39,7 @@ After a successful publish, the service records `email_verified_announced_at` on
 
 ## Delivery
 
-- **Best-effort, at-least-once.** A failed publish is logged and retried on the user's next stream event. If the publish succeeds but the marker write fails, the user can be announced again, so subscribers must be idempotent.
+- **Best-effort, with possible duplicates.** A failed publish is logged and retried on the user's next stream event. If the publish succeeds but the marker write fails, the user can be announced again, so subscribers must be idempotent.
 - **Core NATS.** A subscriber that is down or reconnecting when the event is published does not receive it.
 - **Requires the consumer.** The event is published only while the Auth0 events consumer runs, so `PROVISIONING_CONSUMER_ENABLED` and the CDP configuration it depends on must be set.
 - **Existing users.** Users who verified before this event existed are announced the next time the stream emits an event for them. There is no separate backfill.

@@ -43,12 +43,12 @@ type Announcer interface {
 
 type announcer struct {
 	store     port.UserAnnouncementStore
-	publisher port.EventPublisher
+	publisher port.ConfirmedEventPublisher
 	now       func() time.Time
 }
 
 // NewAnnouncer creates the announcer.
-func NewAnnouncer(store port.UserAnnouncementStore, publisher port.EventPublisher) (Announcer, error) {
+func NewAnnouncer(store port.UserAnnouncementStore, publisher port.ConfirmedEventPublisher) (Announcer, error) {
 	if store == nil {
 		return nil, errs.NewValidation("an announcement store is required")
 	}
@@ -61,15 +61,15 @@ func NewAnnouncer(store port.UserAnnouncementStore, publisher port.EventPublishe
 // Announce runs the cheap payload pre-filter, re-reads the user from Auth0, then
 // publishes and records the marker.
 //
-// The marker is written only after a successful publish, so a failed publish
+// The marker is written only after the server confirms the publish, so a failed publish
 // is retried on the user's next stream event. The reverse failure, a publish
 // that succeeded followed by a marker write that failed, can announce a user
 // twice, which consumers must tolerate: the stream itself is at-least-once.
 func (a *announcer) Announce(ctx context.Context, req Request) {
-	// Only an explicit true qualifies here. The stream fires on every user
-	// mutation, so this keeps the common non-verified delivery off the
-	// Management API.
-	if req.EmailVerified == nil || !*req.EmailVerified {
+	// Only an explicit false is skipped here. The stream fires on every user
+	// mutation, and a payload that omits the flag is unknown rather than
+	// unverified, so it goes on to the Auth0 re-check below.
+	if req.EmailVerified != nil && !*req.EmailVerified {
 		return
 	}
 	if strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.AnnouncedAt) != "" {
@@ -110,7 +110,7 @@ func (a *announcer) Announce(ctx context.Context, req Request) {
 		return
 	}
 
-	if err := a.publisher.Publish(ctx, constants.UserEmailVerifiedSubject, data); err != nil {
+	if err := a.publisher.PublishConfirmed(ctx, constants.UserEmailVerifiedSubject, data); err != nil {
 		slog.WarnContext(ctx, "failed to publish user email verified event",
 			"error", err,
 			"user_id", redaction.Redact(req.UserID),
