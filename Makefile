@@ -23,7 +23,7 @@ GOARCH := amd64
 GOA_VERSION := $(shell go list -m -f '{{.Version}}' goa.design/goa/v3)
 
 # Keep the local MegaLinter image in sync with the workflow.
-MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:42e091a4bcbe9141fe420c2520ed7addf75ae60a0c9d42e3df1278eef1c90a88  # v10.1.0
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:e676b8e9dac00d148bf1abb6ab809f1df76f07e804d8061f78631975d0c90925  # v10.2.0
 
 # Linting
 GOLANGCI_LINT_VERSION := v2.15.0
