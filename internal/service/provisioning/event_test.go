@@ -117,3 +117,19 @@ func TestEventUserToRequest(t *testing.T) {
 		assert.True(t, user.ToRequest().HasDatabaseIdentity)
 	})
 }
+
+func TestEventUserToRequestAnnouncedAt(t *testing.T) {
+	t.Run("an announcement marker is carried onto the request", func(t *testing.T) {
+		_, user, err := ParseEvent([]byte(`{"id":"e","type":"user.updated","data":{"object":{"user_id":"auth0|1","app_metadata":{"email_verified_announced_at":"2026-11-24T12:00:00Z"}}}}`))
+		require.NoError(t, err)
+
+		assert.Equal(t, "2026-11-24T12:00:00Z", user.ToRequest().AnnouncedAt)
+	})
+
+	t.Run("no marker leaves it empty", func(t *testing.T) {
+		_, user, err := ParseEvent([]byte(`{"id":"e","type":"user.updated","data":{"object":{"user_id":"auth0|1"}}}`))
+		require.NoError(t, err)
+
+		assert.Empty(t, user.ToRequest().AnnouncedAt)
+	})
+}

@@ -51,6 +51,11 @@ type Request struct {
 	// Auth0 database connection.
 	HasDatabaseIdentity bool
 
+	// AnnouncedAt is the `email_verified_announced_at` carried on the event
+	// payload. Its presence means the user's verified email was already
+	// announced.
+	AnnouncedAt string
+
 	// DisplayName seeds a newly created CDP member.
 	DisplayName string
 }
