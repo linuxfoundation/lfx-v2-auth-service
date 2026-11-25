@@ -27,8 +27,8 @@ RUN go build -o /go/bin/auth-service -trimpath -ldflags="-w -s" github.com/linux
 # Run our go binary standalone
 FROM cgr.dev/chainguard/static:latest
 
-# Implicit with base image; setting explicitly for linters.
-USER nonroot
+# Run as the Chainguard nonroot user.
+USER 65532
 
 # Expose port 8080 for health checks and metrics (if needed)
 EXPOSE 8080
