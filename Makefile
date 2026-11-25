@@ -17,9 +17,13 @@ HELM_RELEASE_NAME=lfx-v2-auth-service
 HELM_NAMESPACE=lfx
 
 # Go
-GO_VERSION := 1.27.3
+GO_VERSION := 1.26.11
 GOOS := linux
 GOARCH := amd64
+GOA_VERSION := $(shell go list -m -f '{{.Version}}' goa.design/goa/v3)
+
+# Keep the local MegaLinter image in sync with the workflow.
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:42e091a4bcbe9141fe420c2520ed7addf75ae60a0c9d42e3df1278eef1c90a88  # v10.1.0
 
 # Linting
 GOLANGCI_LINT_VERSION := v2.15.0
@@ -38,7 +42,7 @@ setup-dev: ## Setup development tools
 .PHONY: deps
 deps: ## Install dependencies
 	@echo "Installing dependencies..."
-	go install goa.design/goa/v3/cmd/goa@latest
+	go install goa.design/goa/v3/cmd/goa@$(GOA_VERSION)
 
 .PHONY: apigen
 apigen: deps ## Generate API code using Goa
@@ -55,6 +59,11 @@ lint: ## Run golangci-lint (local Go linting)
 	@echo "Running golangci-lint..."
 	@which golangci-lint >/dev/null 2>&1 || (echo "Installing golangci-lint..." && go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	@golangci-lint run ./... && echo "==> Lint OK"
+
+.PHONY: megalinter
+megalinter: ## Run MegaLinter locally using Docker
+	docker pull $(MEGALINTER_IMAGE)
+	docker run --rm --platform linux/amd64 -e GOTOOLCHAIN=auto -v '$(CURDIR):/tmp/lint:rw' $(MEGALINTER_IMAGE)
 
 # Format code
 .PHONY: fmt
