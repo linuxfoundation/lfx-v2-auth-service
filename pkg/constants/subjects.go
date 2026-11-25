@@ -33,6 +33,12 @@ const (
 	// UserProfileUpdatedSubject is published after a successful user_metadata update.
 	// Consumers use this to sync profile changes to other systems (e.g. v1 platform DB).
 	UserProfileUpdatedSubject = "lfx.user_profile.updated"
+
+	// UserEmailVerifiedSubject is published once per user, when the Auth0 events
+	// stream first shows that user with a verified primary email.
+	// Consumers use it to reconcile data keyed by email (e.g. role entries added
+	// before the person had an account) onto the new account.
+	UserEmailVerifiedSubject = "lfx.auth-service.user_email_verified"
 )
 
 const (

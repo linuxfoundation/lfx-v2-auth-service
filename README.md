@@ -70,6 +70,7 @@ has the full reference (subjects, payloads, examples):
 - **[Impersonation](docs/subjects/impersonation.md)** — exchange a token to act as another user
 - **[Aliases](docs/subjects/alias.md)** — claim a system-managed alias email
 - **[User Search](docs/subjects/user_search.md)** — search users by LFID, email, or name (impersonators only)
+- **[User Email Verified](docs/subjects/user_email_verified.md)** — event published when a user is first seen with a verified email
 - **[Indexer Contract](docs/indexer-contract.md)** — data sent to the indexer service (currently none)
 
 For end-to-end authentication flows, see **[Auth Flows](docs/auth-flows/README.md)**.

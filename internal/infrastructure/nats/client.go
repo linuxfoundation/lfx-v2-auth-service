@@ -132,6 +132,22 @@ func (c *NATSClient) Publish(ctx context.Context, subject string, data []byte) e
 	return nil
 }
 
+// publishConfirmTimeout bounds how long PublishConfirmed waits for the server
+// to acknowledge a message.
+const publishConfirmTimeout = 5 * time.Second
+
+// PublishConfirmed publishes a message and then flushes the connection, so it
+// returns nil only after the server has processed everything sent so far. A
+// plain Publish returns once the message is buffered locally.
+func (c *NATSClient) PublishConfirmed(ctx context.Context, subject string, data []byte) error {
+	if err := c.Publish(ctx, subject, data); err != nil {
+		return err
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, publishConfirmTimeout)
+	defer cancel()
+	return c.conn.FlushWithContext(flushCtx)
+}
+
 // SubscribeWithTransportMessenger subscribes to a subject with proper TransportMessenger handling
 func (c *NATSClient) SubscribeWithTransportMessenger(ctx context.Context, subject string, queueName string, handler func(context.Context, port.TransportMessenger)) (*nats.Subscription, error) {
 
